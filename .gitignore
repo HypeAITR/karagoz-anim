@@ -1,0 +1,22 @@
+# secrets: never commit
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# python
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+dist/
+build/
+*.egg-info/
+
+# generated media and caches
+out/
+cache/
+*.mp4
