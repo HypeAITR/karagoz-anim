@@ -356,3 +356,41 @@ def test_default_checker_rejects_cross_file_error(prod: Path, skills: Path, tmp_
     assert t.state is State.QUESTION
     assert any("anchor.unknown_beat" in n for n in t.notes)
     assert not (prod / EP / "lines.yaml").exists()
+
+
+def test_saved_task_gets_new_definition_and_reruns(prod: Path, skills: Path, tmp_path: Path) -> None:
+    s = studio(prod, skills, tmp_path, FakeAgent())
+    s.run()
+    s.approve("ep/director")
+    s.run(until="timer")
+    assert states(s)["sh01/timer"] is State.DONE
+    # simulate a board saved by an older version: the timer had no voice input and no timings
+    path = prod / EP / "run" / "tasks.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    for t in data["tasks"]:
+        if t["id"] == "sh01/timer":
+            t["inputs"] = ["sh01/layout"]
+            t["files_in"] = [f for f in t["files_in"] if not f.endswith(".align.json")]
+            t["input_digest"] = "digest-of-the-old-files_in"  # an old board stored the digest of its old inputs
+    path.write_text(json.dumps(data), encoding="utf-8")
+    agent = FakeAgent()
+    s2 = studio(prod, skills, tmp_path, agent)
+    s2.run(until="timer")
+    timer = s2.board.tasks["sh01/timer"]
+    assert timer.inputs == ["sh01/layout", "ep/voice"]
+    assert any(f.endswith("L02.align.json") for f in timer.files_in)
+    assert [b.task_id for b in agent.briefs] == ["sh01/timer"]  # only the timer ran again
+    assert timer.state is State.DONE
+    notes = [e for e in read_events(prod / EP / "run" / "events.jsonl") if e["kind"] == "note"]
+    assert any(
+        e["task"] == "sh01/timer" and "definition updated" in e["text"] and "files_in" in e["text"] for e in notes
+    )
+
+
+def test_unchanged_definition_logs_nothing(prod: Path, skills: Path, tmp_path: Path) -> None:
+    s = studio(prod, skills, tmp_path, FakeAgent())
+    s.run()
+    s2 = studio(prod, skills, tmp_path, FakeAgent())
+    s2.run()
+    notes = [e for e in read_events(prod / EP / "run" / "events.jsonl") if e["kind"] == "note"]
+    assert not any("definition updated" in e.get("text", "") for e in notes)
