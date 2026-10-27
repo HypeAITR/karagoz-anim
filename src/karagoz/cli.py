@@ -228,6 +228,47 @@ def cmd_regress(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_regions(args: argparse.Namespace) -> int:
+    """Build a location's region map (places, front objects, scale) from its background with SAM."""
+    from karagoz.engine.regions import build_regions
+    from karagoz.meta.client import MetaClient
+    from karagoz.meta.sam import Sam
+
+    out_dir = Path(args.prod) / "locations" / args.location
+    background = out_dir / "background.png"
+    if not background.is_file():
+        print(f"error: {background} not found (draw the location first)", file=sys.stderr)
+        return 1
+    try:
+        regions = build_regions(background, args.location, args.objects, Sam(MetaClient()), out_dir)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    scale = regions["scale"]
+    print(f"scale: {scale['px_per_cm']} px/cm from {scale['source']}" if scale else "scale: none")
+    for obj in regions["objects"]:
+        print(f"object {obj['name']} {'front' if obj['front'] else ''}".rstrip())
+    for place in regions["places"]:
+        print(f"place {place['name']} ({place['kind']})")
+    print(str(out_dir / "regions.yaml"))
+    return 0
+
+
+def cmd_landmarks(args: argparse.Namespace) -> int:
+    """Measure the landmarks (head, face, feet, hip, hands, cups) of every body drawing of a shot."""
+    from karagoz.engine.landmarks import measure_shot
+    from karagoz.meta.client import MetaClient
+    from karagoz.meta.sam import Sam
+
+    try:
+        written = measure_shot(Path(args.prod), args.episode, args.shot, Sam(MetaClient()))
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"{len(written)} drawings measured")
+    return 0
+
+
 def cmd_questions(args: argparse.Namespace) -> int:
     """Count the questions agents asked: by department, difficulty and topic (T-60 measurement)."""
     from karagoz.studio.events import read_events
@@ -316,6 +357,18 @@ def build_parser() -> argparse.ArgumentParser:
     questions_p.add_argument("prod", help="production directory")
     questions_p.add_argument("episode", help="episode id")
     questions_p.set_defaults(func=cmd_questions)
+
+    regions_p = sub.add_parser("regions", help="build a location's region map from its background (SAM)")
+    regions_p.add_argument("prod", help="production directory")
+    regions_p.add_argument("location", help="location name (locations/<name>/background.png)")
+    regions_p.add_argument("objects", nargs="+", help='objects to look for, e.g. sofa "coffee table"')
+    regions_p.set_defaults(func=cmd_regions)
+
+    landmarks_p = sub.add_parser("landmarks", help="measure the landmarks of every body drawing of a shot (SAM)")
+    landmarks_p.add_argument("prod", help="production directory")
+    landmarks_p.add_argument("episode", help="episode id")
+    landmarks_p.add_argument("shot", help="shot id")
+    landmarks_p.set_defaults(func=cmd_landmarks)
     return parser
 
 
