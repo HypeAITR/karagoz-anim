@@ -404,3 +404,16 @@ def test_draw_asset_events_are_logged(prod: Path, skills: Path, tmp_path: Path) 
                                       "payload": {"path": "a.png", "kind": "pose", "status": "done"}})  # fmt: skip
     row = [e for e in events(prod) if e["kind"] == "agent"][-1]
     assert row["asset_kind"] == "pose" and row["status"] == "done" and row["path"] == "a.png"
+
+
+def test_raised_cap_in_studio_yaml_applies_to_a_saved_budget(prod: Path, skills: Path, tmp_path: Path) -> None:
+    """Maintainer's regression (28 Oct): the caps were read from run/budget.json once it existed, so raising
+    budget.unit_usd in studio.yaml had no effect."""
+    (prod / EP / "studio.yaml").write_text("version: 1\nhuman: off\nbudget: { unit_usd: 1.0, episode_usd: 10.0 }\n")
+    s = studio(prod, skills, tmp_path, FakeAgent())
+    s.run()
+    spent = dict(s.budget.spent)
+    assert spent and s.budget.unit_cap_usd == 1.0
+    (prod / EP / "studio.yaml").write_text("version: 1\nhuman: off\nbudget: { unit_usd: 3.0, episode_usd: 9.0 }\n")
+    s2 = studio(prod, skills, tmp_path, FakeAgent())
+    assert (s2.budget.unit_cap_usd, s2.budget.episode_cap_usd) == (3.0, 9.0) and s2.budget.spent == spent

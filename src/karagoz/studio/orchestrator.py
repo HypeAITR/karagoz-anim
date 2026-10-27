@@ -457,11 +457,11 @@ class Studio:
         else:
             self.board = Board(plan_tasks(self.prod, self.episode))
         budget_path = self._run_dir / "budget.json"
+        # The caps always come from studio.yaml (a human may raise them); budget.json only carries what was spent.
+        self.budget = Budget(float(budget_cfg["unit_usd"]), float(budget_cfg["episode_usd"]))
         if budget_path.exists():
             data: dict[str, Any] = json.loads(budget_path.read_text(encoding="utf-8"))
-            self.budget = Budget.from_json(data)
-        else:
-            self.budget = Budget(float(budget_cfg["unit_usd"]), float(budget_cfg["episode_usd"]))
+            self.budget.spent = dict(Budget.from_json(data).spent)
         self.log = EventLog(self._run_dir / "events.jsonl", clock=self.clock)
 
     def step(self) -> list[Change]:
