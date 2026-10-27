@@ -374,6 +374,23 @@ def check_episode(episode_dir: Path, style_path: Path | None = None) -> list[Fin
                                 f"Unknown character '{char}' in mouth track.",
                             )
                         )
+            if xs.camera is not None:
+                hint = ", ".join(sorted(chars))
+                for k, cam in enumerate(xs.camera):
+                    if cam.target is None:
+                        continue
+                    char = cam.target.split(".", 1)[0]
+                    if char not in chars:
+                        findings.append(
+                            Finding(
+                                "error",
+                                "camera.unknown_target",
+                                xrel,
+                                f"camera[{k}].target",
+                                f"Unknown character '{char}' in camera target '{cam.target}'.",
+                                hint,
+                            )
+                        )
 
     # Pose references, first hold, transitions.
     for _folder, xrel, xs in xsheet_loaded:

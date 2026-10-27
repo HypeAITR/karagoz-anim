@@ -14,7 +14,8 @@ import numpy as np
 import yaml
 from PIL import Image
 
-from karagoz.engine.compose import ShotAssets, cutout, render_frames
+from karagoz.engine.camera import camera_track
+from karagoz.engine.compose import ShotAssets, character_bboxes, cutout, render_frames
 from karagoz.engine.mouth import mouth_track
 from karagoz.engine.render import FPS, Clip, RenderError, encode, loudness, mix
 from karagoz.engine.timing import resolve_episode
@@ -271,7 +272,12 @@ def render_shot(prod: Path, episode: str, shot: str) -> ShotRender:
     if frames_dir.exists():
         shutil.rmtree(frames_dir)
     frames_dir.mkdir(parents=True)
-    render_warnings = render_frames(exp, mouths, assets, order, frames_dir, mirror=mirror, scales=scales)
+    bboxes = character_bboxes(exp, assets, order, mirror=mirror, scales=scales)
+    camera_boxes, camera_warnings = camera_track(xs.camera, shot_entry.framing, shot, exp.length, timing, style, bboxes)
+    warnings.extend(camera_warnings)
+    render_warnings = render_frames(
+        exp, mouths, assets, order, frames_dir, mirror=mirror, scales=scales, camera=camera_boxes
+    )
     warnings.extend(render_warnings)
     shot_span = timing.shot(shot)
     clips: list[Clip] = []
