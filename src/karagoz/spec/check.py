@@ -662,6 +662,11 @@ def check_episode(episode_dir: Path, style_path: Path | None = None) -> list[Fin
                                     )
                                 )
 
+    if lines is not None and shots is not None:
+        from karagoz.engine.xsheet import check_timing
+
+        findings.extend(check_timing(episode_dir, style_path))
+
     findings.sort(key=lambda f: (f.file, f.path, f.code))
     return findings
 
