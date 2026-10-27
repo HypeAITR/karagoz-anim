@@ -29,7 +29,7 @@ fidelity to the script matters more than cleverness.
 
 - `id` `sh01`, `sh02`, … in order; `scene` (integer); `location` (name); `framing`
   (`wide|medium|medium_close|close|extreme_close|insert`).
-- `characters`: everyone visible, with `place` (a named spot of the location such as `sofa` or `sofa.left`, or
+- `characters`: everyone visible, with `place` (a named spot of the location such as `sofa` or `sofa_left`, or
   `left|center|right`), `facing` (another character, an object, or `left|right|camera|away`) and `view`
   (`front|three_quarter_left|three_quarter_right|profile_left|profile_right|back`). Two people talking to each
   other face each other: one `three_quarter_right`, the other `three_quarter_left`.
