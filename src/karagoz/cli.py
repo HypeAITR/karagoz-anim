@@ -47,6 +47,23 @@ def cmd_check(args: argparse.Namespace) -> int:
     return 1 if n_err else 0
 
 
+def cmd_voice(args: argparse.Namespace) -> int:
+    """Synthesize an episode's voice lines (cached by content)."""
+    import karagoz.voice.elevenlabs as el
+    from karagoz.spec import Align
+
+    try:
+        items = el.synthesize_episode(Path(args.prod), args.episode, el.ElevenLabs())
+        for item in items:
+            align = Align.model_validate_json(item.align.read_text(encoding="utf-8"))
+            duration = align.ends[-1] if align.ends else 0.0
+            print(f"{item.line} {'cached' if item.cached else 'new'} {duration:.2f} s")
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def _open_studio(prod: str, episode: str) -> Studio:
     carriers: dict[str, Carrier] = {
         "muse-exec": MuseExecCarrier(),
@@ -117,6 +134,11 @@ def build_parser() -> argparse.ArgumentParser:
     check_p = sub.add_parser("check", help="check that an episode's files agree with each other")
     check_p.add_argument("paths", nargs="+", help="episode directory or file to check")
     check_p.set_defaults(func=cmd_check)
+
+    voice_p = sub.add_parser("voice", help="synthesize an episode's voice lines")
+    voice_p.add_argument("prod", help="production directory")
+    voice_p.add_argument("episode", help="episode id")
+    voice_p.set_defaults(func=cmd_voice)
 
     run = sub.add_parser("run", help="run the studio pipeline for an episode")
     run.add_argument("prod", help="production directory")
