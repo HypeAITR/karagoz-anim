@@ -41,6 +41,8 @@ View = Literal[
 Expression = Literal["neutral", "happy", "sad", "angry", "worried", "surprised"]
 Framing = Literal["wide", "medium", "medium_close", "close", "extreme_close", "insert"]
 MouthShape = Literal["X", "A", "B", "C", "D", "E", "F", "G", "H"]
+Support = Literal["sit", "stand", "crouch", "lie"]
+Hand = Literal["left", "right"]
 
 
 def _check_anchor(v: str) -> str:
@@ -144,6 +146,10 @@ class Pose(SpecModel):
     note: str | None = None
     faceless: bool | None = None
     hold: bool | None = None
+    support: Support | None = None
+    on: Name | None = None
+    rests_on: list[Name] | None = None
+    holds: dict[Hand, Name | None] | None = None
 
     @model_validator(mode="after")
     def _expression_unless_faceless(self) -> Self:
@@ -378,4 +384,65 @@ class Align(SpecModel):
         for prev, cur in zip(self.starts, self.starts[1:], strict=False):
             if cur < prev:
                 raise PydanticCustomError("align_order", "starts must be non-decreasing")
+        return self
+
+
+class RegionScale(SpecModel):
+    px_per_cm: Annotated[float, Field(gt=0)]
+    source: Name
+    known_cm: Annotated[float, Field(gt=0)]
+
+
+class RegionObject(SpecModel):
+    name: Name
+    kind: Annotated[str, Field(min_length=1)]
+    box: tuple[int, int, int, int]
+    floor_y: int
+    confidence: Annotated[float, Field(ge=0, le=1)]
+    mask: Annotated[str, Field(min_length=1)]
+    front: bool
+
+    @model_validator(mode="after")
+    def _check_box(self) -> Self:
+        x0, y0, x1, y1 = self.box
+        if x1 <= x0 or y1 <= y0:
+            raise PydanticCustomError("regions_box", "box needs x1 > x0 and y1 > y0")
+        return self
+
+
+class Place(SpecModel):
+    name: Name
+    object: Name
+    kind: Literal["seat", "floor"]
+    seat: tuple[int, int] | None = None
+    floor: tuple[int, int]
+
+    @model_validator(mode="after")
+    def _check_seat(self) -> Self:
+        if self.kind == "seat" and self.seat is None:
+            raise PydanticCustomError("regions_seat", "a place of kind 'seat' needs a seat point")
+        return self
+
+
+class Regions(SpecModel):
+    version: Version
+    location: Name
+    image: Annotated[str, Field(min_length=1)]
+    size: tuple[int, int]
+    scale: RegionScale | None
+    objects: list[RegionObject]
+    places: list[Place]
+
+    @model_validator(mode="after")
+    def _check_names(self) -> Self:
+        object_names = [o.name for o in self.objects]
+        if len(set(object_names)) != len(object_names):
+            raise PydanticCustomError("regions_names", "duplicate object names")
+        place_names = [p.name for p in self.places]
+        if len(set(place_names)) != len(place_names):
+            raise PydanticCustomError("regions_names", "duplicate place names")
+        known = set(object_names)
+        for p in self.places:
+            if p.object not in known:
+                raise PydanticCustomError("regions_names", f"place '{p.name}' has unknown object '{p.object}'")
         return self

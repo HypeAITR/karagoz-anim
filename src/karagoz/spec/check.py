@@ -17,6 +17,7 @@ from karagoz.spec.models import (
     Lines,
     LoopEvent,
     Poses,
+    Regions,
     SequenceEvent,
     Shots,
     Style,
@@ -102,6 +103,15 @@ def check_episode(episode_dir: Path, style_path: Path | None = None) -> list[Fin
     continuity = continuity_obj if isinstance(continuity_obj, Continuity) else None
     style_obj = _load(style_path)
     style = style_obj if isinstance(style_obj, Style) else None
+
+    regions_by_location: dict[str, Regions] = {}
+    if shots is not None:
+        for location in sorted({sh.location for sh in shots.shots}):
+            regions_path = episode_dir.parent / "locations" / location / "regions.yaml"
+            if regions_path.is_file():
+                regions_obj = _load(regions_path)
+                if isinstance(regions_obj, Regions):
+                    regions_by_location[location] = regions_obj
 
     poses_loaded: list[tuple[str, str, Poses]] = []
     xsheet_loaded: list[tuple[str, str, Xsheet]] = []
@@ -683,6 +693,115 @@ def check_episode(episode_dir: Path, style_path: Path | None = None) -> list[Fin
         from karagoz.engine.xsheet import check_timing
 
         findings.extend(check_timing(episode_dir, style_path))
+
+    # Spec v1.1: named places and objects from regions.yaml, pose support, held props.
+    shot_locations: dict[str, str] = {}
+    shot_places: dict[str, dict[str, str | None]] = {}
+    if shots is not None:
+        for sh in shots.shots:
+            shot_locations[sh.id] = sh.location
+            shot_places[sh.id] = {c.name: c.place for c in (sh.characters or [])}
+
+    if shots is not None:
+        for idx, sh in enumerate(shots.shots):
+            regions = regions_by_location.get(sh.location)
+            if regions is None or sh.characters is None:
+                continue
+            place_names = {p.name for p in regions.places}
+            place_hint = ", ".join(sorted(place_names))
+            for j, c in enumerate(sh.characters):
+                if c.place is not None and c.place not in place_names:
+                    findings.append(
+                        Finding(
+                            "error",
+                            "place.unknown",
+                            shots_rel,
+                            f"shots[{idx}].characters[{j}].place",
+                            f"Unknown place '{c.place}' for '{c.name}' in shot '{sh.id}'.",
+                            place_hint,
+                        )
+                    )
+
+    prop_hint: str | None = None
+    if continuity is not None and continuity.prop_states is not None:
+        prop_hint = ", ".join(sorted(continuity.prop_states))
+
+    for _folder, prel, pm in poses_loaded:
+        for char, cposes in pm.characters.items():
+            for k, pose in enumerate(cposes.poses):
+                base = f"characters.{char}.poses[{k}]"
+                if pose.support is None:
+                    findings.append(
+                        Finding(
+                            "warn",
+                            "support.missing",
+                            prel,
+                            base,
+                            f"Pose '{pose.id}' of '{char}' has no support.",
+                        )
+                    )
+                if pose.holds is not None and continuity is not None and continuity.prop_states is not None:
+                    for hand, held in pose.holds.items():
+                        if held is not None and held not in continuity.prop_states:
+                            findings.append(
+                                Finding(
+                                    "warn",
+                                    "holds.unknown_prop",
+                                    prel,
+                                    f"{base}.holds.{hand}",
+                                    f"Unknown prop '{held}' held by '{char}'.",
+                                    prop_hint,
+                                )
+                            )
+        shot_location = shot_locations.get(pm.shot)
+        regions = regions_by_location.get(shot_location) if shot_location is not None else None
+        if regions is None:
+            continue
+        place_names = {p.name for p in regions.places}
+        place_kinds = {p.name: p.kind for p in regions.places}
+        object_names = {o.name for o in regions.objects}
+        place_hint = ", ".join(sorted(place_names))
+        object_hint = ", ".join(sorted(object_names))
+        char_places = shot_places.get(pm.shot, {})
+        for char, cposes in pm.characters.items():
+            for k, pose in enumerate(cposes.poses):
+                base = f"characters.{char}.poses[{k}]"
+                if pose.on is not None and pose.on not in place_names:
+                    findings.append(
+                        Finding(
+                            "error",
+                            "place.unknown",
+                            prel,
+                            f"{base}.on",
+                            f"Unknown place '{pose.on}' for '{char}' pose '{pose.id}'.",
+                            place_hint,
+                        )
+                    )
+                if pose.rests_on is not None:
+                    for m, rest in enumerate(pose.rests_on):
+                        if rest not in object_names:
+                            findings.append(
+                                Finding(
+                                    "error",
+                                    "rests_on.unknown",
+                                    prel,
+                                    f"{base}.rests_on[{m}]",
+                                    f"Unknown object '{rest}' for '{char}' pose '{pose.id}'.",
+                                    object_hint,
+                                )
+                            )
+                if pose.support == "sit":
+                    at = pose.on if pose.on is not None else char_places.get(char)
+                    if at is not None and place_kinds.get(at) == "floor":
+                        findings.append(
+                            Finding(
+                                "error",
+                                "support.not_seat",
+                                prel,
+                                f"{base}.support",
+                                f"Pose '{pose.id}' of '{char}' sits on floor place '{at}'.",
+                            )
+                        )
 
     findings.sort(key=lambda f: (f.file, f.path, f.code))
     return findings
