@@ -1,9 +1,10 @@
 """Studio orchestrator: task board, isolated working directories, carriers, budget, log.
 
-Code owns the flow: agents only do the work inside a task. A worker never runs
-inside the production or a git repository; it gets a fresh working directory
+Code owns the flow: agents only do the work inside a task. An agent worker never
+runs inside the production or a git repository; it gets a fresh working directory
 with its inputs and a brief, and its outputs are accepted only if the episode
-check is clean for those files.
+check is clean for those files. Code departments (voice/draw/render/edit) run as
+trusted Python straight in the production directory.
 """
 
 from __future__ import annotations
@@ -15,19 +16,23 @@ import shutil
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import yaml
 
-from karagoz.spec import Finding, Shots, SpecError, check_episode, load
+from karagoz.spec import Finding, Lines, Shots, SpecError, check_episode, kind_of, load
 from karagoz.studio.briefs import make_brief
 from karagoz.studio.budget import Budget, Verdict
 from karagoz.studio.carriers import Brief, Carrier, RunResult
 from karagoz.studio.events import Clock, EventLog
 from karagoz.studio.tasks import Board, Change, State, Task
 
+if TYPE_CHECKING:
+    from karagoz.studio.draw import MuseImageLike
+
 SHORT_PROMPT = "Read BRIEF.md in the working directory and do exactly what it says."
-DEPARTMENTS = ["director", "continuity", "layout", "timer"]
+DEPARTMENTS = ["director", "voice", "continuity", "layout", "timer", "draw", "render", "edit"]
+CODE_DEPARTMENTS = {"voice", "draw", "render", "edit"}
 
 DEFAULT_CARRIER = "muse-exec"
 DEFAULT_MAX_STEPS = 40
@@ -53,6 +58,15 @@ def _default_checker(episode_dir: Path, outputs: list[str]) -> list[Finding]:
     return [f for f in check_episode(episode_dir) if f.file in wanted]  # check_episode reports episode-relative files
 
 
+def _is_spec_file(prod_rel: str) -> bool:
+    """True if the output is a spec file the checker can validate (align JSON, YAML kinds)."""
+    try:
+        kind_of(Path(prod_rel))
+    except SpecError:
+        return False
+    return True
+
+
 def plan_tasks(prod: Path, episode: str) -> list[Task]:
     """Build the task graph. All paths are production-relative with `/` separators."""
     script = f"script/{episode}.txt"
@@ -73,6 +87,28 @@ def plan_tasks(prod: Path, episode: str) -> list[Task]:
         return tasks
     if not isinstance(shots, Shots):
         return tasks
+    line_ids: list[str] = []
+    try:
+        lines_obj = load(prod / episode / "lines.yaml")
+    except SpecError:
+        lines_obj = None
+    if isinstance(lines_obj, Lines):
+        line_ids = [entry.id for entry in lines_obj.lines]
+    else:
+        seen: set[str] = set()
+        for shot_entry in shots.shots:
+            for lid in shot_entry.lines or []:
+                if lid not in seen:
+                    seen.add(lid)
+                    line_ids.append(lid)
+    tasks.append(
+        Task(
+            id="ep/voice",
+            inputs=["ep/director"],
+            files_in=["voices.yaml", f"{episode}/lines.yaml"],
+            files_out=[f"{episode}/audio/{lid}.align.json" for lid in line_ids],
+        )
+    )
     base_in = [script, f"{episode}/lines.yaml", f"{episode}/shots.yaml"]
     for n in sorted({shot.scene for shot in shots.shots}):
         tasks.append(
@@ -85,6 +121,8 @@ def plan_tasks(prod: Path, episode: str) -> list[Task]:
         )
     for shot in shots.shots:
         poses = f"{episode}/shots/{shot.id}/poses.yaml"
+        xsheet = f"{episode}/shots/{shot.id}/xsheet.yaml"
+        shot_aligns = [f"{episode}/audio/{lid}.align.json" for lid in (shot.lines or [])]
         tasks.append(
             Task(
                 id=f"{shot.id}/layout",
@@ -96,12 +134,91 @@ def plan_tasks(prod: Path, episode: str) -> list[Task]:
         tasks.append(
             Task(
                 id=f"{shot.id}/timer",
-                inputs=[f"{shot.id}/layout"],
-                files_in=[*base_in, f"{episode}/continuity.yaml", poses],
+                inputs=[f"{shot.id}/layout", "ep/voice"],
+                files_in=[*base_in, f"{episode}/continuity.yaml", poses, *shot_aligns],
                 files_out=[f"{episode}/shots/{shot.id}/xsheet.yaml"],
             )
         )
+        tasks.append(
+            Task(
+                id=f"{shot.id}/draw",
+                inputs=[f"{shot.id}/timer"],
+                files_in=["characters.yaml", "locations.yaml", poses, xsheet, *shot_aligns],
+                files_out=[f"{episode}/assets/{shot.id}/manifest.json"],
+            )
+        )
+        tasks.append(
+            Task(
+                id=f"{shot.id}/render",
+                inputs=[f"{shot.id}/draw"],
+                files_in=[xsheet, f"{episode}/assets/{shot.id}/manifest.json"],
+                files_out=[f"{episode}/render/{shot.id}.mp4"],
+            )
+        )
+    tasks.append(
+        Task(
+            id="ep/edit",
+            inputs=[f"{s.id}/render" for s in shots.shots],
+            files_in=[f"{episode}/render/{s.id}.mp4" for s in shots.shots],
+            files_out=[f"{episode}/render/{episode}.mp4"],
+            needs_approval=True,
+        )
+    )
     return tasks
+
+
+def code_work(
+    prod: Path,
+    episode: str,
+    task: Task,
+    *,
+    image: MuseImageLike | None = None,
+    on_event: Callable[[dict[str, Any]], None] | None = None,
+) -> RunResult:
+    """Run a code department in the production directory (trusted code, no workdir, no brief)."""
+    try:
+        department = task.department
+        if department == "voice":
+            from karagoz.voice.elevenlabs import synthesize_episode
+
+            synthesize_episode(prod, episode)
+            return RunResult(ok=True, cost_usd=0.0)
+        if department == "draw":
+            from karagoz.meta.client import MetaClient
+            from karagoz.meta.image import MuseImage
+            from karagoz.studio.draw import plan_draw, run_draw
+
+            active = image if image is not None else MuseImage(MetaClient())
+            report = run_draw(plan_draw(prod, episode, task.unit), active, on_event=on_event)
+            if report.failed:
+                error = ", ".join(f"{path}: {message}" for path, message in report.failed)
+                return RunResult(ok=False, error=error, cost_usd=report.cost_usd)
+            return RunResult(ok=True, cost_usd=report.cost_usd)
+        if department == "render":
+            from karagoz.engine.shot import render_shot
+
+            rendered = render_shot(prod, episode, task.unit)
+            for warning in rendered.warnings:
+                if on_event is not None:
+                    on_event({"payload_type": "code.note", "payload": {"text": warning}})
+            if rendered.lufs is None:
+                final = (
+                    f"{rendered.frames} frames, {rendered.seconds:.2f} s, no audio, {len(rendered.warnings)} warnings"
+                )
+            else:
+                final = (
+                    f"{rendered.frames} frames, {rendered.seconds:.2f} s, "
+                    f"{rendered.lufs:.1f} LUFS, {len(rendered.warnings)} warnings"
+                )
+            return RunResult(ok=True, final_text=final, cost_usd=0.0)
+        if department == "edit":
+            from karagoz.engine.shot import render_episode
+
+            out_mp4 = render_episode(prod, episode)
+            return RunResult(ok=True, final_text=str(out_mp4), cost_usd=0.0)
+        raise ValueError(f"not a code department: {department!r}")
+    except Exception as exc:  # noqa: BLE001 - a code failure fails the task, not the studio
+        return RunResult(ok=False, error=f"{type(exc).__name__}: {exc}")
 
 
 @dataclass
@@ -114,6 +231,7 @@ class Studio:
     clock: Clock | None = None  # passed to EventLog
     checker: Checker | None = None
     on_change: Callable[[Change], None] | None = None
+    code: Callable[..., RunResult] = code_work
     board: Board = field(init=False)
     budget: Budget = field(init=False)
     log: EventLog = field(init=False)
@@ -269,7 +387,10 @@ class Studio:
             self.log.append(task.id, "run", text="episode budget reached")
             self._stop = True
             return changes
-        carrier_name = self._carrier_map.get(task.department, DEFAULT_CARRIER)
+        default_carrier = "code" if task.department in CODE_DEPARTMENTS else DEFAULT_CARRIER
+        carrier_name = self._carrier_map.get(task.department, default_carrier)
+        if carrier_name == "code":
+            return self._run_code_task(task, changes)
         try:
             carrier = self.carriers[carrier_name]
         except KeyError:
@@ -314,6 +435,44 @@ class Studio:
         previous = self._copy_outputs(task, workdir)
         checker = self.checker if self.checker is not None else _default_checker
         findings = checker(self._episode_dir, [self._episode_rel(rel) for rel in task.files_out])
+        errors = [f for f in findings if f.level == "error"]
+        if errors:
+            self._restore_outputs(previous)
+            note = "\n".join(str(f) for f in errors)
+            changes.append(self.board.finish(task.id, ok=False, note=note))
+        else:
+            changes.append(self.board.finish(task.id, ok=True))
+        self._record(changes[-1])
+        return changes
+
+    def _run_code_task(self, task: Task, changes: list[Change]) -> list[Change]:
+        """Run a task whose carrier is "code": trusted code straight in the production directory."""
+        changes.append(self.board.start(task.id, self._digest))
+        self._record(changes[-1])
+        previous: dict[str, bytes | None] = {}
+        for rel in task.files_out:
+            dst = self.prod / rel
+            previous[rel] = dst.read_bytes() if dst.is_file() else None
+        try:
+            result = self.code(self.prod, self.episode, task, on_event=lambda obj: self._on_carrier_event(task.id, obj))
+        except Exception as exc:  # noqa: BLE001 - a code crash fails the task, not the studio
+            result = RunResult(ok=False, error=f"{type(exc).__name__}: {exc}")
+        self.log.append(task.id, "cost", usd=result.cost_usd, seconds=result.seconds, session=result.session_id)
+        self.budget.charge(task.unit, result.cost_usd)
+        if result.pending:
+            return changes
+        if not result.ok:
+            changes.append(self.board.finish(task.id, ok=False, note=result.error))
+            self._record(changes[-1])
+            return changes
+        missing = [rel for rel in task.files_out if not (self.prod / rel).is_file()]
+        if missing:
+            changes.append(self.board.finish(task.id, ok=False, note=f"missing output: {', '.join(missing)}"))
+            self._record(changes[-1])
+            return changes
+        checker = self.checker if self.checker is not None else _default_checker
+        spec_outs = [rel for rel in task.files_out if _is_spec_file(rel)]
+        findings = checker(self._episode_dir, [self._episode_rel(rel) for rel in spec_outs]) if spec_outs else []
         errors = [f for f in findings if f.level == "error"]
         if errors:
             self._restore_outputs(previous)
@@ -380,7 +539,17 @@ class Studio:
         payload_type = obj.get("payload_type")
         raw_payload = obj.get("payload")
         payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
-        if payload_type == "tool.result":
+        if payload_type == "draw.asset":
+            asset: dict[str, Any] = {}
+            for key in ("path", "status", "kind"):
+                value = payload.get(key)
+                if value is not None:
+                    asset[key] = value
+            self.log.append(task_id, "agent", **asset)
+        elif payload_type == "code.note":
+            note_text = payload.get("text", "")
+            self.log.append(task_id, "note", text=note_text if isinstance(note_text, str) else "")
+        elif payload_type == "tool.result":
             edit = payload.get("edit_facts")
             edit = edit if isinstance(edit, dict) else {}
             corr = payload.get("correlation_facts")

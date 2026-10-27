@@ -1,4 +1,4 @@
-"""Acceptance tests for WP-F4 (orchestrator and studio commands). Written by the maintainer; do not edit."""
+"""Acceptance tests for WP-F4 + WP-09c (orchestrator, code departments). Written by the maintainer; do not edit."""
 
 from __future__ import annotations
 
@@ -14,8 +14,8 @@ from karagoz import cli
 from karagoz.spec import Finding, SpecError, load
 from karagoz.studio.carriers import Brief, RunResult
 from karagoz.studio.events import read_events
-from karagoz.studio.orchestrator import SHORT_PROMPT, Studio, plan_tasks
-from karagoz.studio.tasks import State
+from karagoz.studio.orchestrator import CODE_DEPARTMENTS, DEPARTMENTS, SHORT_PROMPT, Studio, plan_tasks
+from karagoz.studio.tasks import State, Task
 
 FIX = Path(__file__).parent / "fixtures"
 EP = "ep-test"
@@ -67,6 +67,29 @@ class FakeAgent:
         return RunResult(ok=True, session_id="sess-1", final_text="done", cost_usd=0.01, seconds=2.0)
 
 
+class FakeCode:
+    """Stands in for code_work: writes every output of a code task, like voice/draw/render/edit would."""
+
+    def __init__(self) -> None:
+        self.ran: list[str] = []
+
+    def __call__(self, prod: Path, episode: str, task: Task, **kw: Any) -> RunResult:
+        self.ran.append(task.id)
+        for rel in task.files_out:
+            target = prod / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            if rel.endswith(".align.json"):
+                lid = Path(rel).name.split(".")[0]
+                text = "Yarın pazar, Ali." if lid == "L01" else "Su ver bana."
+                n = len(text)
+                target.write_text(json.dumps({"version": 1, "line": lid, "text": text, "characters": list(text),
+                    "starts": [round(i * 0.1, 6) for i in range(n)],
+                    "ends": [round((i + 1) * 0.1, 6) for i in range(n)]}), encoding="utf-8")  # fmt: skip
+            else:
+                target.write_bytes(b"x")
+        return RunResult(ok=True, cost_usd=0.0)
+
+
 @pytest.fixture
 def prod(tmp_path: Path) -> Path:
     p = tmp_path / "prod"
@@ -91,9 +114,9 @@ def skills(tmp_path: Path) -> Path:
     return s
 
 
-def studio(prod: Path, skills: Path, tmp_path: Path, agent: FakeAgent) -> Studio:
+def studio(prod: Path, skills: Path, tmp_path: Path, agent: FakeAgent, code: FakeCode | None = None) -> Studio:
     s = Studio(prod=prod, episode=EP, carriers={"muse-exec": agent}, skills_dir=skills,
-               work_root=tmp_path / "work", checker=loader_checker)  # fmt: skip
+               work_root=tmp_path / "work", checker=loader_checker, code=code or FakeCode())  # fmt: skip
     s.load()
     return s
 
@@ -114,8 +137,17 @@ def test_plan_before_and_after_director(prod: Path) -> None:
     shutil.copy(FIX / "shots.yaml", prod / EP / "shots.yaml")
     shutil.copy(FIX / "lines.yaml", prod / EP / "lines.yaml")
     tasks = {t.id: t for t in plan_tasks(prod, EP)}
-    assert list(tasks) == ["ep/director", "scene1/continuity", "sh01/layout", "sh01/timer"]
-    assert tasks["sh01/timer"].inputs == ["sh01/layout"]
+    assert list(tasks) == [
+        "ep/director", "ep/voice", "scene1/continuity", "sh01/layout", "sh01/timer",
+        "sh01/draw", "sh01/render", "ep/edit",
+    ]  # fmt: skip
+    assert tasks["sh01/timer"].inputs == ["sh01/layout", "ep/voice"]
+    assert f"{EP}/audio/L02.align.json" in tasks["sh01/timer"].files_in
+    assert tasks["ep/voice"].files_out == [f"{EP}/audio/L01.align.json", f"{EP}/audio/L02.align.json"]
+    assert tasks["sh01/render"].files_out == [f"{EP}/render/sh01.mp4"]
+    assert tasks["ep/edit"].inputs == ["sh01/render"] and tasks["ep/edit"].needs_approval
+    assert DEPARTMENTS == ["director", "voice", "continuity", "layout", "timer", "draw", "render", "edit"]
+    assert {"voice", "draw", "render", "edit"} == CODE_DEPARTMENTS
     assert tasks["sh01/timer"].files_out == [f"{EP}/shots/sh01/xsheet.yaml"]
     assert f"{EP}/shots/sh01/poses.yaml" in tasks["sh01/timer"].files_in
 
@@ -144,16 +176,22 @@ def test_director_runs_and_waits_for_human(prod: Path, skills: Path, tmp_path: P
 
 def test_after_approval_the_rest_runs(prod: Path, skills: Path, tmp_path: Path) -> None:
     agent = FakeAgent()
-    s = studio(prod, skills, tmp_path, agent)
+    code = FakeCode()
+    s = studio(prod, skills, tmp_path, agent, code)
     s.run()
     s.approve("ep/director")
     s.run()
     assert states(s) == {
         "ep/director": State.DONE,
+        "ep/voice": State.DONE,
         "scene1/continuity": State.DONE,
         "sh01/layout": State.DONE,
         "sh01/timer": State.DONE,
+        "sh01/draw": State.DONE,
+        "sh01/render": State.DONE,
+        "ep/edit": State.REVIEW,  # the final MP4 waits for a human
     }
+    assert code.ran == ["ep/voice", "sh01/draw", "sh01/render", "ep/edit"]
     assert [b.task_id for b in agent.briefs] == ["ep/director", "scene1/continuity", "sh01/layout", "sh01/timer"]
     assert (prod / EP / "shots" / "sh01" / "xsheet.yaml").exists()
     timer_ws = agent.briefs[-1].workdir
@@ -252,7 +290,7 @@ def test_human_off_auto_approves(prod: Path, skills: Path, tmp_path: Path) -> No
     (prod / EP / "studio.yaml").write_text("version: 1\nhuman: off\nbudget: { unit_usd: 1.0, episode_usd: 10.0 }\n")
     s = studio(prod, skills, tmp_path, FakeAgent())
     s.run()
-    assert set(states(s).values()) == {State.DONE}
+    assert set(states(s).values()) == {State.DONE}  # including ep/edit: human review off
     assert any(e["kind"] == "note" and "auto-approved" in e.get("text", "") for e in events(prod))
 
 
