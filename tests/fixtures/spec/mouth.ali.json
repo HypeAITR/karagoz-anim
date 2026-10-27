@@ -1,0 +1,2 @@
+{"version": 1, "shot": "sh01", "character": "ali", "fps": 24,
+ "cues": [{"start": 0, "end": 5, "shape": "X", "src": "auto"}, {"start": 5, "end": 9, "shape": "D", "src": "edit", "letters": "a"}]}

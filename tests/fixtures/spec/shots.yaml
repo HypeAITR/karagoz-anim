@@ -1,0 +1,14 @@
+version: 1
+episode: ep-test
+shots:
+  - id: sh01
+    scene: 1
+    location: salon
+    framing: wide
+    characters:
+      - { name: ali, place: koltuk, facing: ayse, view: three_quarter_right }
+      - { name: ayse, place: koltuk, facing: ali, view: three_quarter_left }
+    lines: [L01, L02]
+    in: start
+    out: L02.end + beat.react
+    transition_in: from_black
