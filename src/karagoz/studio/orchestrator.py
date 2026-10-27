@@ -29,11 +29,12 @@ from karagoz.studio.questions import QuestionPolicy, allowance, difficulty, pars
 from karagoz.studio.tasks import Board, Change, State, Task
 
 if TYPE_CHECKING:
+    from karagoz.engine.regions import SamLike
     from karagoz.studio.draw import MuseImageLike
 
 SHORT_PROMPT = "Read BRIEF.md in the working directory and do exactly what it says."
-DEPARTMENTS = ["director", "voice", "continuity", "layout", "timer", "draw", "render", "edit"]
-CODE_DEPARTMENTS = {"voice", "draw", "render", "edit"}
+DEPARTMENTS = ["location", "director", "voice", "continuity", "layout", "timer", "draw", "render", "edit"]
+CODE_DEPARTMENTS = {"location", "voice", "draw", "render", "edit"}
 
 DEFAULT_CARRIER = "muse-exec"
 DEFAULT_MAX_STEPS = 40
@@ -68,15 +69,45 @@ def _is_spec_file(prod_rel: str) -> bool:
     return True
 
 
+def _location_tasks(prod: Path) -> list[Task]:
+    """One code task per location in locations.yaml order; [] when the file lists none."""
+    try:
+        text = (prod / "locations.yaml").read_text(encoding="utf-8")
+    except OSError:
+        return []
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return []
+    if not isinstance(data, dict):
+        return []
+    raw_locs = data.get("locations")
+    if not isinstance(raw_locs, dict):
+        return []
+    return [
+        Task(
+            id=f"{name}/location",
+            files_in=["locations.yaml"],
+            files_out=[f"locations/{name}/background.png", f"locations/{name}/regions.yaml"],
+        )
+        for name in raw_locs
+        if isinstance(name, str)
+    ]
+
+
 def plan_tasks(prod: Path, episode: str) -> list[Task]:
     """Build the task graph. All paths are production-relative with `/` separators."""
     script = f"script/{episode}.txt"
+    location_tasks = _location_tasks(prod)
+    location_names = [t.unit for t in location_tasks]
     director_in = [script]
     if (prod / "characters.yaml").is_file():
         director_in.append("characters.yaml")
-    tasks = [
+    director_in += [f"locations/{name}/regions.yaml" for name in location_names]
+    tasks = location_tasks + [
         Task(
             id="ep/director",
+            inputs=[f"{name}/location" for name in location_names],
             files_in=director_in,
             files_out=[f"{episode}/lines.yaml", f"{episode}/shots.yaml"],
             needs_approval=True,
@@ -124,6 +155,11 @@ def plan_tasks(prod: Path, episode: str) -> list[Task]:
         poses = f"{episode}/shots/{shot.id}/poses.yaml"
         xsheet = f"{episode}/shots/{shot.id}/xsheet.yaml"
         shot_aligns = [f"{episode}/audio/{lid}.align.json" for lid in (shot.lines or [])]
+        loc_inputs: list[str] = []
+        loc_files: list[str] = []
+        if shot.location in location_names:
+            loc_inputs = [f"{shot.location}/location"]
+            loc_files = [f"locations/{shot.location}/background.png", f"locations/{shot.location}/regions.yaml"]
         tasks.append(
             Task(
                 id=f"{shot.id}/layout",
@@ -143,8 +179,8 @@ def plan_tasks(prod: Path, episode: str) -> list[Task]:
         tasks.append(
             Task(
                 id=f"{shot.id}/draw",
-                inputs=[f"{shot.id}/timer"],
-                files_in=["characters.yaml", "locations.yaml", poses, xsheet, *shot_aligns],
+                inputs=[f"{shot.id}/timer", *loc_inputs],
+                files_in=["characters.yaml", "locations.yaml", poses, xsheet, *shot_aligns, *loc_files],
                 files_out=[f"{episode}/assets/{shot.id}/manifest.json"],
             )
         )
@@ -175,10 +211,30 @@ def code_work(
     *,
     image: MuseImageLike | None = None,
     on_event: Callable[[dict[str, Any]], None] | None = None,
+    sam: SamLike | None = None,
 ) -> RunResult:
     """Run a code department in the production directory (trusted code, no workdir, no brief)."""
     try:
         department = task.department
+        if department == "location":
+            from karagoz.engine.regions import build_regions
+            from karagoz.meta.client import MetaClient
+            from karagoz.meta.image import MuseImage
+            from karagoz.meta.sam import Sam
+            from karagoz.studio.draw import location_objects, plan_location_draw, run_draw
+
+            active = image if image is not None else MuseImage(MetaClient())
+            report = run_draw(plan_location_draw(prod, task.unit), active, on_event=on_event)
+            if report.failed:
+                error = ", ".join(f"{path}: {message}" for path, message in report.failed)
+                return RunResult(ok=False, error=error, cost_usd=report.cost_usd)
+            active_sam: SamLike = sam if sam is not None else Sam(MetaClient())
+            out_dir = prod / "locations" / task.unit
+            regions = build_regions(
+                out_dir / "background.png", task.unit, location_objects(prod, task.unit), active_sam, out_dir
+            )
+            final = f"{len(regions['objects'])} objects, {len(regions['places'])} places"
+            return RunResult(ok=True, final_text=final, cost_usd=report.cost_usd)
         if department == "voice":
             from karagoz.voice.elevenlabs import synthesize_episode
 
@@ -187,8 +243,9 @@ def code_work(
         if department == "draw":
             from karagoz.meta.client import MetaClient
             from karagoz.meta.image import MuseImage
-            from karagoz.studio.draw import plan_draw, run_draw
+            from karagoz.studio.draw import link_location_background, plan_draw, run_draw
 
+            link_location_background(prod, episode, task.unit)
             active = image if image is not None else MuseImage(MetaClient())
             report = run_draw(plan_draw(prod, episode, task.unit), active, on_event=on_event)
             if report.failed:
@@ -392,7 +449,9 @@ class Studio:
                 return False
             if too_late:
                 return False
-        return self._only is None or task.unit == self._only or task.id == "ep/director"
+        return (
+            self._only is None or task.unit == self._only or task.id == "ep/director" or task.department == "location"
+        )
 
     def _run_task(self, task: Task) -> list[Change]:
         changes: list[Change] = []
@@ -522,7 +581,16 @@ class Studio:
             return changes
         checker = self.checker if self.checker is not None else _default_checker
         spec_outs = [rel for rel in task.files_out if _is_spec_file(rel)]
-        findings = checker(self._episode_dir, [self._episode_rel(rel) for rel in spec_outs]) if spec_outs else []
+        prefix = f"{self.episode}/"
+        inside = [rel for rel in spec_outs if rel.startswith(prefix)]
+        findings = checker(self._episode_dir, [self._episode_rel(rel) for rel in inside]) if inside else []
+        for rel in spec_outs:
+            if rel.startswith(prefix):
+                continue
+            try:
+                load(self.prod / rel)
+            except SpecError as exc:
+                findings.extend(exc.findings)
         errors = [f for f in findings if f.level == "error"]
         if errors:
             self._restore_outputs(previous)

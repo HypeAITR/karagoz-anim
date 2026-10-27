@@ -22,7 +22,7 @@ from karagoz.engine.patch import PatchError, make_patch, save_patch
 from karagoz.engine.timing import resolve_episode
 from karagoz.engine.xsheet import expand
 from karagoz.meta.client import MetaApiError
-from karagoz.spec import Align, Lines, Poses, Shots, Style, Xsheet, load
+from karagoz.spec import Align, Lines, Poses, Shots, SpecError, Style, Xsheet, load
 
 USD_PER_IMAGE = 0.01
 
@@ -179,6 +179,78 @@ def _load_locations(path: Path) -> dict[str, str]:
     return out
 
 
+def location_objects(prod: Path, location: str) -> list[str]:
+    """The location's `objects` list (concepts for SAM); `[]` when missing."""
+    try:
+        text = (prod / "locations.yaml").read_text(encoding="utf-8")
+    except OSError:
+        return []
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return []
+    if not isinstance(data, dict):
+        return []
+    raw_locs = data.get("locations")
+    if not isinstance(raw_locs, dict):
+        return []
+    entry = raw_locs.get(location)
+    if not isinstance(entry, dict):
+        return []
+    objects = entry.get("objects")
+    if not isinstance(objects, list):
+        return []
+    return [o for o in objects if isinstance(o, str)]
+
+
+def plan_location_draw(prod: Path, location: str) -> list[DrawJob]:
+    """The location's background job (drawn once, shared by every shot); `[]` without a description."""
+    locations = _load_locations(prod / "locations.yaml")
+    if location not in locations:
+        return []
+    templates = _load_templates()
+    prompt = _template_str(templates, "background").format(
+        style=_template_str(templates, "style"), description=locations[location]
+    )
+    return [
+        DrawJob(
+            kind="background",
+            character=None,
+            drawing="background",
+            variant=None,
+            refs=(),
+            prompt=prompt,
+            fallback=None,
+            reasoning="high",
+            size="1920x1080",
+            out=prod / "locations" / location / "background.png",
+            wave=1,
+        )
+    ]
+
+
+def link_location_background(prod: Path, episode: str, shot: str) -> Path | None:
+    """Copy the shot's location background into the shot's assets; `None` when there is none."""
+    try:
+        shots_obj = load(prod / episode / "shots.yaml")
+    except SpecError:
+        return None
+    if not isinstance(shots_obj, Shots):
+        return None
+    entry = next((s for s in shots_obj.shots if s.id == shot), None)
+    if entry is None:
+        return None
+    src = prod / "locations" / entry.location / "background.png"
+    if not src.exists():
+        return None
+    dst = prod / episode / "assets" / shot / "background.png"
+    data = src.read_bytes()
+    if not dst.is_file() or dst.read_bytes() != data:
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        dst.write_bytes(data)
+    return dst
+
+
 def _load_templates() -> dict[str, Any]:
     data = yaml.safe_load(TEMPLATES_PATH.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
@@ -286,7 +358,8 @@ def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
 
     jobs: list[DrawJob] = []
 
-    if shot_entry.location in locations:
+    location_bg = prod / "locations" / shot_entry.location / "background.png"
+    if shot_entry.location in locations and not location_bg.exists():
         description = locations[shot_entry.location]
         prompt = background_tpl.format(style=style_text, description=description)
         jobs.append(
