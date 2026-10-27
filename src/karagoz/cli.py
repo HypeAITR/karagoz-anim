@@ -206,6 +206,28 @@ def _print_shot(shot: str, frames: int, seconds: float, lufs: float | None, warn
             print(f"  {warning}")
 
 
+def cmd_regress(args: argparse.Namespace) -> int:
+    """Compare the rendered frames with the golden ones and add a row to the regression log."""
+    from karagoz.regress import record
+
+    try:
+        entry = record(Path(args.prod), args.episode, label=args.label, accept=args.accept)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    identical = sum(sd.identical for sd in entry.shots)
+    print(f"#{entry.n} {entry.status}: {identical}/{entry.frames} frames identical")
+    for sd in entry.shots:
+        if sd.changed:
+            ranges = ", ".join(f"{start}-{end}" for start, end in sd.changed)
+            print(f"  {sd.shot} changed {ranges}")
+    print(f"work {entry.work_seconds:.0f} s, ${entry.usd:.3f}, {entry.questions} question(s)")
+    if entry.sheet is not None:
+        print(f"sheet: {Path(args.prod) / args.episode / entry.sheet}")
+    print(f"log: {Path(args.prod) / args.episode / 'regress' / 'log.md'}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="karagoz", description=__doc__)
     parser.add_argument("--version", action="version", version=__version__)
@@ -269,6 +291,13 @@ def build_parser() -> argparse.ArgumentParser:
     render_p.add_argument("--shot", metavar="SHOT", default=None, help="only render this shot")
     render_p.add_argument("-v", "--verbose", action="store_true", help="also print each warning")
     render_p.set_defaults(func=cmd_render)
+
+    regress_p = sub.add_parser("regress", help="compare rendered frames with the golden ones; log time and cost")
+    regress_p.add_argument("prod", help="production directory")
+    regress_p.add_argument("episode", help="episode id")
+    regress_p.add_argument("--label", default=None, help="short name for this record (e.g. the day's change)")
+    regress_p.add_argument("--accept", action="store_true", help="make the current frames the new golden")
+    regress_p.set_defaults(func=cmd_regress)
     return parser
 
 
