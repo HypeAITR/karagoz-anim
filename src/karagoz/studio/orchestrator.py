@@ -69,6 +69,104 @@ def _is_spec_file(prod_rel: str) -> bool:
     return True
 
 
+def _characters_viewer(keys: tuple[str, ...]) -> Callable[[Any], Any]:
+    """Per-character subset of characters.yaml; agents read labels and notes, never numbers or paths."""
+
+    def view(parsed: Any) -> Any:
+        if not isinstance(parsed, dict) or not isinstance(parsed.get("characters"), dict):
+            raise TypeError("characters.yaml: expected a mapping with a characters mapping")
+        out: dict[str, Any] = {}
+        for name, char in parsed["characters"].items():
+            if not isinstance(char, dict):
+                raise TypeError(f"characters.yaml: character {name!r} is not a mapping")
+            out[name] = {key: char[key] for key in keys if key in char}
+        return out
+
+    return view
+
+
+def _regions_view(parsed: Any) -> Any:
+    """Names only from regions.yaml: sorted [name, kind] place pairs and sorted object names."""
+    if not isinstance(parsed, dict):
+        raise TypeError("regions.yaml: expected a mapping")
+    raw_places = parsed.get("places", [])
+    raw_objects = parsed.get("objects", [])
+    if not isinstance(raw_places, list) or not isinstance(raw_objects, list):
+        raise TypeError("regions.yaml: places and objects must be lists")
+    places: list[list[str]] = []
+    for place in raw_places:
+        if not isinstance(place, dict):
+            raise TypeError("regions.yaml: every place must be a mapping")
+        places.append([place["name"], place["kind"]])
+    objects: list[str] = []
+    for obj in raw_objects:
+        if not isinstance(obj, dict):
+            raise TypeError("regions.yaml: every object must be a mapping")
+        objects.append(obj["name"])
+    return {"places": sorted(places), "objects": sorted(objects)}
+
+
+_AGENT_CHARACTERS_VIEW = _characters_viewer(("label", "natural_facing", "mirror_ok", "note"))
+_DRAW_CHARACTERS_VIEW = _characters_viewer(("label", "natural_facing", "mirror_ok", "note", "ref"))
+
+VIEWS: dict[str, dict[str, Callable[[Any], Any]]] = {
+    "characters.yaml": {
+        "director": _AGENT_CHARACTERS_VIEW,
+        "continuity": _AGENT_CHARACTERS_VIEW,
+        "layout": _AGENT_CHARACTERS_VIEW,
+        "timer": _AGENT_CHARACTERS_VIEW,
+        "draw": _DRAW_CHARACTERS_VIEW,
+    },
+    "regions.yaml": {
+        "director": _regions_view,
+        "continuity": _regions_view,
+        "layout": _regions_view,
+        "timer": _regions_view,
+    },
+}
+"""File base name -> department -> view of the parsed YAML used for input digests."""
+
+
+def input_view(department: str, rel: str, data: bytes) -> bytes:
+    """The bytes of ``rel`` as seen by ``department``: the viewed JSON, or ``data`` unchanged."""
+    views = VIEWS.get(Path(rel).name)
+    if views is None:
+        return data
+    view = views.get(department)
+    if view is None:
+        return data
+    try:
+        return json.dumps(view(yaml.safe_load(data.decode("utf-8"))), sort_keys=True, ensure_ascii=False).encode()
+    except Exception:
+        return data
+
+
+def inputs_digest(prod: Path, task: Task) -> str:
+    """sha256 over (rel path, NUL, viewed bytes or `<missing>`, NUL) for every input file."""
+    digest = hashlib.sha256()
+    for rel in task.files_in:
+        digest.update(rel.encode("utf-8"))
+        digest.update(b"\0")
+        try:
+            digest.update(input_view(task.department, rel, (prod / rel).read_bytes()))
+        except OSError:
+            digest.update(b"<missing>")
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+def file_digests(prod: Path, task: Task) -> dict[str, str]:
+    """Per-file sha256 hex digests of the viewed input bytes (or of `b"<missing>"`)."""
+    out: dict[str, str] = {}
+    for rel in task.files_in:
+        try:
+            data = input_view(task.department, rel, (prod / rel).read_bytes())
+        except OSError:
+            data = b"<missing>"
+        out[rel] = hashlib.sha256(data).hexdigest()
+    return out
+
+
 def _location_tasks(prod: Path) -> list[Task]:
     """One code task per location in locations.yaml order; [] when the file lists none."""
     try:
@@ -406,7 +504,9 @@ class Studio:
             self._stop = False
 
     def approve(self, task_id: str) -> None:
-        self._record(self.board.approve(task_id))
+        self._record(self.board.approve(task_id, task_digest=self._task_digest))
+        task = self.board.tasks[task_id]
+        task.input_files = file_digests(self.prod, task)
         self._save_board()
 
     def retake(self, task_id: str, note: str) -> None:
@@ -424,9 +524,25 @@ class Studio:
         )
 
     def _refresh(self) -> list[Change]:
-        changes = self.board.refresh(self._digest)
+        changes = self.board.refresh(self._digest, task_digest=self._task_digest)
         for change in changes:
             self._record(change)
+        for change in changes:
+            if change.old is State.DONE and change.new is State.REVIEW:
+                task = self.board.tasks[change.task]
+                if not task.input_files:
+                    files_text = "unknown (no per-file record)"
+                else:
+                    current = file_digests(self.prod, task)
+                    old = task.input_files
+                    changed_files = sorted(
+                        [rel for rel in current if old.get(rel) != current[rel]]
+                        + [rel for rel in old if rel not in current]
+                    )
+                    files_text = ", ".join(changed_files)
+                text = f"inputs changed: {files_text} — approve keeps the approved output, retake redoes it"
+                self.log.append(task.id, "note", text=text)
+                task.notes.append(text)
         return changes
 
     def _auto_approve(self) -> list[Change]:
@@ -434,7 +550,8 @@ class Studio:
             return []
         changes: list[Change] = []
         for task in [t for t in self.board.tasks.values() if t.state is State.REVIEW]:
-            changes.append(self.board.approve(task.id))
+            changes.append(self.board.approve(task.id, task_digest=self._task_digest))
+            task.input_files = file_digests(self.prod, task)
             self._record(changes[-1])
             self.log.append(task.id, "note", text="human review off: auto-approved")
         if changes:
@@ -457,7 +574,8 @@ class Studio:
         changes: list[Change] = []
         verdict = self.budget.check(task.unit, BUDGET_ESTIMATE_USD)
         if verdict is Verdict.UNIT_OVER:
-            changes.append(self.board.start(task.id, self._digest))
+            changes.append(self.board.start(task.id, self._digest, task_digest=self._task_digest))
+            task.input_files = file_digests(self.prod, task)
             self._record(changes[-1])
             changes.append(self.board.ask(task.id, "unit budget reached"))
             self._record(changes[-1])
@@ -474,7 +592,8 @@ class Studio:
             carrier = self.carriers[carrier_name]
         except KeyError:
             raise ValueError(f"unknown carrier {carrier_name!r} for {task.id}") from None
-        changes.append(self.board.start(task.id, self._digest))
+        changes.append(self.board.start(task.id, self._digest, task_digest=self._task_digest))
+        task.input_files = file_digests(self.prod, task)
         self._record(changes[-1])
         workdir = self._prepare_workdir(task)
         brief = Brief(
@@ -556,7 +675,8 @@ class Studio:
 
     def _run_code_task(self, task: Task, changes: list[Change]) -> list[Change]:
         """Run a task whose carrier is "code": trusted code straight in the production directory."""
-        changes.append(self.board.start(task.id, self._digest))
+        changes.append(self.board.start(task.id, self._digest, task_digest=self._task_digest))
+        task.input_files = file_digests(self.prod, task)
         self._record(changes[-1])
         previous: dict[str, bytes | None] = {}
         for rel in task.files_out:
@@ -612,8 +732,22 @@ class Studio:
                 dst = workdir / rel
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 dst.write_bytes(src.read_bytes())
+        previous: list[str] = []
+        for rel in task.files_out:
+            src = self.prod / rel
+            if src.is_file():
+                dst = workdir / rel
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                dst.write_bytes(src.read_bytes())
+                previous.append(rel)
         brief_text = make_brief(
-            task, self.prod, self.episode, workdir, self.skills_dir, questions_left=self._questions_left(task)
+            task,
+            self.prod,
+            self.episode,
+            workdir,
+            self.skills_dir,
+            questions_left=self._questions_left(task),
+            previous=previous,
         )
         (workdir / "BRIEF.md").write_text(brief_text, encoding="utf-8")
         target = self._run_dir / "briefs" / f"{task.id.replace('/', '__')}.md"
@@ -739,6 +873,9 @@ class Studio:
                 digest.update(b"<missing>")
             digest.update(b"\0")
         return digest.hexdigest()
+
+    def _task_digest(self, task: Task) -> str:
+        return inputs_digest(self.prod, task)
 
     def _record(self, change: Change) -> None:
         self.log.append(change.task, "state", old=change.old.value, new=change.new.value, note=change.note)

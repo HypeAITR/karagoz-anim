@@ -37,6 +37,7 @@ class Task:
     retakes: int = 0
     notes: list[str] = field(default_factory=list)
     input_digest: str | None = None
+    input_files: dict[str, str] = field(default_factory=dict)
 
     @property
     def unit(self) -> str:
@@ -85,13 +86,19 @@ class Board:
                 return False
         return True
 
-    def refresh(self, digest: Callable[[list[str]], str]) -> list[Change]:
+    def refresh(
+        self,
+        digest: Callable[[list[str]], str],
+        task_digest: Callable[[Task], str] | None = None,
+    ) -> list[Change]:
+        current: Callable[[Task], str] = task_digest if task_digest is not None else lambda t: digest(t.files_in)
         changes: list[Change] = []
         while True:
             progressed = False
             for task in self.tasks.values():
                 old = task.state
                 new: State | None = None
+                note: str | None = None
                 if old is State.WAITING:
                     if self._inputs_done(task):
                         new = State.READY
@@ -99,13 +106,17 @@ class Board:
                     if not self._inputs_done(task):
                         new = State.WAITING
                 elif old is State.DONE:
-                    if digest(task.files_in) != task.input_digest:
-                        new = State.STALE
+                    if current(task) != task.input_digest:
+                        if task.needs_approval:
+                            new = State.REVIEW
+                            note = "inputs changed since approval"
+                        else:
+                            new = State.STALE
                 elif old is State.STALE:
                     new = State.READY if self._inputs_done(task) else State.WAITING
                 if new is not None:
                     task.state = new
-                    changes.append(Change(task.id, old, new))
+                    changes.append(Change(task.id, old, new, note))
                     progressed = True
             if not progressed:
                 break
@@ -114,11 +125,16 @@ class Board:
     def ready(self) -> list[Task]:
         return [t for t in self.tasks.values() if t.state is State.READY]
 
-    def start(self, task_id: str, digest: Callable[[list[str]], str]) -> Change:
+    def start(
+        self,
+        task_id: str,
+        digest: Callable[[list[str]], str],
+        task_digest: Callable[[Task], str] | None = None,
+    ) -> Change:
         task = self._get(task_id)
         if task.state is not State.READY:
             raise TransitionError(f"cannot start {task_id} from {task.state.value}")
-        new_digest = digest(task.files_in)
+        new_digest = task_digest(task) if task_digest is not None else digest(task.files_in)
         task.state = State.RUNNING
         task.attempts += 1
         task.input_digest = new_digest
@@ -147,10 +163,19 @@ class Board:
         task.notes.append(note)
         return Change(task_id, State.RUNNING, State.QUESTION, note)
 
-    def approve(self, task_id: str) -> Change:
+    def approve(
+        self,
+        task_id: str,
+        digest: Callable[[list[str]], str] | None = None,
+        task_digest: Callable[[Task], str] | None = None,
+    ) -> Change:
         task = self._get(task_id)
         if task.state is not State.REVIEW:
             raise TransitionError(f"cannot approve {task_id} from {task.state.value}")
+        if task_digest is not None:
+            task.input_digest = task_digest(task)
+        elif digest is not None:
+            task.input_digest = digest(task.files_in)
         task.state = State.DONE
         return Change(task_id, State.REVIEW, State.DONE)
 
@@ -194,6 +219,7 @@ class Board:
                     "retakes": t.retakes,
                     "notes": list(t.notes),
                     "input_digest": t.input_digest,
+                    "input_files": dict(t.input_files),
                 }
                 for t in self.tasks.values()
             ],
@@ -219,6 +245,7 @@ class Board:
                 retakes=int(item.get("retakes", 0)),
                 notes=list(item.get("notes", [])),
                 input_digest=str(raw_digest) if raw_digest is not None else None,
+                input_files=dict(item.get("input_files", {})),
             )
             board.add(task)
         return board
