@@ -5,6 +5,11 @@ outline, 1920×1080, 24 fps). A team of AI agents (director, layout, inbetween, 
 files; a **coordinate engine** turns their names and words into numbers; drawings come from Muse Image, masks from
 SAM 3.1, vision checks from Muse Spark. Code map: `ARCHITECTURE.md`.
 
+Agents that work **inside** the studio (director, continuity, layout, timer, checkers, orchestrator) start at
+`guide/README.md`: how an agent's context is compiled per task from the cores (`guide/core/`), its department
+guide and the topic sections (`guide/sections/`). Department guides are in `.claude/skills/<department>/SKILL.md`.
+If you change how a department works, change its guide in the same commit.
+
 ## Setup
 
 ```

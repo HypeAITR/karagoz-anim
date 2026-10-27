@@ -57,3 +57,23 @@ mouth:
 - Camera: one `hold` with the shot's framing unless the brief asks for a move.
 - Use only named beats from `style.yaml`. A raw frame offset (`+ 3f`) is for human fixes only.
 - Run `karagoz check <file>` if available; fix every `error`.
+
+## Movement (sections `feel` and `timing` are always yours; `body-moves`, `stand-up`, `handover` when the shot has them)
+
+- **A whole-body move needs room.** Standing up, sitting down or turning away: 4 inbetweens on twos plus
+  anticipation and settle is at least 18 frames (starting value). Do not squeeze two body moves into one second;
+  let the first settle before the next starts (`check` reports `timing.overlap`).
+- **Never hold the middle of a move.** If Layout gave you a key pose that is only the middle of a motion (half risen),
+  do not give it a long hold between the transitions: that freezes the body halfway and then it jumps. Ask, or
+  tell the orchestrator in your notes; the fix belongs in Layout.
+- **When a retake asks for more room between moves, add room between whole moves, not inside one.** (A note that
+  said "give each stand-up move room" once produced a 17-frame hold in a squat.)
+- **Handover of a prop:** the two characters' contact poses land on the **same anchor** with the same cadence, and
+  the contact is held at least `hold.min` before either moves on. Layout tells you which poses are the contact.
+- Spacing is even inside a transition (every inbetween is shown for its cadence). If a move needs to slow in or out,
+  that is more inbetweens near the end, which is Layout's work: say so in your notes.
+
+## Before you finish
+
+Read your xsheet against the poses like a flip book: where is every character at every line? Is any body move
+cramped, frozen halfway, or overlapping another? Then write what you learned into your notes (the notes core).

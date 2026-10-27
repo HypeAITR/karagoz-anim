@@ -41,6 +41,10 @@ A section that has nothing to say is left out, never left vague.
 | **Keeps a prop in a hand** after it is handed over when KEEP says "what the hands hold" | first slice: Recep kept a glass while Naime took it (two glasses) | KEEP no longer mentions hands; HANDS states every hand, empty ones included |
 | Loses a prop's **shape** when the acting text shortens its name | "tulip-shaped Turkish tea glass" drew right (D28); "tea glass" in Layout's text did not | `props.yaml` description goes into HANDS every time |
 | Background generation ignores the exact size | asked 1920×1080, got 2048×1152 | The engine resizes (cover + centre crop) |
+| When two sections of one prompt disagree, the model **picks one** | slice 3b: an inbetween's HANDS (taken from the nearer key pose) said "right hand holds the glass" while its description said "hand open" → she held a glass; in the giver's drawing HANDS said "nothing in the hands" while the description said "fingers opening around the glass" → he held it anyway; two glasses on screen for 2 frames | **Planned:** an inbetween's HANDS comes from the inbetween's own description (or is left out), never from the nearer key pose; until then Layout states the hands in every inbetween sentence |
+| `support: crouch` ("crouching, knees bent, hips lifted from the seat") draws a **deep squat** | slice 3b: every drawing of a stand-up from the first inbetween to the crouch key was a squat, lower than sitting | A stand-up has no crouch key (layout skill, section `stand-up`). **Planned:** a clearer crouch sentence |
+| Inbetweens carry **no BODY sentence** | slice 3b: the first "legs straightening" inbetween came out fully standing | **Planned:** the inbetween template gets the body geometry from its description; Layout writes hips and knees in every inbetween of a body move |
+| A short prop name in the acting text loses the shape **again** | slice 3b: the glass in the handover was a plain tumbler in one drawing | `props.yaml` description in HANDS (done) and Layout uses the full name (layout skill) |
 
 ## Writing acting text (Layout)
 
@@ -50,7 +54,8 @@ Acting text becomes the CHANGE section. It is the part the model reads most lite
   "somewhat", "nicely".
 - Say **what stays** as concretely as what changes: "both feet still flat on the floor, knees together" instead of
   "same legs".
-- **Never mention furniture as an object to draw.** Write the body, not the sofa: "sitting, back leaning against
+- **Never mention furniture as an object to draw.** Naming a contact is fine ("hips on the seat", "feet flat on
+  the floor"); describing the furniture itself is not. Write the body, not the sofa: "sitting, back leaning against
   an invisible backrest, right foot raised at knee height as if resting on a low table". The engine places the
   character on the furniture layer.
 - Props: name the state the continuity file gives ("empty cup", "full cup").

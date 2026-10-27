@@ -57,3 +57,4 @@ fidelity to the script matters more than cleverness.
 - If something in the script is ambiguous (who speaks, whether a word is a line or a direction), do not guess:
   write your question as the task brief explains and stop.
 - Write only your two files. Do not touch anything else.
+- Write what you learned into your notes (the notes core); a human's change to your shots is always worth a note.
