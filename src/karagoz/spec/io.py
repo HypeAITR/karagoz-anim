@@ -12,7 +12,7 @@ import yaml
 from pydantic import BaseModel, ValidationError
 
 from karagoz.spec.findings import Finding, SpecError
-from karagoz.spec.models import Align, Continuity, Lines, Mouth, Poses, Shots, Style, Xsheet
+from karagoz.spec.models import Align, Continuity, Lines, Mouth, Poses, Regions, Shots, Style, Xsheet
 
 KINDS: dict[str, type[BaseModel]] = {
     "lines": Lines,
@@ -23,6 +23,7 @@ KINDS: dict[str, type[BaseModel]] = {
     "style": Style,
     "align": Align,
     "mouth": Mouth,
+    "regions": Regions,
 }
 
 _YAML_FILES = {
@@ -32,6 +33,7 @@ _YAML_FILES = {
     "poses.yaml": "poses",
     "xsheet.yaml": "xsheet",
     "style.yaml": "style",
+    "regions.yaml": "regions",
 }
 
 _ANCHOR_EXAMPLE_HINT = "example: L01.end + beat.react"
@@ -55,6 +57,25 @@ def kind_of(path: Path) -> str:
     raise SpecError([Finding("error", "file.unknown_kind", str(path), "", f"unknown file kind: {name}")])
 
 
+class _SpecLoader(yaml.SafeLoader):
+    """YAML loader with YAML 1.2 booleans: only true/false (any case) are bools.
+
+    Spec files use ``on`` as a mapping key (a pose's place); YAML 1.1 would
+    resolve it to boolean True.
+    """
+
+
+_SpecLoader.yaml_implicit_resolvers = {
+    first: [(tag, regexp) for tag, regexp in resolvers if tag != "tag:yaml.org,2002:bool"]
+    for first, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+_SpecLoader.add_implicit_resolver(
+    "tag:yaml.org,2002:bool",
+    re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"),
+    list("tTfF"),
+)
+
+
 def load(path: Path) -> BaseModel:
     """Read a spec file and validate it; raise ``SpecError`` on any problem."""
     model = KINDS[kind_of(path)]
@@ -71,7 +92,7 @@ def load(path: Path) -> BaseModel:
             raise SpecError([Finding("error", "json.syntax", file, "", message)]) from exc
     else:
         try:
-            data = yaml.safe_load(text)
+            data = yaml.load(text, Loader=_SpecLoader)
         except yaml.YAMLError as exc:
             mark = getattr(exc, "problem_mark", None)
             detail = getattr(exc, "problem", None) or exc

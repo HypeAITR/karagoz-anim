@@ -7,10 +7,15 @@ characters:
         view: three_quarter_right
         expression: neutral
         acting: "Oturuyor, sağ elinde bardak ağzına yakın, gözler yarı kapalı."
+        support: sit
+        holds: { right: glass, left: null }
       - id: p2
         view: three_quarter_right
         expression: neutral
         acting: "Oturuyor, sağ kol Ayşe'ye doğru uzanmış, bardağı uzatıyor."
+        support: sit
+        rests_on: [sehpa]
+        holds: { right: glass, left: null }
     transitions:
       - from: p1
         to: p2
@@ -23,3 +28,4 @@ characters:
         view: three_quarter_left
         faceless: true
         acting: "Arkası dönük oturuyor, yalnız saçı ve omuzları görünüyor."
+        support: sit
