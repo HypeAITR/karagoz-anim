@@ -23,7 +23,13 @@ NO_QUESTIONS_TEXT = (
 
 
 def make_brief(
-    task: Task, prod: Path, episode: str, workdir: Path, skills_dir: Path, questions_left: int | None = None
+    task: Task,
+    prod: Path,
+    episode: str,
+    workdir: Path,
+    skills_dir: Path,
+    questions_left: int | None = None,
+    previous: list[str] | None = None,
 ) -> str:
     """Render the brief for ``task``. ``prod``/``episode``/``workdir`` locate the work; paths stay relative."""
     lines = [
@@ -46,6 +52,14 @@ def make_brief(
     ]
     lines.extend(f"- {rel}" for rel in task.files_out)
     lines.append("")
+    if previous:
+        lines += [
+            "## Previous output",
+            "",
+            f"These files already hold your previous output (approved or last accepted): {', '.join(previous)}.",
+            "Keep everything that your notes and changed inputs do not require you to change.",
+            "",
+        ]
     if task.notes:
         lines += ["## Notes", ""]
         lines.extend(f"- {note}" for note in task.notes)
