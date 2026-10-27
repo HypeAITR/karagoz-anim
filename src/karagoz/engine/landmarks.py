@@ -197,26 +197,53 @@ def _facings(prod: Path) -> dict[str, str]:
     return facings
 
 
+def _refs(prod: Path) -> dict[str, str]:
+    path = prod / "characters.yaml"
+    if not path.is_file():
+        return {}
+    try:
+        data: Any = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    characters = data.get("characters")
+    if not isinstance(characters, dict):
+        return {}
+    refs: dict[str, str] = {}
+    for name, entry in characters.items():
+        if isinstance(entry, dict):
+            ref = entry.get("ref")
+            if isinstance(ref, str) and ref:
+                refs[str(name)] = ref
+    return refs
+
+
 def measure_shot(prod: Path, episode: str, shot: str, sam: SamLike, *, workers: int = 4) -> list[Path]:
     """Measure every body drawing of one shot; return the written paths sorted."""
     shot_dir = prod / episode / "assets" / shot
     cache_dir = prod / ".cache" / "landmarks"
     facings = _facings(prod)
+    refs = _refs(prod)
     if not shot_dir.is_dir():
         return []
     characters = sorted([path for path in shot_dir.iterdir() if path.is_dir()], key=lambda path: path.name)
-    tasks: list[tuple[Path, str]] = []
+    tasks: list[tuple[Path, str, Path]] = []
     for character_dir in characters:
         facing = facings.get(character_dir.name, "right")
         for drawing in body_drawings(shot_dir, character_dir.name):
-            tasks.append((drawing, facing))
+            tasks.append((drawing, facing, drawing.parent / f"{drawing.stem}.landmarks.json"))
+        ref_rel = refs.get(character_dir.name)
+        if ref_rel:
+            ref_path = prod / ref_rel
+            if ref_path.is_file():
+                tasks.append((ref_path, facing, character_dir / "ref.landmarks.json"))
     if not tasks:
         return []
 
-    def _measure_one(task: tuple[Path, str]) -> Path:
-        drawing, facing = task
+    def _measure_one(task: tuple[Path, str, Path]) -> Path:
+        drawing, facing, out = task
         result = measure(drawing, sam, facing=facing, cache_dir=cache_dir)
-        out = drawing.parent / f"{drawing.stem}.landmarks.json"
         out.write_text(json.dumps(result, indent=1) + "\n", encoding="utf-8")
         return out
 
