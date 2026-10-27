@@ -11,6 +11,7 @@ import cv2
 import numpy as np
 from PIL import Image, ImageOps
 
+from karagoz.engine.camera import BBox, Box
 from karagoz.engine.patch import Patch, apply_patch, load_patch
 from karagoz.engine.xsheet import Exposure
 from karagoz.spec import Mouth
@@ -284,18 +285,14 @@ def _layers_equal(a: list[tuple[Image.Image, Placement]], b: list[tuple[Image.Im
     return True
 
 
-def render_frames(
+def _first_placements(
     exp: Exposure,
-    mouths: dict[str, Mouth],
     assets: ShotAssets,
     order: list[str],
-    out_dir: Path,
-    frame: tuple[int, int] = (1920, 1080),
-    mirror: frozenset[str] = frozenset(),
-    scales: dict[str, float] | None = None,
-) -> list[str]:
-    """Render every frame of a shot to numbered PNGs; return deduplicated warnings."""
-    out_dir.mkdir(parents=True, exist_ok=True)
+    frame: tuple[int, int],
+    mirror: frozenset[str],
+    scales: dict[str, float] | None,
+) -> tuple[dict[str, Placement], dict[str, Image.Image]]:
     first_images: list[Image.Image] = []
     first_chars: list[str] = []
     for character in order:
@@ -327,11 +324,70 @@ def render_frames(
         scales_list = [scales.get(ch) for ch in first_chars]
     placements_list = place_row(placed_images, frame=frame, scales=scales_list)
     placements = dict(zip(first_chars, placements_list, strict=True))
+    images = dict(zip(first_chars, placed_images, strict=True))
+    return (placements, images)
+
+
+def character_bboxes(
+    exp: Exposure,
+    assets: ShotAssets,
+    order: list[str],
+    frame: tuple[int, int] = (1920, 1080),
+    mirror: frozenset[str] = frozenset(),
+    scales: dict[str, float] | None = None,
+) -> dict[str, BBox]:
+    """Opaque bbox in frame pixels of each character's first drawing at render placement."""
+    placements, images = _first_placements(exp, assets, order, frame, mirror, scales)
+    fw, fh = frame
+    out: dict[str, BBox] = {}
+    for character, pl in placements.items():
+        img = images[character]
+        w, h = img.size
+        sw = max(1, int(round(w * pl.scale)))
+        sh = max(1, int(round(h * pl.scale)))
+        if (sw, sh) == (w, h):
+            scaled = img.convert("RGBA")
+        else:
+            scaled = img.convert("RGBA").resize((sw, sh), Image.Resampling.LANCZOS)
+        alpha = np.array(scaled)[:, :, 3]
+        ys, xs = np.nonzero(alpha > 0)
+        if ys.size == 0:
+            continue
+        fx0 = pl.x + int(xs.min())
+        fy0 = pl.y + int(ys.min())
+        fx1 = pl.x + int(xs.max()) + 1
+        fy1 = pl.y + int(ys.max()) + 1
+        cx0 = max(0, fx0)
+        cy0 = max(0, fy0)
+        cx1 = min(fw, fx1)
+        cy1 = min(fh, fy1)
+        if cx1 <= cx0 or cy1 <= cy0:
+            continue
+        out[character] = (cx0, cy0, cx1, cy1)
+    return out
+
+
+def render_frames(
+    exp: Exposure,
+    mouths: dict[str, Mouth],
+    assets: ShotAssets,
+    order: list[str],
+    out_dir: Path,
+    frame: tuple[int, int] = (1920, 1080),
+    mirror: frozenset[str] = frozenset(),
+    scales: dict[str, float] | None = None,
+    camera: list[Box] | None = None,
+) -> list[str]:
+    """Render every frame of a shot to numbered PNGs; return deduplicated warnings."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    placements, _images = _first_placements(exp, assets, order, frame, mirror, scales)
     owner_by_placement: dict[int, str] = {id(pl): ch for ch, pl in placements.items()}
     fitted_bg = _fit_background(assets.background(), frame)
     all_warnings: list[str] = []
     prev_layers: list[tuple[Image.Image, Placement]] | None = None
     prev_path: Path | None = None
+    prev_box: Box | None = None
+    fw, fh = frame
     for f in range(exp.length):
         layers, warnings = frame_layers(exp, mouths, assets, order, placements, f)
         if mirror:
@@ -345,13 +401,24 @@ def render_frames(
             layers = mirrored
         all_warnings.extend(warnings)
         path = out_dir / f"{f:05d}.png"
-        if prev_layers is not None and prev_path is not None and _layers_equal(layers, prev_layers):
+        cur_box: Box | None = None
+        if camera is not None and f < len(camera):
+            cur_box = camera[f]
+        box_same = camera is None or cur_box == prev_box
+        if prev_layers is not None and prev_path is not None and _layers_equal(layers, prev_layers) and box_same:
             shutil.copyfile(prev_path, path)
         else:
             frame_img = _composite_layers(fitted_bg, layers)
+            if cur_box is not None and not (cur_box.x == 0 and cur_box.y == 0 and cur_box.w == fw and cur_box.h == fh):
+                frame_img = frame_img.resize(
+                    frame,
+                    Image.Resampling.LANCZOS,
+                    box=(cur_box.x, cur_box.y, cur_box.x + cur_box.w, cur_box.y + cur_box.h),
+                )
             frame_img.save(path, format="PNG")
         prev_layers = layers
         prev_path = path
+        prev_box = cur_box
     seen: set[str] = set()
     deduped: list[str] = []
     for warning in all_warnings:
