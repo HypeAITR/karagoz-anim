@@ -173,3 +173,13 @@ def test_only_and_until_keep_the_location(prod: Path, skills: Path, tmp_path: Pa
     s2 = studio(prod, skills, tmp_path, FakeAgent(), code2)
     s2.run(until="location")
     assert code2.ran == ["salon/location"] and s2.board.tasks["ep/director"].state is State.READY
+
+
+def test_layout_reads_the_region_map(prod: Path) -> None:
+    """Maintainer's addition (3b): Layout writes `on` / `rests_on` with the region map's names."""
+    shutil.copy(FIX / "shots.yaml", prod / EP / "shots.yaml")
+    shutil.copy(FIX / "lines.yaml", prod / EP / "lines.yaml")
+    layout = {t.id: t for t in plan_tasks(prod, EP)}["sh01/layout"]
+    assert layout.inputs == ["scene1/continuity", "salon/location"]
+    assert layout.files_in[-1] == "locations/salon/regions.yaml"
+    assert "locations/salon/background.png" not in layout.files_in

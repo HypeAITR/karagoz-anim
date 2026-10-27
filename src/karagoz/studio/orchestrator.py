@@ -261,8 +261,9 @@ def plan_tasks(prod: Path, episode: str) -> list[Task]:
         tasks.append(
             Task(
                 id=f"{shot.id}/layout",
-                inputs=[f"scene{shot.scene}/continuity"],
-                files_in=[*base_in, f"{episode}/continuity.yaml"],
+                inputs=[f"scene{shot.scene}/continuity", *loc_inputs],
+                # the region map's place and object names for `on` / `rests_on` (its numbers are hidden by the view)
+                files_in=[*base_in, f"{episode}/continuity.yaml", *loc_files[1:]],
                 files_out=[poses],
             )
         )
