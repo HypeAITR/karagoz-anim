@@ -41,10 +41,16 @@ characters:
 
 ## Rules
 
+Your `acting` text becomes the CHANGE part of an image-model prompt. Read the `draw-prompts` skill: it lists what
+the model does and does not follow (measured). The short version: name what stays as concretely as what changes,
+never describe furniture as something to draw, no anatomical close-ups.
+
+
 - **As few key poses as the acting needs:** usually one per idea (listening, reacting, gesturing). The main
   acting goes to the character the shot is about; a listener gets one held pose (they only blink).
-- **Every pose of a character in a shot is drawn in the same framing and view**; only what changes is described
-  as changing. Repeat the parts that stay ("same seat and legs") so the drawing does not drift.
+- **Every pose of a character in a shot is drawn in the same framing and view**, each pose from the previous one;
+  only what changes is described as changing. Name the parts that stay ("both feet still flat on the floor", "right
+  foot still raised at knee height"); "same seat and legs" alone is too vague for the model.
 - `acting` names body parts and places: which hand, at which height, what it holds, where the head turns, where the
   eyes look, the brows. Avoid vague words (a bit, somewhat, nice). **Always "mouth closed"**: mouths come from a
   separate library and are timed to the voice.
