@@ -1,0 +1,65 @@
+"""Budget keeper: per-unit and per-episode USD caps for paid work."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import StrEnum
+from typing import Any
+
+
+class Verdict(StrEnum):
+    OK = "ok"
+    UNIT_OVER = "unit_over"
+    EPISODE_OVER = "episode_over"
+
+
+def _round6(x: float) -> float:
+    return round(float(x), 6)
+
+
+@dataclass
+class Budget:
+    unit_cap_usd: float
+    episode_cap_usd: float
+    spent: dict[str, float] = field(default_factory=dict)
+
+    def total(self) -> float:
+        return _round6(sum(self.spent.values(), 0.0))
+
+    def check(self, unit: str, estimate_usd: float) -> Verdict:
+        """Would spending estimate_usd on unit be allowed? Equal to the cap is allowed."""
+        if estimate_usd < 0:
+            raise ValueError(f"estimate_usd must be >= 0, got {estimate_usd}")
+        if _round6(self.total() + estimate_usd) > self.episode_cap_usd:
+            return Verdict.EPISODE_OVER
+        if _round6(self.spent.get(unit, 0.0) + estimate_usd) > self.unit_cap_usd:
+            return Verdict.UNIT_OVER
+        return Verdict.OK
+
+    def charge(self, unit: str, usd: float) -> Verdict:
+        """Record the spend always, then return the verdict for the state after it."""
+        if usd < 0:
+            raise ValueError(f"usd must be >= 0, got {usd}")
+        self.spent[unit] = _round6(self.spent.get(unit, 0.0) + usd)
+        return self.check(unit, 0.0)
+
+    def refund(self, unit: str, usd: float) -> None:
+        """Take back spend from a failed paid call; never below 0."""
+        if usd < 0:
+            raise ValueError(f"usd must be >= 0, got {usd}")
+        self.spent[unit] = _round6(max(0.0, self.spent.get(unit, 0.0) - usd))
+
+    def to_json(self) -> dict[str, Any]:
+        return {
+            "unit_cap_usd": self.unit_cap_usd,
+            "episode_cap_usd": self.episode_cap_usd,
+            "spent": dict(self.spent),
+        }
+
+    @classmethod
+    def from_json(cls, data: dict[str, Any]) -> Budget:
+        return cls(
+            unit_cap_usd=data["unit_cap_usd"],
+            episode_cap_usd=data["episode_cap_usd"],
+            spent=dict(data.get("spent", {})),
+        )
