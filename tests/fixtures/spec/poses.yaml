@@ -1,0 +1,25 @@
+version: 1
+shot: sh01
+characters:
+  ali:
+    poses:
+      - id: p1
+        view: three_quarter_right
+        expression: neutral
+        acting: "Oturuyor, sağ elinde bardak ağzına yakın, gözler yarı kapalı."
+      - id: p2
+        view: three_quarter_right
+        expression: neutral
+        acting: "Oturuyor, sağ kol Ayşe'ye doğru uzanmış, bardağı uzatıyor."
+    transitions:
+      - from: p1
+        to: p2
+        inbetweens:
+          - "Kol göğüs hizasında, bardak dik duruyor."
+          - "Kol yarıya kadar uzanmış, bardak dik duruyor."
+  ayse:
+    poses:
+      - id: p1
+        view: three_quarter_left
+        faceless: true
+        acting: "Arkası dönük oturuyor, yalnız saçı ve omuzları görünüyor."
