@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import shutil
 import subprocess
@@ -16,11 +17,20 @@ from PIL import Image
 
 from karagoz.engine.camera import camera_track
 from karagoz.engine.compose import ShotAssets, character_bboxes, cutout, render_frames
+from karagoz.engine.landmarks import body_drawings
 from karagoz.engine.mouth import mouth_track
+from karagoz.engine.placement import (
+    CharacterInput,
+    DrawingPlacement,
+    PoseInfo,
+    solve,
+    target_head_px,
+    to_json,
+)
 from karagoz.engine.render import FPS, Clip, RenderError, encode, loudness, mix
 from karagoz.engine.timing import resolve_episode
 from karagoz.engine.xsheet import expand
-from karagoz.spec import Align, Lines, Mouth, MouthCue, Poses, Shots, Style, Xsheet, load
+from karagoz.spec import Align, Lines, Mouth, MouthCue, Poses, Regions, Shot, Shots, SpecError, Style, Xsheet, load
 
 STANDING_HEIGHT = 0.80
 
@@ -147,6 +157,167 @@ def _join_shot_mp4s(mp4s: list[Path], out_mp4: Path) -> Path:
     return out_mp4
 
 
+def _height_cm(info: dict[str, Any]) -> float | None:
+    value = info.get("height_cm")
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        result = float(value)
+        return result if result > 0 else None
+    return None
+
+
+def _ref_head_height(data: Any) -> float | None:
+    if not isinstance(data, dict):
+        return None
+    head = data.get("head")
+    if not isinstance(head, dict):
+        return None
+    box = head.get("box")
+    if not isinstance(box, (list, tuple)) or len(box) != 4:
+        return None
+    y0_raw, y1_raw = box[1], box[3]
+    if isinstance(y0_raw, bool) or isinstance(y1_raw, bool):
+        return None
+    if not isinstance(y0_raw, (int, float)) or not isinstance(y1_raw, (int, float)):
+        return None
+    height = float(y1_raw) - float(y0_raw)
+    return height if height > 0 else None
+
+
+def _opaque_height(img: Image.Image) -> int | None:
+    cut = cutout(img)
+    alpha = np.array(cut.convert("RGBA"))[:, :, 3]
+    ys, _ = np.nonzero(alpha > 0)
+    if ys.size == 0:
+        return None
+    height = int(ys.max()) - int(ys.min()) + 1
+    return height if height > 0 else None
+
+
+def _placement_mode(
+    prod: Path,
+    episode_dir: Path,
+    shot: str,
+    shot_entry: Shot,
+    order: list[str],
+    mirror: frozenset[str],
+    characters: dict[str, dict[str, Any]],
+    poses: Poses | None,
+) -> tuple[dict[str, dict[str, DrawingPlacement]], dict[str, np.ndarray], list[str]] | None:
+    """Build solver placements and occluder masks, or None when placement mode is off."""
+    regions_path = prod / "locations" / shot_entry.location / "regions.yaml"
+    if not regions_path.is_file():
+        return None
+    try:
+        regions_obj = load(regions_path)
+    except (SpecError, OSError):
+        return None
+    if not isinstance(regions_obj, Regions):
+        return None
+    regions: Regions = regions_obj
+    if regions.scale is None:
+        return None
+    assets_dir = episode_dir / "assets" / shot
+    chars = [c for c in order if body_drawings(assets_dir, c)]
+    place_by_char: dict[str, str | None] = {}
+    if shot_entry.characters:
+        for entry in shot_entry.characters:
+            place_by_char[entry.name] = entry.place
+    poses_by_char: dict[str, dict[str, PoseInfo]] = {}
+    if poses is not None:
+        for char_name, char_poses in poses.characters.items():
+            mapping: dict[str, PoseInfo] = {}
+            for pose in char_poses.poses:
+                mapping[pose.id] = PoseInfo(support=pose.support, on=pose.on, rests_on=tuple(pose.rests_on or []))
+            poses_by_char[char_name] = mapping
+    inputs: list[CharacterInput] = []
+    for character in chars:
+        info = characters.get(character)
+        if info is None:
+            return None
+        height = _height_cm(info)
+        if height is None:
+            return None
+        ref_rel = info.get("ref")
+        if not isinstance(ref_rel, str) or not ref_rel:
+            return None
+        ref_path = prod / ref_rel
+        if not ref_path.is_file():
+            return None
+        ref_lm_path = assets_dir / character / "ref.landmarks.json"
+        if not ref_lm_path.is_file():
+            return None
+        try:
+            ref_lm_data: Any = json.loads(ref_lm_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return None
+        head_h = _ref_head_height(ref_lm_data)
+        if head_h is None:
+            return None
+        try:
+            ref_img = Image.open(ref_path).convert("RGB")
+        except OSError:
+            return None
+        opaque_h = _opaque_height(ref_img)
+        if opaque_h is None or opaque_h <= 0:
+            return None
+        head_ratio = head_h / float(opaque_h)
+        if head_ratio <= 0:
+            return None
+        target = target_head_px(height, regions.scale.px_per_cm, head_ratio)
+        char_dir = assets_dir / character
+        try:
+            lm_files = sorted(char_dir.glob("*.landmarks.json"), key=lambda p: p.name)
+        except OSError:
+            lm_files = []
+        landmarks: dict[str, dict[str, Any]] = {}
+        for lm_path in lm_files:
+            if lm_path.name == "ref.landmarks.json":
+                continue
+            if not lm_path.name.endswith(".landmarks.json"):
+                continue
+            drawing_name = lm_path.name[: -len(".landmarks.json")]
+            if not drawing_name:
+                continue
+            try:
+                data: Any = json.loads(lm_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if isinstance(data, dict):
+                landmarks[drawing_name] = data
+        inputs.append(
+            CharacterInput(
+                name=character,
+                target_head_px=target,
+                mirror=(character in mirror),
+                place=place_by_char.get(character),
+                poses=poses_by_char.get(character, {}),
+                landmarks=landmarks,
+            )
+        )
+    placements, solver_warnings = solve(inputs, regions)
+    out_path = assets_dir / "placement.json"
+    out_path.write_text(json.dumps(to_json(placements, solver_warnings), indent=1) + "\n", encoding="utf-8")
+    occluders: dict[str, np.ndarray] = {}
+    frame_w, frame_h = 1920, 1080
+    for obj in regions.objects:
+        if not obj.front:
+            continue
+        mask_path = regions_path.parent / obj.mask
+        if not mask_path.is_file():
+            continue
+        try:
+            mask_img = Image.open(mask_path).convert("L")
+        except OSError:
+            continue
+        if mask_img.size != (frame_w, frame_h):
+            mask_img = mask_img.resize((frame_w, frame_h), Image.Resampling.NEAREST)
+        arr = np.array(mask_img) > 127
+        occluders[obj.name] = arr if arr.dtype == bool else arr.astype(bool)
+    return (placements, occluders, solver_warnings)
+
+
 def render_shot(prod: Path, episode: str, shot: str) -> ShotRender:
     """Render one shot: frames, mix, MP4."""
     episode_dir = prod / episode
@@ -268,16 +439,37 @@ def render_shot(prod: Path, episode: str, shot: str) -> ShotRender:
             scales[character] = character_scale(ref_img, canvas)
         except (ValueError, ZeroDivisionError, OSError):
             continue
+    placement_data = _placement_mode(prod, episode_dir, shot, shot_entry, order, mirror, characters, poses)
+    placements_map: dict[str, dict[str, DrawingPlacement]] | None = None
+    occluder_masks: dict[str, np.ndarray] | None = None
+    if placement_data is not None:
+        placements_map, occluder_masks, solver_warnings = placement_data
+        warnings.extend(solver_warnings)
     frames_dir = episode_dir / "render" / shot / "frames"
     if frames_dir.exists():
         shutil.rmtree(frames_dir)
     frames_dir.mkdir(parents=True)
-    bboxes = character_bboxes(exp, assets, order, mirror=mirror, scales=scales)
+    if placements_map is not None:
+        bboxes = character_bboxes(exp, assets, order, placements=placements_map)
+    else:
+        bboxes = character_bboxes(exp, assets, order, mirror=mirror, scales=scales)
     camera_boxes, camera_warnings = camera_track(xs.camera, shot_entry.framing, shot, exp.length, timing, style, bboxes)
     warnings.extend(camera_warnings)
-    render_warnings = render_frames(
-        exp, mouths, assets, order, frames_dir, mirror=mirror, scales=scales, camera=camera_boxes
-    )
+    if placements_map is not None:
+        render_warnings = render_frames(
+            exp,
+            mouths,
+            assets,
+            order,
+            frames_dir,
+            camera=camera_boxes,
+            placements=placements_map,
+            occluders=occluder_masks,
+        )
+    else:
+        render_warnings = render_frames(
+            exp, mouths, assets, order, frames_dir, mirror=mirror, scales=scales, camera=camera_boxes
+        )
     warnings.extend(render_warnings)
     shot_span = timing.shot(shot)
     clips: list[Clip] = []
