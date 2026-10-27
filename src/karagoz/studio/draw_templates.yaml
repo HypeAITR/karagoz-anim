@@ -2,8 +2,8 @@
 # draw-prompts skill (.claude/skills/draw-prompts/SKILL.md): REFERENCES, WHO, KEEP, CHANGE, NEVER, FACING.
 # The reasons for each rule (measured on Muse Image) are in that skill. Do not change a template without running the
 # prompt regression set and recording the result.
-# Placeholders: {style} {facing} {acting} {description} {shape} {eyes} {props}; {never} is replaced at load time.
-version: 2
+# Placeholders: {style} {facing} {support} {acting} {description} {shape} {eyes} {props}; {never} is replaced at load time.
+version: 3
 
 style: >-
   Flat-colour 2D TV cartoon style: thick clean black outlines, flat fills with at most one simple flat shadow tone,
@@ -14,13 +14,25 @@ never: >-
   floor, no background, no other people, no logos or brand marks anywhere (shoes included), no text except text that
   is part of the character's own clothes, no border or frame.
 
+support_text:
+  sit: >-
+    BODY: sitting on an invisible seat at knee height: thighs horizontal, shins vertical, both feet flat on the
+    ground below the knees; the hips are at knee height, not lower (not crouching, not squatting).
+  stand: >-
+    BODY: standing upright, weight on both feet, both feet flat on the ground.
+  crouch: >-
+    BODY: crouching, knees bent, hips lifted from the seat, both feet flat on the ground.
+  lie: >-
+    BODY: lying on the back on an invisible flat surface.
+
 background: >-
   {style} Background only, no people, no characters, no logos, no text: {description}
 
 key_pose: >-
   REFERENCES: Image 1 is the character's model sheet; edit it into a new drawing.
   WHO: the same character with the same face, proportions, hair, clothes, colours and thick black outline.
-  CHANGE (new pose): {acting} Mouth closed. {props}
+  CHANGE (new pose): {support}{acting} Mouth closed.
+  {props}
   {never}
   FACING: the character faces the {facing} side of the image in a three-quarter view.
   OUTPUT: {style} One full-body drawing of only this character on a plain white background.
@@ -30,8 +42,9 @@ key_pose_next: >-
   start from image 2.
   WHO: the same character with the same face, proportions, hair, clothes, colours and thick black outline.
   KEEP from image 2: everything this text does not change, exactly as in image 2: where the body sits or stands, both
-  legs and both feet, the scale, the framing, and what the hands hold.
-  CHANGE: {acting} Mouth closed. {props}
+  legs and both feet, the scale and the framing.
+  CHANGE: {support}{acting} Mouth closed.
+  {props}
   {never}
   FACING: the character faces the {facing} side of the image in a three-quarter view.
   OUTPUT: {style} One full-body drawing of only this character on a plain white background.
@@ -41,7 +54,8 @@ inbetween: >-
   between them.
   KEEP: the same character at the same scale and position as in both images; everything this text does not change
   stays as in image 1.
-  CHANGE: {description} Mouth closed. {props}
+  CHANGE: {description} Mouth closed.
+  {props}
   {never}
   FACING: the character faces the {facing} side of the image.
   OUTPUT: {style} One full-body drawing of only this character on a plain white background.

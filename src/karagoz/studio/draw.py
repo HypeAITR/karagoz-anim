@@ -22,7 +22,8 @@ from karagoz.engine.patch import PatchError, make_patch, save_patch
 from karagoz.engine.timing import resolve_episode
 from karagoz.engine.xsheet import expand
 from karagoz.meta.client import MetaApiError
-from karagoz.spec import Align, Lines, Poses, Shots, SpecError, Style, Xsheet, load
+from karagoz.spec import Align, Lines, Pose, Poses, Shots, SpecError, Style, Xsheet, load
+from karagoz.spec.models import Hand
 
 USD_PER_IMAGE = 0.01
 
@@ -177,6 +178,45 @@ def _load_locations(path: Path) -> dict[str, str]:
         if isinstance(desc, str):
             out[name] = desc
     return out
+
+
+def _load_prop_descriptions(path: Path) -> dict[str, str]:
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    raw_props = data.get("props")
+    if not isinstance(raw_props, dict):
+        return {}
+    out: dict[str, str] = {}
+    for name, entry in raw_props.items():
+        if not isinstance(name, str) or not isinstance(entry, dict):
+            continue
+        desc = entry.get("description")
+        if isinstance(desc, str):
+            out[name] = desc
+    return out
+
+
+def _hands_text(holds: dict[Hand, str | None] | None, descriptions: dict[str, str]) -> str:
+    """The HANDS prompt section from a pose's `holds`; `""` when the pose has no `holds`."""
+    if holds is None:
+        return ""
+    hands: tuple[tuple[Hand, str], ...] = (("right", "Right"), ("left", "Left"))
+    sentences: list[str] = []
+    for hand, label in hands:
+        prop = holds.get(hand)
+        if prop is None:
+            sentences.append(f"{label} hand is empty.")
+        else:
+            sentences.append(f"{label} hand holds {descriptions.get(prop, prop)}.")
+    return f"HANDS: {' '.join(sentences)} Nothing else in the hands."
 
 
 def location_objects(prod: Path, location: str) -> list[str]:
@@ -351,6 +391,10 @@ def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
     eye_states = templates.get("eye_states")
     if not isinstance(mouth_shapes, dict) or not isinstance(eye_states, dict):
         raise ValueError(f"{TEMPLATES_PATH}: missing mouth_shapes or eye_states")
+    support_texts = templates.get("support_text")
+    if not isinstance(support_texts, dict):
+        raise ValueError(f"{TEMPLATES_PATH}: missing support_text")
+    prop_descriptions = _load_prop_descriptions(prod / "props.yaml")
 
     shot_entry = next((s for s in shots.shots if s.id == shot), None)
     if shot_entry is None:
@@ -405,16 +449,26 @@ def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
         ordered += sorted(pid for pid in pose_ids[char] if pid not in ordered)
         previous: Path | None = None
         for index, pose_id in enumerate(ordered):
+            matched: Pose | None = None
             acting = ""
             if poses is not None and char in poses.characters:
                 for pose_entry in poses.characters[char].poses:
                     if pose_entry.id == pose_id:
                         acting = pose_entry.acting
+                        matched = pose_entry
                         break
             if _will_mirror(shots, shot, char, info.natural_facing):
                 acting = swap_left_right(acting)
+            support_str = (
+                f"{support_texts[matched.support]} " if matched is not None and matched.support is not None else ""
+            )
+            props_str = _hands_text(matched.holds if matched is not None else None, prop_descriptions)
+            if _will_mirror(shots, shot, char, info.natural_facing):
+                props_str = swap_left_right(props_str)
             tpl = key_pose_tpl if previous is None else key_pose_next_tpl
-            prompt = tpl.format(style=style_text, facing=info.natural_facing, props="", acting=acting)
+            prompt = tpl.format(
+                style=style_text, facing=info.natural_facing, support=support_str, props=props_str, acting=acting
+            )
             out = assets_dir / char / f"{pose_id}.png"
             jobs.append(
                 DrawJob(
@@ -465,7 +519,19 @@ def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
                 desc = f"the in-between drawing {k} of {n}: halfway between the two drawings"
             if _will_mirror(shots, shot, char, info.natural_facing):
                 desc = swap_left_right(desc)
-            prompt = inbetween_tpl.format(style=style_text, facing=info.natural_facing, props="", description=desc)
+            holds: dict[Hand, str | None] | None = None
+            wanted = a if k <= n / 2 else b
+            if poses is not None and char in poses.characters:
+                for pose_entry in poses.characters[char].poses:
+                    if pose_entry.id == wanted:
+                        holds = pose_entry.holds
+                        break
+            props_str = _hands_text(holds, prop_descriptions)
+            if _will_mirror(shots, shot, char, info.natural_facing):
+                props_str = swap_left_right(props_str)
+            prompt = inbetween_tpl.format(
+                style=style_text, facing=info.natural_facing, props=props_str, description=desc
+            )
             jobs.append(
                 DrawJob(
                     kind="inbetween",
