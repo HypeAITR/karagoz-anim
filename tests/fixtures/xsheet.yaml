@@ -1,0 +1,21 @@
+version: 1
+shot: sh01
+tracks:
+  ali.body:
+    - { at: shot.in, pose: p1 }
+    - at: L02.w("ver").start - beat.gesture_lead
+      to: p2
+      via: inbetween
+      cadence: twos
+      anticipate: true
+  ali.eyes:
+    - { at: L02.start - beat.blink_lead, event: blink }
+  ayse.eyes: []
+camera:
+  - { at: shot.in, hold: wide }
+mouth:
+  ali: { source: auto }
+  ayse:
+    source: auto
+    edits:
+      - { at: L01.w("pazar").start, shape: D }

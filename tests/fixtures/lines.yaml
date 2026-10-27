@@ -1,0 +1,12 @@
+version: 1
+episode: ep-test
+lines:
+  - id: L01
+    speaker: ayse
+    text: "Yarın pazar, Ali."
+    delivery: "neşeli"
+    at: sh01.in + beat.shot_lead
+  - id: L02
+    speaker: ali
+    text: "Su ver bana."
+    at: L01.end + beat.react

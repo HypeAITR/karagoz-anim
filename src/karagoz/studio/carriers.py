@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import time
 from collections.abc import Callable
@@ -62,7 +63,7 @@ class Carrier(Protocol):
 
 @dataclass
 class MuseExecCarrier:
-    exe: str = field(default_factory=lambda: os.environ.get("KARAGOZ_MUSE", "muse"))
+    exe: str = field(default_factory=lambda: shutil.which(os.environ.get("KARAGOZ_MUSE", "muse")) or "muse")
     model: str = MUSE_MODEL
     name: str = "muse-exec"
     popen: Callable[..., Any] = subprocess.Popen
