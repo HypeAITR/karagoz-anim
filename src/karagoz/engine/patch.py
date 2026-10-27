@@ -29,7 +29,9 @@ def make_patch(
     variant: Image.Image,
     *,
     region: tuple[int, int, int, int] | None = None,
-    threshold: int = 24,
+    threshold: int = 40,
+    open_px: int = 5,
+    join: int = 120,
     grow: int = 6,
     feather: int = 2,
     max_area: float = 0.06,
@@ -45,37 +47,57 @@ def make_patch(
     var_arr = np.array(variant_rgba).astype(np.int16)
     changed = np.abs(base_arr - var_arr).max(axis=2) > threshold
 
-    if region is not None:
-        rx0, ry0, rx1, ry1 = region
-        window = np.zeros((height, width), dtype=bool)
-        window[max(ry0, 0) : max(ry1, 0), max(rx0, 0) : max(rx1, 0)] = True
-        changed &= window
-
-    if not changed.any():
-        raise PatchError("no change")
-
     grow = max(grow, 0)
     feather = max(feather, 0)
-    count, labels, stats, _ = cv2.connectedComponentsWithStats(changed.astype(np.uint8), connectivity=8)
-    largest = int(np.argmax(stats[1:, cv2.CC_STAT_AREA])) + 1
-    lx = int(stats[largest, cv2.CC_STAT_LEFT])
-    ly = int(stats[largest, cv2.CC_STAT_TOP])
-    lw = int(stats[largest, cv2.CC_STAT_WIDTH])
-    lh = int(stats[largest, cv2.CC_STAT_HEIGHT])
-    gx0, gy0 = lx - grow, ly - grow
-    gx1, gy1 = lx + lw + grow, ly + lh + grow
-    keep = labels == largest
-    for label in range(1, count):
-        if label == largest:
-            continue
+    join = max(join, 0)
+    if open_px <= 1:
+        opened = changed
+    else:
+        open_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (open_px, open_px))
+        opened = cv2.morphologyEx(changed.astype(np.uint8), cv2.MORPH_OPEN, open_kernel) != 0
+
+    if not opened.any():
+        raise PatchError("no change")
+
+    count, labels, stats, _ = cv2.connectedComponentsWithStats(opened.astype(np.uint8), connectivity=8)
+    if count <= 1:
+        raise PatchError("no change")
+
+    def _box(label: int) -> tuple[int, int, int, int]:
         ox0 = int(stats[label, cv2.CC_STAT_LEFT])
         oy0 = int(stats[label, cv2.CC_STAT_TOP])
         ox1 = ox0 + int(stats[label, cv2.CC_STAT_WIDTH])
         oy1 = oy0 + int(stats[label, cv2.CC_STAT_HEIGHT])
-        if ox0 <= gx1 and ox1 >= gx0 and oy0 <= gy1 and oy1 >= gy0:
-            keep |= labels == label
+        return (ox0, oy0, ox1, oy1)
 
+    kept: list[int] = []
+    if region is not None:
+        rx0, ry0, rx1, ry1 = region
+        for label in range(1, count):
+            ox0, oy0, ox1, oy1 = _box(label)
+            if ox0 < rx1 and ox1 > rx0 and oy0 < ry1 and oy1 > ry0:
+                kept.append(label)
+        if not kept:
+            raise PatchError("no change")
+    else:
+        largest = int(np.argmax(stats[1:, cv2.CC_STAT_AREA])) + 1
+        lx0, ly0, lx1, ly1 = _box(largest)
+        kept.append(largest)
+        for label in range(1, count):
+            if label == largest:
+                continue
+            ox0, oy0, ox1, oy1 = _box(label)
+            if ox0 <= lx1 + join and ox1 >= lx0 - join and oy0 <= ly1 + join and oy1 >= ly0 - join:
+                kept.append(label)
+
+    keep_opened = np.isin(labels, np.array(kept)).reshape(height, width)
     dilate_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * grow + 1, 2 * grow + 1))
+    if grow > 0:
+        search_area = cv2.dilate((keep_opened.astype(np.uint8) * 255), dilate_kernel, iterations=1) != 0
+    else:
+        search_area = keep_opened
+    keep = changed & search_area
+
     dilated = cv2.dilate((keep.astype(np.uint8) * 255), dilate_kernel, iterations=1)
     if feather > 0:
         size = 2 * feather + 1
