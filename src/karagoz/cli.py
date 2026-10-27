@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import shutil
 import sys
+from pathlib import Path
 
 from karagoz import __version__, config
 
@@ -29,11 +30,28 @@ def cmd_doctor(_: argparse.Namespace) -> int:
     return 0 if ok else 1
 
 
+def cmd_check(args: argparse.Namespace) -> int:
+    """Check that an episode's files agree with each other."""
+    from karagoz.spec import check_paths
+
+    paths = [Path(p) for p in args.paths]
+    findings = check_paths(paths)
+    for finding in findings:
+        print(str(finding))
+    n_err = sum(1 for f in findings if f.level == "error")
+    n_warn = sum(1 for f in findings if f.level == "warn")
+    print(f"{n_err} error(s), {n_warn} warning(s)")
+    return 1 if n_err else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="karagoz", description=__doc__)
     parser.add_argument("--version", action="version", version=__version__)
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("doctor", help="check keys and tools (never prints secret values)").set_defaults(func=cmd_doctor)
+    check_p = sub.add_parser("check", help="check that an episode's files agree with each other")
+    check_p.add_argument("paths", nargs="+", help="episode directory or file to check")
+    check_p.set_defaults(func=cmd_check)
     return parser
 
 
