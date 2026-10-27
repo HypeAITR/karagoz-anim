@@ -35,6 +35,10 @@ fidelity to the script matters more than cleverness.
   other face each other: one `three_quarter_right`, the other `three_quarter_left`.
 - `lines`: the line ids heard in this shot. `in`/`out`: anchors (`start` or the previous shot's `.out` for `in`;
   usually `<last line>.end + beat.react` for `out`).
+- **Facing comes from the characters list.** `characters.yaml` gives each character's `natural_facing` (the
+  direction the image model draws them reliably) and `mirror_ok` (whether the engine may flip their drawings).
+  A character with `mirror_ok: false` must face their `natural_facing` in every shot; stage the others around
+  them (e.g. if she must face right, she sits on the left and he sits on the right facing left).
 - **Few shots.** A short dialogue between two people sitting together is one wide/medium shot unless the script
   asks for a reaction close-up. Every cut must earn its place (a reaction, a reveal, a punchline). Keep the
   180° rule: if A is left of B in one shot, A stays left in the next.
