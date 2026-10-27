@@ -1,0 +1,20 @@
+version: 1
+fps: 24
+size: [1920, 1080]
+live:
+  beats:
+    react: { value: 12, source: "test", tune: true }
+    shot_lead: { value: 8, source: "test" }
+    gesture_lead: { value: 2, source: "test" }
+    blink_lead: { value: 6, source: "test" }
+  hold:
+    min: { value: 6, source: "test" }
+  transition:
+    inbetweens: { value: 4, source: "test" }
+  blink:
+    duration: { value: 4, source: "test" }
+  mouth:
+    lead: { value: 2, source: "test" }
+    table:
+      X: { letters: [], note: "rest" }
+      D: { letters: [a] }

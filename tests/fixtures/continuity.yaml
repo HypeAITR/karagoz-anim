@@ -1,0 +1,14 @@
+version: 1
+scene: 1
+states:
+  - shot: sh01
+    character: ali
+    in: "Koltukta oturuyor, ayakları sehpada, elinde dolu bardak."
+    out: "Koltukta oturuyor, eli boş; bardak Ayşe'de."
+prop_states:
+  glass: [full, half, empty]
+props:
+  - shot: sh01
+    prop: glass
+    in: { holder: ali, state: full }
+    out: { holder: ayse, state: empty }

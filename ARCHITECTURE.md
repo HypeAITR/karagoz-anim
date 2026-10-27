@@ -20,7 +20,7 @@ A scene is a stack of layers, each with one behaviour managed by the engine: **h
 | Path | What |
 |---|---|
 | `src/karagoz/config.py` | secrets from outside the repo (`~/.karagoz-anim/.env`), never printed |
-| `src/karagoz/cli.py` | `karagoz` command (`doctor`) |
+| `src/karagoz/cli.py` | `karagoz` commands (`doctor`, `run`/`status`/`approve`/`retake`/`answer`) |
 | `src/karagoz/meta/client.py` | Meta Model API JSON client: retries on 429/5xx, key-free call records for the budget keeper |
 | `src/karagoz/meta/image.py` | Muse Image generate/edit; reasoning strength per task, search/shell tools off |
 | `src/karagoz/meta/sam.py` | SAM 3.1 text-prompted segments; box-local soft masks placed into the full frame |

@@ -8,6 +8,9 @@ import sys
 from pathlib import Path
 
 from karagoz import __version__, config
+from karagoz.studio.carriers import Carrier, HumanCarrier, MuseExecCarrier
+from karagoz.studio.orchestrator import Studio
+from karagoz.studio.tasks import Change
 
 REQUIRED_SECRETS = ("META_API_KEY", "ELEVENLABS_API_KEY")
 
@@ -44,6 +47,68 @@ def cmd_check(args: argparse.Namespace) -> int:
     return 1 if n_err else 0
 
 
+def _open_studio(prod: str, episode: str) -> Studio:
+    carriers: dict[str, Carrier] = {
+        "muse-exec": MuseExecCarrier(),
+        "human": HumanCarrier(Path(prod) / episode / "run" / "human_briefs"),
+    }
+    studio = Studio(prod=Path(prod), episode=episode, carriers=carriers)
+    studio.load()
+    return studio
+
+
+def _print_change(change: Change) -> None:
+    print(f"{change.task}: {change.old.value} -> {change.new.value}")
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    try:
+        studio = _open_studio(args.prod, args.episode)
+        studio.on_change = _print_change
+        studio.run(until=args.until, only=args.only)
+        print(studio.status())
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_status(args: argparse.Namespace) -> int:
+    try:
+        print(_open_studio(args.prod, args.episode).status())
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_approve(args: argparse.Namespace) -> int:
+    try:
+        _open_studio(args.prod, args.episode).approve(args.task)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_retake(args: argparse.Namespace) -> int:
+    try:
+        _open_studio(args.prod, args.episode).retake(args.task, args.note)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_answer(args: argparse.Namespace) -> int:
+    try:
+        _open_studio(args.prod, args.episode).answer(args.task, args.note)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="karagoz", description=__doc__)
     parser.add_argument("--version", action="version", version=__version__)
@@ -52,6 +117,38 @@ def build_parser() -> argparse.ArgumentParser:
     check_p = sub.add_parser("check", help="check that an episode's files agree with each other")
     check_p.add_argument("paths", nargs="+", help="episode directory or file to check")
     check_p.set_defaults(func=cmd_check)
+
+    run = sub.add_parser("run", help="run the studio pipeline for an episode")
+    run.add_argument("prod", help="production directory")
+    run.add_argument("episode", help="episode id")
+    run.add_argument("--until", metavar="DEPT", default=None, help="do not start later departments")
+    run.add_argument("--only", metavar="SHOT", default=None, help="only run tasks of this unit (+ ep/director)")
+    run.set_defaults(func=cmd_run)
+
+    status = sub.add_parser("status", help="show the task board")
+    status.add_argument("prod", help="production directory")
+    status.add_argument("episode", help="episode id")
+    status.set_defaults(func=cmd_status)
+
+    approve = sub.add_parser("approve", help="approve a task in review")
+    approve.add_argument("prod", help="production directory")
+    approve.add_argument("episode", help="episode id")
+    approve.add_argument("task", help="task id")
+    approve.set_defaults(func=cmd_approve)
+
+    retake = sub.add_parser("retake", help="send a task back for another take")
+    retake.add_argument("prod", help="production directory")
+    retake.add_argument("episode", help="episode id")
+    retake.add_argument("task", help="task id")
+    retake.add_argument("note", help="what to do differently")
+    retake.set_defaults(func=cmd_retake)
+
+    answer = sub.add_parser("answer", help="answer a task's question")
+    answer.add_argument("prod", help="production directory")
+    answer.add_argument("episode", help="episode id")
+    answer.add_argument("task", help="task id")
+    answer.add_argument("note", help="the answer")
+    answer.set_defaults(func=cmd_answer)
     return parser
 
 
