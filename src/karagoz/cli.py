@@ -228,6 +228,19 @@ def cmd_regress(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_questions(args: argparse.Namespace) -> int:
+    """Count the questions agents asked: by department, difficulty and topic (T-60 measurement)."""
+    from karagoz.studio.events import read_events
+    from karagoz.studio.questions import summarize
+
+    s = summarize(read_events(Path(args.prod) / args.episode / "run" / "events.jsonl"))
+    print(f"{s['total']} question(s): {s['allowed']} allowed, {s['refused']} refused, {s['answered']} answered")
+    for key in ("by_department", "by_difficulty", "by_topic"):
+        counts = ", ".join(f"{name} {n}" for name, n in sorted(s[key].items())) or "-"
+        print(f"  {key[3:]}: {counts}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="karagoz", description=__doc__)
     parser.add_argument("--version", action="version", version=__version__)
@@ -298,6 +311,11 @@ def build_parser() -> argparse.ArgumentParser:
     regress_p.add_argument("--label", default=None, help="short name for this record (e.g. the day's change)")
     regress_p.add_argument("--accept", action="store_true", help="make the current frames the new golden")
     regress_p.set_defaults(func=cmd_regress)
+
+    questions_p = sub.add_parser("questions", help="count the questions agents asked (department, difficulty, topic)")
+    questions_p.add_argument("prod", help="production directory")
+    questions_p.add_argument("episode", help="episode id")
+    questions_p.set_defaults(func=cmd_questions)
     return parser
 
 
