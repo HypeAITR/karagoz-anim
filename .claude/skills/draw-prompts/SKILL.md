@@ -18,8 +18,9 @@ Every character prompt has these sections, in this order (see `src/karagoz/studi
 |---|---|---|
 | **REFERENCES** | what each attached image is for: "Image 1 is the character's model sheet (identity). Image 2 is the previous pose (keep everything not changed)." | template |
 | **WHO** | same character: face, proportions, hair, clothes, colours, outline | template |
-| **KEEP** | what must not change from the previous drawing: seat, legs, scale, framing, props in hand and their state | template + the Layout text ("same seat and legs" is not enough: name them) |
-| **CHANGE** | only what is different in this drawing | Layout (`acting`, inbetween text) |
+| **KEEP** | what must not change from the previous drawing: seat, legs, scale, framing | template + the Layout text ("same seat and legs" is not enough: name them) |
+| **CHANGE** | only what is different in this drawing, after a **BODY** sentence for the pose's `support` (sitting geometry: invisible seat at knee height, thighs horizontal) | template (`support_text`) + Layout (`acting`, inbetween text) |
+| **HANDS** | what each hand holds, from the pose's `holds`, the prop described by `props.yaml`; an empty hand is said to be empty | template + Layout (`holds`) |
 | **NEVER** | no furniture, floor, floor shadow, logo, brand mark, second person, text other than the character's own clothing text, border | template |
 | **FACING** | always the character's natural facing (`characters.yaml`) | template; the engine mirrors |
 
@@ -36,6 +37,9 @@ A section that has nothing to say is left out, never left vague.
 | "Change only the mouth" still **nudges outlines everywhere** (1–2 px) | 1.6–4.5 % of pixels changed on mouth/eye edits | Mouths and eyes are used only as patches (WP-07); never swap whole frames |
 | The **content filter** reacts to anatomical words and is **not deterministic** | "mouth open wide, tongue, teeth" refused twice; a neutral wording passed; the same pose prompt was refused once and passed unchanged a minute later | Mouth shapes have neutral primary wording and a fallback; a refused prompt is sent once more as is, then the fallback |
 | Standing poses come out **smaller** than sitting poses (it fits the whole body in the canvas) | the standing character shrank when getting up | Scale by the model sheet, align poses by head size (pose alignment package) |
+| Draws **sitting as a crouch** when furniture is forbidden and the seat height is not given | D30: Naime's "sitting" poses had the hips 0.2 head heights above the feet (Recep, with "invisible backrest", 0.7) | BODY sentence from `support: sit` gives the seat geometry; the placement report flags feet far above the floor while sitting |
+| **Keeps a prop in a hand** after it is handed over when KEEP says "what the hands hold" | first slice: Recep kept a glass while Naime took it (two glasses) | KEEP no longer mentions hands; HANDS states every hand, empty ones included |
+| Loses a prop's **shape** when the acting text shortens its name | "tulip-shaped Turkish tea glass" drew right (D28); "tea glass" in Layout's text did not | `props.yaml` description goes into HANDS every time |
 | Background generation ignores the exact size | asked 1920×1080, got 2048×1152 | The engine resizes (cover + centre crop) |
 
 ## Writing acting text (Layout)

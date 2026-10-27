@@ -12,7 +12,9 @@ words, so every description must be something a person could draw without asking
 ## Inputs
 
 `shots.yaml` (your shot), `continuity.yaml` (start/end state of each character and prop), `lines.yaml`, the
-character list. Your pose `p1` must match the character's `in` state; the last pose must match `out`.
+character list, and the location's `locations/<location>/regions.yaml` (engine-made: the **place** names such as
+`sofa_left` and the **object** names such as `coffee_table`; ignore its numbers). Your pose `p1` must match the
+character's `in` state; the last pose must match `out`.
 
 ## poses.yaml
 
@@ -25,11 +27,17 @@ characters:
       - id: p1
         view: three_quarter_right
         expression: neutral
-        acting: "Sitting back on the sofa, both feet on the coffee table, right hand holding a full cup of tea at his lips, left arm on the armrest, eyes half closed towards the TV; mouth closed."
+        support: sit
+        rests_on: [coffee_table]
+        holds: { right: cup, left: null }
+        acting: "Sitting back, both feet raised at knee height as if resting on a low table, right hand holding a full cup of tea at his lips, left forearm resting at his side, eyes half closed towards the TV; mouth closed."
       - id: p2
         view: three_quarter_right
         expression: neutral
-        acting: "Same seat and legs; right arm stretched to his left towards Ayse at shoulder height, holding the empty cup out by its rim, head turned to her, eyebrows raised, bored; mouth closed."
+        support: sit
+        rests_on: [coffee_table]
+        holds: { right: cup, left: null }
+        acting: "Both feet still raised at knee height, back still leaning; right arm stretched to his left towards Ayse at shoulder height, holding the empty cup out by its rim, head turned to her, eyebrows raised, bored; mouth closed."
     transitions:
       - from: p1
         to: p2
@@ -38,6 +46,20 @@ characters:
           - "Arm halfway out to his left, cup upright; head turning towards Ayse."
           - "Arm almost straight, slightly past p2 (overshoot), cup upright; head on Ayse."
 ```
+
+## Where the body is (the engine places it from these names)
+
+- `support`: what carries the body in this pose: `sit`, `stand`, `crouch` (half up, weight on the feet) or `lie`.
+  **Always write it.** The engine anchors a sitting pose's hip on the seat and a standing pose's feet on the floor;
+  the drawing prompt adds the exact sitting geometry, so a sitting pose is never drawn as a crouch (D30).
+- `on`: the place (a name from `regions.yaml`) when it differs from the character's `place` in `shots.yaml`; usually
+  leave it out.
+- `rests_on`: objects (names from `regions.yaml`) the body touches besides its seat, e.g. feet on the
+  `coffee_table`. The engine then draws that object behind the character instead of in front.
+- `holds`: what each hand holds in this pose, with the prop names of `continuity.yaml`: `{right: cup, left: null}`.
+  Write it for every pose of a character who ever holds a prop in the shot. **When a prop leaves a hand, that hand
+  becomes `null` in the next pose**; the prompt then says "right hand is empty" explicitly (the first slice drew a
+  second glass because nothing said the hand had let go).
 
 ## Rules
 

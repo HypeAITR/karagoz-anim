@@ -13,6 +13,7 @@ fidelity to the script matters more than cleverness.
 
 - The script (plain text, the writer's own words; may be in Turkish).
 - `characters.yaml` / `locations.yaml` if present: the only character and location names you may use.
+- `locations/<location>/regions.yaml` if present: the places characters can be put (`sofa_left`, …).
 - `style.yaml`: named beats (`beat.react`, `beat.shot_lead`, …). You never write numbers.
 
 ## lines.yaml
@@ -29,8 +30,10 @@ fidelity to the script matters more than cleverness.
 
 - `id` `sh01`, `sh02`, … in order; `scene` (integer); `location` (name); `framing`
   (`wide|medium|medium_close|close|extreme_close|insert`).
-- `characters`: everyone visible, with `place` (a named spot of the location such as `sofa` or `sofa_left`, or
-  `left|center|right`), `facing` (another character, an object, or `left|right|camera|away`) and `view`
+- `characters`: everyone visible, with `place`: **a place name from the location's
+  `locations/<location>/regions.yaml`** (made by the engine before you run, e.g. `sofa_left`, `sofa_right`; ignore
+  its numbers; `karagoz check` rejects other names when the file exists), or `left|center|right` for a location
+  without a region map, `facing` (another character, an object, or `left|right|camera|away`) and `view`
   (`front|three_quarter_left|three_quarter_right|profile_left|profile_right|back`). Two people talking to each
   other face each other: one `three_quarter_right`, the other `three_quarter_left`.
 - `lines`: the line ids heard in this shot. `in`/`out`: anchors (`start` or the previous shot's `.out` for `in`;
