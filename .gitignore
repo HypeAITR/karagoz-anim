@@ -20,3 +20,6 @@ build/
 out/
 cache/
 *.mp4
+
+# work-package inputs given to coding agents (not part of the product)
+_wp/
