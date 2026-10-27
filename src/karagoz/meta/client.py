@@ -16,7 +16,7 @@ from typing import Any
 from karagoz import config
 
 BASE_URL = "https://api.meta.ai/v1"
-RETRYABLE = {429, 500, 502, 503, 504}
+RETRYABLE = {0, 429, 500, 502, 503, 504}  # 0 = transport error, no response
 
 Transport = Callable[[str, dict[str, Any], dict[str, str], float], tuple[int, dict[str, Any]]]
 
@@ -82,7 +82,10 @@ class MetaClient:
         start = time.monotonic()
         status, result = 0, dict[str, Any]()
         for attempt in range(1, self.max_attempts + 1):
-            status, result = self.transport(self.base_url + endpoint, body, headers, self.timeout)
+            try:
+                status, result = self.transport(self.base_url + endpoint, body, headers, self.timeout)
+            except (OSError, TimeoutError) as exc:  # timeouts, SSL EOF, resets (URLError is an OSError)
+                status, result = 0, {"error": {"message": f"transport error: {exc}"}}
             if status not in RETRYABLE or attempt == self.max_attempts:
                 break
             self.sleep(min(30.0, 2.0**attempt))

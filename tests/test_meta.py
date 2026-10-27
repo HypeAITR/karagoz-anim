@@ -108,3 +108,20 @@ def test_live_generate_and_segment(tmp_path: Path) -> None:
     )
     segs = Sam(c).segment(img, "apple")
     assert segs and segs[0].full_mask().max() > 0
+
+
+def test_transport_errors_are_retried() -> None:
+    """Regression (27 Oct): timeouts and SSL EOF raised out of the client instead of being retried like 5xx."""
+    from karagoz.meta.client import MetaClient
+
+    calls = {"n": 0}
+
+    def flaky(url: str, body: dict, headers: dict, timeout: float) -> tuple[int, dict]:  # type: ignore[type-arg]
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise TimeoutError("The read operation timed out")
+        return 200, {"ok": True}
+
+    c = MetaClient(api_key="k", transport=flaky, sleep=lambda s: None)
+    assert c.post("/x", {}) == {"ok": True}
+    assert calls["n"] == 3 and c.records[-1].attempts == 3

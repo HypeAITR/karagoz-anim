@@ -506,7 +506,13 @@ def _run_simple(job: DrawJob, image: MuseImageLike) -> tuple[int, float, str | N
             blobs = image.generate(job.prompt, n=1, reasoning=job.reasoning, size=job.size, tag="")
         else:
             calls += 1
-            blobs = image.edit(list(job.refs), job.prompt, n=1, reasoning=job.reasoning, size=job.size, tag="")
+            try:
+                blobs = image.edit(list(job.refs), job.prompt, n=1, reasoning=job.reasoning, size=job.size, tag="")
+            except MetaApiError as exc:
+                if exc.status != 400:
+                    raise
+                calls += 1  # the content filter is not deterministic (D29/D30): the same prompt often passes
+                blobs = image.edit(list(job.refs), job.prompt, n=1, reasoning=job.reasoning, size=job.size, tag="")
         img: Image.Image = Image.open(BytesIO(blobs[0]))
         if job.kind == "background":
             img = _fit_background(img)
@@ -538,7 +544,13 @@ def _run_patch(job: DrawJob, image: MuseImageLike) -> tuple[int, float, str | No
     calls = 0
     try:
         calls += 1
-        _run_patch_attempt(job, image, job.prompt, job.reasoning)
+        try:
+            _run_patch_attempt(job, image, job.prompt, job.reasoning)
+        except MetaApiError as exc:
+            if exc.status != 400:
+                raise
+            calls += 1  # same prompt once more: the content filter is not deterministic
+            _run_patch_attempt(job, image, job.prompt, job.reasoning)
     except Exception as first_exc:  # noqa: BLE001 - retry refused/failed patches once
         retriable = isinstance(first_exc, PatchError) or (
             isinstance(first_exc, MetaApiError) and first_exc.status == 400

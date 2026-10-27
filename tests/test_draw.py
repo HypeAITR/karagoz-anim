@@ -219,7 +219,7 @@ def test_refused_prompt_uses_fallback(prod: Path) -> None:
     mouth = [j for j in jobs if j.kind == "mouth"][0]
     img = FakeImage(refuse=mouth.prompt.split("The mouth: ")[1][:30])
     rep = run_draw([mouth], img)
-    assert rep.failed == [] and rep.calls == 2
+    assert rep.failed == [] and rep.calls == 3  # refused, same prompt again (refused), then the fallback
 
 
 def test_failure_is_reported_not_raised(prod: Path) -> None:
@@ -257,3 +257,18 @@ def test_mirrored_character_gets_swapped_directions(prod: Path) -> None:
     )
     p2 = next(j for j in plan_draw(prod, EP, "sh01") if j.kind == "pose" and j.drawing == "p2")
     assert "left arm to the right" in p2.prompt and "faces the right side" in p2.prompt
+
+
+def test_refused_pose_is_tried_once_more(prod: Path) -> None:
+    """The content filter is not deterministic: a refused pose prompt is sent once more before failing."""
+
+    class RefuseOnce(FakeImage):
+        def edit(self, images, prompt, **kw):  # type: ignore[no-untyped-def, override]
+            if not self.calls:
+                self.calls.append(("edit", prompt, len(images)))
+                raise MetaApiError(400, "/images/edits", '{"code": "content_policy_violation"}')
+            return super().edit(images, prompt, **kw)
+
+    jobs = [j for j in plan_draw(prod, EP, "sh01") if j.kind == "pose"][:1]
+    rep = run_draw(jobs, RefuseOnce())
+    assert rep.failed == [] and rep.calls == 2
