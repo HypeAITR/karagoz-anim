@@ -25,6 +25,7 @@ from karagoz.studio.briefs import make_brief
 from karagoz.studio.budget import Budget, Verdict
 from karagoz.studio.carriers import Brief, Carrier, RunResult
 from karagoz.studio.events import Clock, EventLog
+from karagoz.studio.questions import QuestionPolicy, allowance, difficulty, parse_question
 from karagoz.studio.tasks import Board, Change, State, Task
 
 if TYPE_CHECKING:
@@ -236,6 +237,7 @@ class Studio:
     budget: Budget = field(init=False)
     log: EventLog = field(init=False)
     _human: str = field(init=False, default="full", repr=False)
+    _questions: QuestionPolicy = field(init=False, default_factory=QuestionPolicy, repr=False)
     _carrier_map: dict[str, str] = field(init=False, default_factory=dict, repr=False)
     _max_steps_map: dict[str, int] = field(init=False, default_factory=dict, repr=False)
     _until: str | None = field(init=False, default=None, repr=False)
@@ -271,6 +273,7 @@ class Studio:
         if not isinstance(steps_cfg, dict):
             raise ValueError("studio.yaml: max_steps must be a mapping")
         self._max_steps_map = {str(k): int(v) for k, v in steps_cfg.items()}
+        self._questions = QuestionPolicy.from_config(cfg.get("questions"))
         tasks_path = self._run_dir / "tasks.json"
         if tasks_path.exists():
             self.board = Board.load(tasks_path)
@@ -429,15 +432,45 @@ class Studio:
         self.budget.charge(task.unit, result.cost_usd)
         if result.pending:
             return changes
+        decisions_path = workdir / "DECISIONS.md"
+        if decisions_path.is_file():
+            decisions_text = decisions_path.read_text(encoding="utf-8")
+            decisions_target = self._run_dir / "decisions" / f"{task.id.replace('/', '__')}.md"
+            decisions_target.parent.mkdir(parents=True, exist_ok=True)
+            decisions_target.write_bytes(decisions_path.read_bytes())
+            self.log.append(task.id, "decision", text=decisions_text)
         question_path = workdir / "QUESTION.md"
         if question_path.is_file():
-            question = question_path.read_text(encoding="utf-8")
+            raw_question = question_path.read_text(encoding="utf-8")
+            topic, question = parse_question(raw_question)
+            level = difficulty(task, self._shots_for_questions())
+            asked, pool_used = self._question_counts(task.id)
+            left = allowance(self._questions, self._human, level, asked, pool_used)
+            allowed = left is None or left > 0
+            from_pool = allowed and self._questions.quota and self._questions.per_task[level] <= asked
             target = self._run_dir / "questions" / f"{task.id.replace('/', '__')}.md"
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(question_path.read_bytes())
-            changes.append(self.board.ask(task.id, question))
+            if allowed:
+                changes.append(self.board.ask(task.id, raw_question))
+            else:
+                changes.append(
+                    self.board.finish(
+                        task.id, ok=False, note="no questions left: decide yourself and note it in DECISIONS.md"
+                    )
+                )
             self._record(changes[-1])
-            self.log.append(task.id, "question", text=question)
+            self.log.append(
+                task.id,
+                "question",
+                text=question,
+                topic=topic,
+                difficulty=level,
+                department=task.department,
+                allowed=allowed,
+                from_pool=from_pool,
+                left=left,
+            )
             return changes
         if not result.ok:
             changes.append(self.board.finish(task.id, ok=False, note=result.error))
@@ -511,15 +544,41 @@ class Studio:
                 dst = workdir / rel
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 dst.write_bytes(src.read_bytes())
-        brief_text = make_brief(task, self.prod, self.episode, workdir, self.skills_dir)
+        brief_text = make_brief(
+            task, self.prod, self.episode, workdir, self.skills_dir, questions_left=self._questions_left(task)
+        )
         (workdir / "BRIEF.md").write_text(brief_text, encoding="utf-8")
         target = self._run_dir / "briefs" / f"{task.id.replace('/', '__')}.md"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(brief_text, encoding="utf-8")
         return workdir
 
+    def _shots_for_questions(self) -> Shots | None:
+        try:
+            obj = load(self._episode_dir / "shots.yaml")
+        except SpecError:
+            return None
+        return obj if isinstance(obj, Shots) else None
+
+    def _question_counts(self, task_id: str) -> tuple[int, int]:
+        asked = 0
+        pool_used = 0
+        for event in self.log.read():
+            if event.get("kind") != "question" or event.get("allowed") is not True:
+                continue
+            if event.get("task") == task_id:
+                asked += 1
+            if event.get("from_pool") is True:
+                pool_used += 1
+        return (asked, pool_used)
+
+    def _questions_left(self, task: Task) -> int | None:
+        level = difficulty(task, self._shots_for_questions())
+        asked, pool_used = self._question_counts(task.id)
+        return allowance(self._questions, self._human, level, asked, pool_used)
+
     def _report_outside_writes(self, task: Task, workdir: Path) -> None:
-        placed = set(task.files_in) | {"style.yaml", "BRIEF.md", "QUESTION.md"} | set(task.files_out)
+        placed = set(task.files_in) | {"style.yaml", "BRIEF.md", "QUESTION.md", "DECISIONS.md"} | set(task.files_out)
         outside = sorted(
             path.relative_to(workdir).as_posix()
             for path in workdir.rglob("*")

@@ -95,6 +95,7 @@ class Shot(SpecModel):
     out: AnchorStr
     transition_in: Literal["cut", "from_black", "fade_from_black"] | None = None
     transition_out: Literal["cut", "to_black", "fade_to_black"] | None = None
+    difficulty: Literal["easy", "medium", "hard"] | None = None
     note: str | None = None
 
 

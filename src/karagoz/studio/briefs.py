@@ -15,9 +15,16 @@ QUESTION_TEXT = (
     "`QUESTION.md` in the working directory and stop without writing your output."
 )
 FINISH_TEXT = "When the files are written, stop. Do not run git."
+QUESTION_TOPIC_LINE = "Start `QUESTION.md` with a line `topic: <script|design|voice|timing|placement|drawing|other>`."
+NO_QUESTIONS_TEXT = (
+    "You may not ask a question in this task. Decide yourself. For every decision you were unsure about, "
+    "write one line to `DECISIONS.md` in the working directory: what you chose and why."
+)
 
 
-def make_brief(task: Task, prod: Path, episode: str, workdir: Path, skills_dir: Path) -> str:
+def make_brief(
+    task: Task, prod: Path, episode: str, workdir: Path, skills_dir: Path, questions_left: int | None = None
+) -> str:
     """Render the brief for ``task``. ``prod``/``episode``/``workdir`` locate the work; paths stay relative."""
     lines = [
         f"# Task: {task.id}",
@@ -43,7 +50,13 @@ def make_brief(task: Task, prod: Path, episode: str, workdir: Path, skills_dir: 
         lines += ["## Notes", ""]
         lines.extend(f"- {note}" for note in task.notes)
         lines.append("")
-    lines += ["## Questions", "", QUESTION_TEXT, "", "## Finish", "", FINISH_TEXT, ""]
+    if questions_left is None:
+        questions_text = f"{QUESTION_TEXT} {QUESTION_TOPIC_LINE}"
+    elif questions_left <= 0:
+        questions_text = NO_QUESTIONS_TEXT
+    else:
+        questions_text = f"You may ask at most {questions_left} question(s). {QUESTION_TEXT} {QUESTION_TOPIC_LINE}"
+    lines += ["## Questions", "", questions_text, "", "## Finish", "", FINISH_TEXT, ""]
     return "\n".join(lines)
 
 
