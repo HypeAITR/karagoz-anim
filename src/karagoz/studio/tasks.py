@@ -161,6 +161,7 @@ class Board:
         old = task.state
         task.notes.append(note)
         task.retakes += 1
+        task.attempts = 0  # a retake is a new take: it gets its own max_attempts
         final = State.QUESTION if task.retakes > self.max_retakes else State.READY
         task.state = final
         return [
@@ -174,6 +175,7 @@ class Board:
             raise TransitionError(f"cannot answer {task_id} from {task.state.value}")
         task.state = State.READY
         task.notes.append(note)
+        task.attempts = 0  # an answered question gets a fresh set of attempts
         return Change(task_id, State.QUESTION, State.READY, note)
 
     def to_json(self) -> dict[str, Any]:

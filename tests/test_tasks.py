@@ -185,3 +185,21 @@ def test_save_load_round_trip(tmp_path: Path) -> None:
     t = b2.tasks["ep/director"]
     assert (t.state, t.attempts, t.notes, t.needs_approval) == (State.READY, 1, ["n1"], True)
     assert list(b2.tasks) == ["ep/director", "sh01/layout", "sh01/timer"]
+
+
+def test_attempts_reset_on_retake_and_answer() -> None:
+    """Regression: attempts accumulated across retakes, so one failure after two takes went straight to QUESTION."""
+    b, d = Board([Task("a/x")], max_attempts=2), Files()
+    b.refresh(d)
+    b.start("a/x", d)
+    b.finish("a/x", ok=True)
+    b.retake("a/x", "again")
+    assert b.tasks["a/x"].attempts == 0
+    b.start("a/x", d)
+    assert b.finish("a/x", ok=False).new is State.READY  # first failure of this take
+    b.start("a/x", d)
+    assert b.finish("a/x", ok=False).new is State.QUESTION
+    b.answer("a/x", "network was down; retry")
+    assert b.tasks["a/x"].attempts == 0
+    b.start("a/x", d)
+    assert b.finish("a/x", ok=False).new is State.READY
