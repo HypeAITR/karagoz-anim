@@ -159,8 +159,10 @@ def test_plan(prod: Path) -> None:
     assert {(j.drawing, j.variant) for j in k["eyes"]} == {("p1", "half"), ("p1", "closed")}
     assert k["mouth"] and all(j.character == "ali" and j.variant != "X" for j in k["mouth"])
     assert {j.drawing for j in k["mouth"]} <= {"p1", "p2"}
-    assert all(j.wave == 1 for j in k["background"] + k["pose"])
-    assert all(j.wave == 2 for j in k["inbetween"] + k["mouth"] + k["eyes"])
+    assert k["background"][0].wave == 1 and [j.wave for j in k["pose"]] == [1, 2]  # poses drawn in order
+    assert all(j.wave == 3 for j in k["inbetween"] + k["mouth"] + k["eyes"])
+    assert k["pose"][1].refs == (prod / "referans" / "ali.png", assets(prod) / "ali" / "p1.png")  # from the previous
+    assert "Image 2 is the previous pose" in k["pose"][1].prompt
     p1 = k["pose"][0]
     assert p1.refs == (prod / "referans" / "ali.png",) and p1.reasoning == "high" and p1.size == "1024x1536"
     assert "Oturuyor, sağ elinde bardak" in p1.prompt  # acting text from poses.yaml
@@ -208,7 +210,7 @@ def test_changed_acting_redraws_that_pose_and_what_depends_on_it(prod: Path) -> 
     rep = run_draw(plan_draw(prod, EP, "sh01"), img)
     done = {p.name for p in rep.done}
     cached = {p.name for p in rep.cached}
-    assert "p1.png" in done and "p2.png" in cached
+    assert "p1.png" in done and "p2.png" in done  # p2 is drawn from p1, so it follows
     assert "p1-p2.1.png" in done  # its ref p1.png changed
     assert "background.png" in cached
 

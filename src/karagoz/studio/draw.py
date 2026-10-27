@@ -183,6 +183,11 @@ def _load_templates() -> dict[str, Any]:
     data = yaml.safe_load(TEMPLATES_PATH.read_text(encoding="utf-8"))
     if not isinstance(data, dict):
         raise ValueError(f"{TEMPLATES_PATH}: expected a mapping")
+    never = data.get("never", "")
+    if isinstance(never, str):  # the NEVER section is shared by every character prompt
+        for key, value in list(data.items()):
+            if isinstance(value, str) and key != "never":
+                data[key] = value.replace("{never}", never)
     return data
 
 
@@ -266,6 +271,7 @@ def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
     style_text = _template_str(templates, "style")
     background_tpl = _template_str(templates, "background")
     key_pose_tpl = _template_str(templates, "key_pose")
+    key_pose_next_tpl = _template_str(templates, "key_pose_next")
     inbetween_tpl = _template_str(templates, "inbetween")
     mouth_tpl = _template_str(templates, "mouth")
     eyes_tpl = _template_str(templates, "eyes")
@@ -319,7 +325,13 @@ def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
         if info is None:
             continue
         ref_path = prod / info.ref
-        for pose_id in sorted(pose_ids[char]):
+        # Key poses are drawn in order, each from the previous one (T-59): drawn separately from the model sheet,
+        # the model rebuilt the legs in every pose. Order = poses.yaml order, then any others sorted.
+        listed = [p.id for p in poses.characters[char].poses] if poses is not None and char in poses.characters else []
+        ordered = [pid for pid in listed if pid in pose_ids[char]]
+        ordered += sorted(pid for pid in pose_ids[char] if pid not in ordered)
+        previous: Path | None = None
+        for index, pose_id in enumerate(ordered):
             acting = ""
             if poses is not None and char in poses.characters:
                 for pose_entry in poses.characters[char].poses:
@@ -328,22 +340,26 @@ def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
                         break
             if _will_mirror(shots, shot, char, info.natural_facing):
                 acting = swap_left_right(acting)
-            prompt = key_pose_tpl.format(style=style_text, facing=info.natural_facing, props="", acting=acting)
+            tpl = key_pose_tpl if previous is None else key_pose_next_tpl
+            prompt = tpl.format(style=style_text, facing=info.natural_facing, props="", acting=acting)
+            out = assets_dir / char / f"{pose_id}.png"
             jobs.append(
                 DrawJob(
                     kind="pose",
                     character=char,
                     drawing=pose_id,
                     variant=None,
-                    refs=(ref_path,),
+                    refs=(ref_path,) if previous is None else (ref_path, previous),
                     prompt=prompt,
                     fallback=None,
                     reasoning="high",
                     size="1024x1536",
-                    out=assets_dir / char / f"{pose_id}.png",
-                    wave=1,
+                    out=out,
+                    wave=index + 1,
                 )
             )
+            previous = out
+    after_poses = max([j.wave for j in jobs if j.kind == "pose"], default=1) + 1
 
     max_k: dict[tuple[str, str, str], int] = {}
     for char, drawings in inbetween_drawings.items():
@@ -389,7 +405,7 @@ def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
                     reasoning="high",
                     size="1024x1536",
                     out=assets_dir / char / f"{drawing}.png",
-                    wave=2,
+                    wave=after_poses,
                 )
             )
 
@@ -437,7 +453,7 @@ def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
                 reasoning="low",
                 size="1024x1536",
                 out=assets_dir / char / f"{pose_name}.mouth-{shape}",
-                wave=2,
+                wave=after_poses,
             )
         )
 
@@ -458,7 +474,7 @@ def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
                 reasoning="low",
                 size="1024x1536",
                 out=assets_dir / char / f"{pose_name}.eyes-{state}",
-                wave=2,
+                wave=after_poses,
             )
         )
 
