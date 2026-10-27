@@ -288,8 +288,25 @@ class Studio:
         """Add new tasks, refresh, run every READY task once, save board + budget."""
         changes: list[Change] = []
         for task in plan_tasks(self.prod, self.episode):
-            if task.id not in self.board.tasks:
+            existing = self.board.tasks.get(task.id)
+            if existing is None:
                 self.board.add(task)
+                continue
+            changed: list[str] = []
+            if existing.inputs != task.inputs:
+                existing.inputs = list(task.inputs)
+                changed.append("inputs")
+            if existing.files_in != task.files_in:
+                existing.files_in = list(task.files_in)
+                changed.append("files_in")
+            if existing.files_out != task.files_out:
+                existing.files_out = list(task.files_out)
+                changed.append("files_out")
+            if existing.needs_approval != task.needs_approval:
+                existing.needs_approval = task.needs_approval
+                changed.append("needs_approval")
+            if changed:
+                self.log.append(existing.id, "note", text=f"definition updated: {', '.join(changed)}")
         ran: set[str] = set()
         while True:
             changes.extend(self._refresh())
