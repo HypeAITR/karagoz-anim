@@ -1,0 +1,50 @@
+# Prompt templates of the draw department. Craft knowledge, measured on Muse Image (do not "improve" without a test):
+# - the model keeps a character best when every drawing is an EDIT of a reference, never a fresh generation;
+# - it does not reliably follow "face left/right": we always ask for the character's natural facing and let the
+#   engine mirror (characters.yaml natural_facing / mirror_ok);
+# - "change only X" still nudges outlines everywhere: mouths and eyes are used as patches, never whole frames;
+# - anatomical wording for open mouths ("tongue", "teeth", "open wide") can trip the content filter: each mouth shape
+#   has a neutral fallback.
+# Placeholders: {style} {facing} {acting} {description} {shape} {eyes} {props}
+version: 1
+
+style: >-
+  Flat-colour 2D TV cartoon style: thick clean black outlines, flat fills with at most one simple flat shadow tone,
+  no texture, no gradients, no logos, no border, no text except text that is part of the character's own clothes.
+
+background: >-
+  {style} Background only, no people, no characters: {description}
+
+key_pose: >-
+  Edit this image. Same character: same face, same proportions, same hair, same clothes and colours, same thick
+  black outline, plain white background, full body visible. Draw ONLY this character; no furniture, no floor, no
+  other people (furniture is drawn separately). The character faces the {facing} side of the image in a three-quarter
+  view. {props} New pose: {acting} Mouth closed.
+
+inbetween: >-
+  Image 1 is the starting drawing and image 2 the ending drawing of the same character. Draw ONE in-between drawing:
+  the same character at the same scale and position as in both images, same style, colours and outline, plain white
+  background, facing the {facing} side, no furniture. Anything not described stays as in image 1. {props} In this
+  drawing: {description} Mouth closed.
+
+mouth: >-
+  Edit this image. Change ONLY the mouth; keep every other pixel the same: same character, same pose, same line
+  weight, same colours, same framing, same white background. The mouth: {shape}.
+
+eyes: >-
+  Edit this image. Change ONLY the eyes; keep every other pixel the same, eyebrows unchanged. {eyes}.
+
+mouth_shapes:
+  # primary, then fallback if the primary is refused or the patch fails
+  A: ["the lips pressed together in a closed line, as when saying 'm' or 'b'", "the lips closed in a simple line"]
+  B: ["a narrow wide slit, as when saying 'i', teeth barely visible, not a smile", "a narrow flat open slit"]
+  C: ["a medium open shape, as when saying 'e', wider than tall", "a medium open flat oval"]
+  D: ["the cartoon mouth shape for saying 'ah' while talking: an open oval about as wide as the nose, filled with a flat dark brown-red colour; the chin outline stays where it is", "an open rounded mouth shape, flat dark brown-red inside"]
+  E: ["a small round 'o' shape, lips rounded, dark inside, narrower than the nose", "a small round open shape"]
+  F: ["small puckered lips, as when saying 'u'", "small rounded pursed lips"]
+  G: ["the upper teeth resting on the lower lip, as when saying 'f' or 'v'", "the mouth for an 'f' sound"]
+  H: ["slightly open with the tongue tip touching behind the upper teeth, as when saying 'l'", "slightly open for an 'l' sound"]
+
+eye_states:
+  half: "both eyes half closed: the upper eyelids lowered to cover the top half of each eye"
+  closed: "both eyes fully closed: each eyelid a single curved black line where the eye was"
