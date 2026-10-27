@@ -1,6 +1,7 @@
 """Spec v1 models and loader: typed YAML/JSON files with agent-readable findings."""
 
 from karagoz.spec.anchor import ANCHOR_RE, Anchor, Offset, parse_anchor
+from karagoz.spec.check import check_episode, check_paths, norm_word, words
 from karagoz.spec.findings import Finding, Level, SpecError
 from karagoz.spec.io import KINDS, findings_from_validation, kind_of, load
 from karagoz.spec.models import (
@@ -45,6 +46,8 @@ __all__ = [
     "Align",
     "Anchor",
     "CameraEvent",
+    "check_episode",
+    "check_paths",
     "CharacterPoses",
     "Continuity",
     "ContinuityState",
@@ -85,5 +88,7 @@ __all__ = [
     "findings_from_validation",
     "kind_of",
     "load",
+    "norm_word",
     "parse_anchor",
+    "words",
 ]
