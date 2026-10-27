@@ -9,7 +9,7 @@ from pathlib import Path
 
 import cv2
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageOps
 
 from karagoz.engine.patch import Patch, apply_patch, load_patch
 from karagoz.engine.xsheet import Exposure
@@ -52,6 +52,7 @@ def place_row(
     *,
     height: float = 0.62,
     ground: float = 0.94,
+    scales: list[float | None] | None = None,
 ) -> list[Placement]:
     """Rough v0 placement: characters left to right, feet on a shared ground line."""
     n = len(first_drawings)
@@ -78,7 +79,8 @@ def place_row(
             h_opaque = float(y1 - y0 + 1)
             cx = (x0 + x1 + 1) / 2.0
             bottom = float(y1 + 1)
-        scale = target_h / h_opaque if h_opaque > 0 else 1.0
+        override: float | None = scales[i] if scales is not None and i < len(scales) else None
+        scale = override if override is not None else (target_h / h_opaque if h_opaque > 0 else 1.0)
         tx = (i + 1) / (n + 1) * fw
         x = int(round(tx - cx * scale))
         y = int(round(ground_y - bottom * scale))
@@ -289,6 +291,8 @@ def render_frames(
     order: list[str],
     out_dir: Path,
     frame: tuple[int, int] = (1920, 1080),
+    mirror: frozenset[str] = frozenset(),
+    scales: dict[str, float] | None = None,
 ) -> list[str]:
     """Render every frame of a shot to numbered PNGs; return deduplicated warnings."""
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -315,14 +319,30 @@ def render_frames(
         if found_img is not None:
             first_chars.append(character)
             first_images.append(found_img)
-    placements_list = place_row(first_images, frame=frame)
+    placed_images = [
+        ImageOps.mirror(img) if ch in mirror else img for img, ch in zip(first_images, first_chars, strict=True)
+    ]
+    scales_list: list[float | None] | None = None
+    if scales is not None:
+        scales_list = [scales.get(ch) for ch in first_chars]
+    placements_list = place_row(placed_images, frame=frame, scales=scales_list)
     placements = dict(zip(first_chars, placements_list, strict=True))
+    owner_by_placement: dict[int, str] = {id(pl): ch for ch, pl in placements.items()}
     fitted_bg = _fit_background(assets.background(), frame)
     all_warnings: list[str] = []
     prev_layers: list[tuple[Image.Image, Placement]] | None = None
     prev_path: Path | None = None
     for f in range(exp.length):
         layers, warnings = frame_layers(exp, mouths, assets, order, placements, f)
+        if mirror:
+            mirrored: list[tuple[Image.Image, Placement]] = []
+            for img, pl in layers:
+                owner = owner_by_placement.get(id(pl))
+                if owner is not None and owner in mirror:
+                    mirrored.append((ImageOps.mirror(img), pl))
+                else:
+                    mirrored.append((img, pl))
+            layers = mirrored
         all_warnings.extend(warnings)
         path = out_dir / f"{f:05d}.png"
         if prev_layers is not None and prev_path is not None and _layers_equal(layers, prev_layers):

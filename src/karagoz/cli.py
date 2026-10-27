@@ -166,6 +166,46 @@ def cmd_draw(args: argparse.Namespace) -> int:
         return 1
 
 
+def cmd_render(args: argparse.Namespace) -> int:
+    """Render a shot or a whole episode to MP4."""
+    try:
+        from karagoz.engine.shot import _join_shot_mp4s, render_shot
+        from karagoz.spec import Shots, load
+
+        prod = Path(args.prod)
+        episode = str(args.episode)
+        verbose = bool(args.verbose)
+        only_shot: str | None = args.shot
+        if only_shot is not None:
+            rendered = render_shot(prod, episode, only_shot)
+            _print_shot(rendered.shot, rendered.frames, rendered.seconds, rendered.lufs, rendered.warnings, verbose)
+            return 0
+        shots_obj = load(prod / episode / "shots.yaml")
+        if not isinstance(shots_obj, Shots):
+            raise ValueError(f"expected shots file: {prod / episode / 'shots.yaml'}")
+        mp4s: list[Path] = []
+        for shot_entry in shots_obj.shots:
+            rendered = render_shot(prod, episode, shot_entry.id)
+            _print_shot(rendered.shot, rendered.frames, rendered.seconds, rendered.lufs, rendered.warnings, verbose)
+            mp4s.append(rendered.mp4)
+        out = _join_shot_mp4s(mp4s, prod / episode / "render" / f"{episode}.mp4")
+        print(str(out))
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _print_shot(shot: str, frames: int, seconds: float, lufs: float | None, warnings: list[str], verbose: bool) -> None:
+    if lufs is None:
+        print(f"{shot} {frames} frames {seconds:.2f} s no audio ({len(warnings)} warnings)")
+    else:
+        print(f"{shot} {frames} frames {seconds:.2f} s {lufs:.1f} LUFS ({len(warnings)} warnings)")
+    if verbose:
+        for warning in warnings:
+            print(f"  {warning}")
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="karagoz", description=__doc__)
     parser.add_argument("--version", action="version", version=__version__)
@@ -222,6 +262,13 @@ def build_parser() -> argparse.ArgumentParser:
     draw.add_argument("shot", help="shot id")
     draw.add_argument("--dry-run", dest="dry_run", action="store_true", help="list jobs without calling the model")
     draw.set_defaults(func=cmd_draw)
+
+    render_p = sub.add_parser("render", help="render a shot or episode to MP4")
+    render_p.add_argument("prod", help="production directory")
+    render_p.add_argument("episode", help="episode id")
+    render_p.add_argument("--shot", metavar="SHOT", default=None, help="only render this shot")
+    render_p.add_argument("-v", "--verbose", action="store_true", help="also print each warning")
+    render_p.set_defaults(func=cmd_render)
     return parser
 
 
