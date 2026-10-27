@@ -16,13 +16,13 @@ background: >-
   {style} Background only, no people, no characters: {description}
 
 key_pose: >-
-  Edit this image. Same character: same face, same proportions, same hair, same clothes and colours, same thick
+  {style} Edit this image. Same character: same face, same proportions, same hair, same clothes and colours, same thick
   black outline, plain white background, full body visible. Draw ONLY this character; no furniture, no floor, no
-  other people (furniture is drawn separately). The character faces the {facing} side of the image in a three-quarter
+  other people, no sofa, no chair, no table (furniture is drawn separately). The character faces the {facing} side of the image in a three-quarter
   view. {props} New pose: {acting} Mouth closed.
 
 inbetween: >-
-  Image 1 is the starting drawing and image 2 the ending drawing of the same character. Draw ONE in-between drawing:
+  {style} Image 1 is the starting drawing and image 2 the ending drawing of the same character. Draw ONE in-between drawing:
   the same character at the same scale and position as in both images, same style, colours and outline, plain white
   background, facing the {facing} side, no furniture. Anything not described stays as in image 1. {props} In this
   drawing: {description} Mouth closed.
