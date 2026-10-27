@@ -303,6 +303,18 @@ def plan_tasks(prod: Path, episode: str) -> list[Task]:
     return tasks
 
 
+def _shot_has_regions(prod: Path, episode: str, shot: str) -> bool:
+    """True when the shot's location has a region map (then drawings get landmarks for the placement solver)."""
+    try:
+        shots = load(prod / episode / "shots.yaml")
+    except SpecError:
+        return False
+    if not isinstance(shots, Shots):
+        return False
+    entry = next((s for s in shots.shots if s.id == shot), None)
+    return entry is not None and (prod / "locations" / entry.location / "regions.yaml").is_file()
+
+
 def code_work(
     prod: Path,
     episode: str,
@@ -350,6 +362,15 @@ def code_work(
             if report.failed:
                 error = ", ".join(f"{path}: {message}" for path, message in report.failed)
                 return RunResult(ok=False, error=error, cost_usd=report.cost_usd)
+            # With a region map the render places drawings by their landmarks (WP-11): measure them now (cached by
+            # image hash, so only new drawings cost SAM calls).
+            if _shot_has_regions(prod, episode, task.unit):
+                from karagoz.engine.landmarks import measure_shot
+                from karagoz.meta.sam import Sam
+
+                measured = measure_shot(prod, episode, task.unit, sam if sam is not None else Sam(MetaClient()))
+                final = f"{len(report.done)} drawn, {len(report.cached)} cached, {len(measured)} landmarks"
+                return RunResult(ok=True, final_text=final, cost_usd=report.cost_usd)
             return RunResult(ok=True, cost_usd=report.cost_usd)
         if department == "render":
             from karagoz.engine.shot import render_shot
