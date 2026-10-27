@@ -558,10 +558,10 @@ class Studio:
         payload: dict[str, Any] = raw_payload if isinstance(raw_payload, dict) else {}
         if payload_type == "draw.asset":
             asset: dict[str, Any] = {}
-            for key in ("path", "status", "kind"):
+            for key, field_name in (("path", "path"), ("status", "status"), ("kind", "asset_kind")):
                 value = payload.get(key)
                 if value is not None:
-                    asset[key] = value
+                    asset[field_name] = value  # "kind" is the log line's own field: the asset's kind is renamed
             self.log.append(task_id, "agent", **asset)
         elif payload_type == "code.note":
             note_text = payload.get("text", "")

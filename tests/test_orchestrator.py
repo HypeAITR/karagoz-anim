@@ -394,3 +394,13 @@ def test_unchanged_definition_logs_nothing(prod: Path, skills: Path, tmp_path: P
     s2.run()
     notes = [e for e in read_events(prod / EP / "run" / "events.jsonl") if e["kind"] == "note"]
     assert not any("definition updated" in e.get("text", "") for e in notes)
+
+
+def test_draw_asset_events_are_logged(prod: Path, skills: Path, tmp_path: Path) -> None:
+    """Regression: a draw.asset event carries its own "kind" and crashed EventLog.append (kind given twice)."""
+    s = studio(prod, skills, tmp_path, FakeAgent())
+    s.load()
+    s._on_carrier_event("sh01/draw", {"payload_type": "draw.asset",
+                                      "payload": {"path": "a.png", "kind": "pose", "status": "done"}})  # fmt: skip
+    row = [e for e in events(prod) if e["kind"] == "agent"][-1]
+    assert row["asset_kind"] == "pose" and row["status"] == "done" and row["path"] == "a.png"
