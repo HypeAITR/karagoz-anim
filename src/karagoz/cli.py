@@ -126,6 +126,18 @@ def cmd_answer(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_mouth(args: argparse.Namespace) -> int:
+    try:
+        from karagoz.engine.mouth import write_mouths
+
+        for path in write_mouths(Path(args.episode_dir)):
+            print(str(path))
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="karagoz", description=__doc__)
     parser.add_argument("--version", action="version", version=__version__)
@@ -171,6 +183,10 @@ def build_parser() -> argparse.ArgumentParser:
     answer.add_argument("task", help="task id")
     answer.add_argument("note", help="the answer")
     answer.set_defaults(func=cmd_answer)
+
+    mouth = sub.add_parser("mouth", help="write mouth tracks from letter timings")
+    mouth.add_argument("episode_dir", help="episode directory")
+    mouth.set_defaults(func=cmd_mouth)
     return parser
 
 
