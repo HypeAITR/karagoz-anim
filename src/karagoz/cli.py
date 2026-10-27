@@ -138,6 +138,34 @@ def cmd_mouth(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_draw(args: argparse.Namespace) -> int:
+    try:
+        from karagoz.studio.draw import plan_draw, run_draw
+
+        jobs = plan_draw(Path(args.prod), args.episode, args.shot)
+        if args.dry_run:
+            for job in jobs:
+                char = job.character if job.character is not None else "-"
+                variant = job.variant if job.variant is not None else "-"
+                print(f"{job.wave} {job.kind} {char} {job.drawing} {variant} -> {job.out}")
+            print(f"total {len(jobs)}")
+            return 0
+        from karagoz.meta.client import MetaClient
+        from karagoz.meta.image import MuseImage
+
+        report = run_draw(jobs, MuseImage(MetaClient()))
+        print(
+            f"done {len(report.done)}, cached {len(report.cached)}, "
+            f"failed {len(report.failed)}, calls {report.calls}, ~${report.cost_usd:.2f}"
+        )
+        for path, message in report.failed:
+            print(f"failed {path}: {message}")
+        return 1 if report.failed else 0
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="karagoz", description=__doc__)
     parser.add_argument("--version", action="version", version=__version__)
@@ -187,6 +215,13 @@ def build_parser() -> argparse.ArgumentParser:
     mouth = sub.add_parser("mouth", help="write mouth tracks from letter timings")
     mouth.add_argument("episode_dir", help="episode directory")
     mouth.set_defaults(func=cmd_mouth)
+
+    draw = sub.add_parser("draw", help="draw every asset a shot needs")
+    draw.add_argument("prod", help="production directory")
+    draw.add_argument("episode", help="episode id")
+    draw.add_argument("shot", help="shot id")
+    draw.add_argument("--dry-run", dest="dry_run", action="store_true", help="list jobs without calling the model")
+    draw.set_defaults(func=cmd_draw)
     return parser
 
 
