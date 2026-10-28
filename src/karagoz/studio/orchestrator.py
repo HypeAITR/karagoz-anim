@@ -498,7 +498,7 @@ def code_work(
             from karagoz.meta.client import MetaClient
             from karagoz.meta.image import MuseImage
             from karagoz.studio import claims as claims_module
-            from karagoz.studio.draw import link_location_background, plan_draw, run_draw
+            from karagoz.studio.draw import link_location_background, plan_draw, retire_stale, run_draw
 
             claims_thread: threading.Thread | None = None
             claims_holder: dict[str, Any] = {}
@@ -542,7 +542,23 @@ def code_work(
 
             link_location_background(prod, episode, task.unit)
             active = image if image is not None else MuseImage(MetaClient())
-            report = run_draw(plan_draw(prod, episode, task.unit), active, on_event=on_event)
+            jobs = plan_draw(prod, episode, task.unit)
+            retired = retire_stale(jobs, prod / episode / "assets" / task.unit)
+            if retired and on_event is not None:
+                assets_dir = prod / episode / "assets" / task.unit
+                rels = [p.relative_to(assets_dir).as_posix() for p in retired]
+                shown = rels[:10]
+                if len(rels) > 10:
+                    shown = [*shown, "…"]
+                on_event(
+                    {
+                        "payload_type": "code.note",
+                        "payload": {
+                            "text": f"retired {len(retired)} stale drawing files to history: {', '.join(shown)}"
+                        },
+                    }
+                )
+            report = run_draw(jobs, active, on_event=on_event)
             if report.failed:
                 error = ", ".join(f"{path}: {message}" for path, message in report.failed)
                 _join_claims()
