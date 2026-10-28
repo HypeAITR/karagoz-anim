@@ -9,6 +9,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v5
+      - run: sudo apt-get update -q && sudo apt-get install -y -q ffmpeg  # render, sheet and strip tests need it
       - run: uv sync
       - run: uv run python scripts/check_secrets.py
       - run: uv run ruff check .
