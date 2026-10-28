@@ -28,6 +28,7 @@ from karagoz.engine.placement import (
     target_head_px,
     to_json,
 )
+from karagoz.engine.register import refine
 from karagoz.engine.render import FPS, Clip, RenderError, encode, loudness, mix
 from karagoz.engine.timing import resolve_episode
 from karagoz.engine.xsheet import expand
@@ -319,6 +320,8 @@ def _placement_mode(
             )
         )
     placements, solver_warnings = solve(inputs, regions)
+    placements, reg_warnings = refine(inputs, placements, regions, ShotAssets(assets_dir).drawing)
+    solver_warnings = solver_warnings + reg_warnings
     out_path = assets_dir / "placement.json"
     out_path.write_text(json.dumps(to_json(placements, solver_warnings), indent=1) + "\n", encoding="utf-8")
     occluders: dict[str, np.ndarray] = {}
