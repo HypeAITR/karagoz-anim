@@ -146,8 +146,20 @@ def test_plan_before_and_after_director(prod: Path) -> None:
     assert tasks["ep/voice"].files_out == [f"{EP}/audio/L01.align.json", f"{EP}/audio/L02.align.json"]
     assert tasks["sh01/render"].files_out == [f"{EP}/render/sh01.mp4"]
     assert tasks["ep/edit"].inputs == ["sh01/render"] and tasks["ep/edit"].needs_approval
-    assert DEPARTMENTS == ["location", "director", "voice", "continuity", "layout", "timer", "draw", "render", "edit"]
-    assert {"location", "voice", "draw", "render", "edit"} == CODE_DEPARTMENTS  # WP-F6
+    assert DEPARTMENTS == [
+        "location",
+        "director",
+        "voice",
+        "continuity",
+        "layout",
+        "timer",
+        "draw",
+        "render",
+        "gate",
+        "check",
+        "edit",
+    ]
+    assert {"location", "voice", "draw", "render", "edit", "gate", "check"} == CODE_DEPARTMENTS  # WP-F6
     assert tasks["sh01/timer"].files_out == [f"{EP}/shots/sh01/xsheet.yaml"]
     assert f"{EP}/shots/sh01/poses.yaml" in tasks["sh01/timer"].files_in
 
