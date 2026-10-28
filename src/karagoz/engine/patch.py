@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -123,7 +124,7 @@ def make_patch(
 
 
 def apply_patch(base: Image.Image, patch: Patch) -> Image.Image:
-    """Return a new RGBA image with ``patch`` alpha-composited onto ``base``."""
+    """Return a new RGBA image with ``patch`` blended onto ``base``; the base alpha is unchanged."""
     base_rgba = base.convert("RGBA")
     base_w, base_h = base_rgba.size
     out = np.array(base_rgba).astype(np.float32)
@@ -134,13 +135,44 @@ def apply_patch(base: Image.Image, patch: Patch) -> Image.Image:
     if dx1 > dx0 and dy1 > dy0:
         tile = src[dy0 - patch.y : dy0 - patch.y + (dy1 - dy0), dx0 - patch.x : dx0 - patch.x + (dx1 - dx0)]
         region = out[dy0:dy1, dx0:dx1]
-        blend = tile[:, :, 3:4] / 255.0
-        inv = 1.0 - blend
-        comp = np.empty_like(tile)
-        comp[:, :, :3] = tile[:, :, :3] * blend + region[:, :, :3] * inv
-        comp[:, :, 3:4] = tile[:, :, 3:4] + region[:, :, 3:4] * inv
-        region[:, :] = np.round(comp)
+        weight = tile[:, :, 3:4] / 255.0 * region[:, :, 3:4] / 255.0
+        inv = 1.0 - weight
+        region[:, :, :3] = np.round(tile[:, :, :3] * weight + region[:, :, :3] * inv)
     return Image.fromarray(out.astype(np.uint8))
+
+
+def transfer_patch(
+    patch: Patch,
+    src_face: tuple[float, float, float, float],
+    dst_face: tuple[float, float, float, float],
+) -> Patch:
+    """Move ``patch`` from the source face box onto the destination face box."""
+    s = (dst_face[3] - dst_face[1]) / (src_face[3] - src_face[1])
+    if s == 1:
+        image = patch.image
+    else:
+        w, h = patch.image.size
+        image = patch.image.convert("RGBA").resize(
+            (max(1, round(w * s)), max(1, round(h * s))), Image.Resampling.LANCZOS
+        )
+    sc_x = (src_face[0] + src_face[2]) / 2.0
+    sc_y = (src_face[1] + src_face[3]) / 2.0
+    dc_x = (dst_face[0] + dst_face[2]) / 2.0
+    dc_y = (dst_face[1] + dst_face[3]) / 2.0
+    return Patch(image=image, x=round(dc_x + (patch.x - sc_x) * s), y=round(dc_y + (patch.y - sc_y) * s))
+
+
+def clip_patch(patch: Patch, box: tuple[float, float, float, float]) -> Patch:
+    """Return ``patch`` with alpha zeroed outside ``box`` (same image size and position)."""
+    x0, y0 = math.floor(box[0]), math.floor(box[1])
+    x1, y1 = math.ceil(box[2]), math.ceil(box[3])
+    arr = np.array(patch.image.convert("RGBA"))
+    height, width = arr.shape[0], arr.shape[1]
+    xs = patch.x + np.arange(width)
+    ys = patch.y + np.arange(height)
+    keep = (ys >= y0)[:, None] & (ys < y1)[:, None] & (xs >= x0)[None, :] & (xs < x1)[None, :]
+    arr[~keep, 3] = 0
+    return Patch(image=Image.fromarray(arr), x=patch.x, y=patch.y)
 
 
 def save_patch(patch: Patch, path: Path) -> None:

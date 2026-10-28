@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 import shutil
 from dataclasses import dataclass, field
@@ -13,7 +14,7 @@ import numpy as np
 from PIL import Image, ImageOps
 
 from karagoz.engine.camera import BBox, Box
-from karagoz.engine.patch import Patch, apply_patch, load_patch
+from karagoz.engine.patch import Patch, apply_patch, clip_patch, load_patch, transfer_patch
 from karagoz.engine.placement import DrawingPlacement
 from karagoz.engine.xsheet import Exposure
 from karagoz.spec import Mouth
@@ -180,6 +181,8 @@ class ShotAssets:
     _drawing_cache: dict[tuple[str, str], Image.Image | None] = field(default_factory=dict, init=False, repr=False)
     _ref_size: dict[str, tuple[int, int]] = field(default_factory=dict, init=False, repr=False)
     _patch_cache: dict[tuple[str, str, str], Patch | None] = field(default_factory=dict, init=False, repr=False)
+    _landmarks_cache: dict[tuple[str, str], dict[str, Any] | None] = field(default_factory=dict, init=False, repr=False)
+    _borrowed_cache: dict[tuple[str, str, str], Patch | None] = field(default_factory=dict, init=False, repr=False)
 
     def background(self) -> Image.Image:
         return Image.open(self.root / "background.png").convert("RGB")
@@ -217,6 +220,25 @@ class ShotAssets:
         self._patch_cache[key] = loaded
         return loaded
 
+    def landmarks(self, character: str, drawing: str) -> dict[str, Any] | None:
+        key = (character, drawing)
+        if key in self._landmarks_cache:
+            return self._landmarks_cache[key]
+        path = self.root / character / f"{drawing}.landmarks.json"
+        if not path.is_file():
+            self._landmarks_cache[key] = None
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            self._landmarks_cache[key] = None
+            return None
+        if not isinstance(data, dict):
+            self._landmarks_cache[key] = None
+            return None
+        self._landmarks_cache[key] = data
+        return data
+
 
 def _parse_inbetween(drawing: str) -> tuple[str, str, int] | None:
     if "." not in drawing or "-" not in drawing:
@@ -245,6 +267,132 @@ def _inbetween_count(exp: Exposure, character: str, a: str, b: str) -> int:
         if parsed is not None and parsed[0] == a and parsed[1] == b:
             best = max(best, parsed[2])
     return best if best > 0 else 1
+
+
+def _face_box(assets: ShotAssets, character: str, drawing: str) -> tuple[float, float, float, float] | None:
+    """Face box of a drawing in drawing pixels, or None when there is no face box."""
+    landmarks = assets.landmarks(character, drawing)
+    if landmarks is None:
+        return None
+    face = landmarks.get("face")
+    box = face.get("box") if isinstance(face, dict) else None
+    if not isinstance(box, (list, tuple)) or len(box) != 4:
+        return None
+    coords: list[float] = []
+    for value in box:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        coords.append(float(value))
+    x0, y0, x1, y1 = coords[0], coords[1], coords[2], coords[3]
+    size = landmarks.get("size")
+    img = assets.drawing(character, drawing)
+    if img is not None and isinstance(size, (list, tuple)) and len(size) == 2:
+        sw, sh = size[0], size[1]
+        if (
+            isinstance(sw, (int, float))
+            and isinstance(sh, (int, float))
+            and not isinstance(sw, bool)
+            and not isinstance(sh, bool)
+            and sw != 0
+            and sh != 0
+        ):
+            image_w, image_h = img.size
+            if image_w != sw or image_h != sh:
+                x0, y0, x1, y1 = (
+                    x0 * image_w / float(sw),
+                    y0 * image_h / float(sh),
+                    x1 * image_w / float(sw),
+                    y1 * image_h / float(sh),
+                )
+    return (x0, y0, x1, y1)
+
+
+def _best_shift(
+    ref: np.ndarray, dst: np.ndarray, mask: np.ndarray, x: int, y: int, radius: int
+) -> tuple[int, int, float] | None:
+    """Best shift aligning ``ref`` with ``dst`` near ``(x, y)``; None when no shift fits in ``dst``."""
+    mh, mw = mask.shape[0], mask.shape[1]
+    height, width = dst.shape[0], dst.shape[1]
+
+    def key_for(dx: int, dy: int) -> tuple[float, int, int, int] | None:
+        px, py = x + dx, y + dy
+        if px < 0 or py < 0 or px + mw > width or py + mh > height:
+            return None
+        if mask.any():
+            cand = dst[py : py + mh, px : px + mw]
+            err = float(np.abs(ref.astype(np.int16) - cand.astype(np.int16))[mask].mean())
+        else:
+            err = 0.0
+        return (err, dx * dx + dy * dy, dy, dx)
+
+    best: tuple[float, int, int, int] | None = None
+    for dy in range(-radius, radius + 1, 2):
+        for dx in range(-radius, radius + 1, 2):
+            key = key_for(dx, dy)
+            if key is not None and (best is None or key < best):
+                best = key
+    if best is None:
+        return None
+    _, _, by, bx = best
+    for dy in range(max(by - 1, -radius), min(by + 1, radius) + 1):
+        for dx in range(max(bx - 1, -radius), min(bx + 1, radius) + 1):
+            key = key_for(dx, dy)
+            if key is not None and key < best:
+                best = key
+    err, _, out_dy, out_dx = best
+    return (out_dx, out_dy, err)
+
+
+def _borrowed_patch(exp: Exposure, assets: ShotAssets, character: str, drawing_used: str, kind: str) -> Patch | None:
+    """Nearest key's patch moved onto an inbetween's face, or None when no key qualifies."""
+    parsed = _parse_inbetween(drawing_used)
+    if parsed is None:
+        return None
+    cache_key = (character, drawing_used, kind)
+    if cache_key in assets._borrowed_cache:
+        return assets._borrowed_cache[cache_key]
+    a, b, k = parsed
+    n = _inbetween_count(exp, character, a, b)
+    candidates = (a, b) if k <= n / 2 else (b, a)
+    dst_face = _face_box(assets, character, drawing_used)
+    dst_img = assets.drawing(character, drawing_used)
+    result: Patch | None = None
+    if dst_face is not None and dst_img is not None:
+        dst_arr = np.array(dst_img.convert("RGB"))
+        radius = max(4, round(0.06 * (dst_face[3] - dst_face[1])))
+        for key in candidates:
+            key_patch = assets.patch(character, key, kind)
+            if key_patch is None:
+                continue
+            key_face = _face_box(assets, character, key)
+            if key_face is None:
+                continue
+            src_h = key_face[3] - key_face[1]
+            if src_h == 0:
+                continue
+            s = (dst_face[3] - dst_face[1]) / src_h
+            if not 0.75 <= s <= 1.33:
+                continue
+            key_img = assets.drawing(character, key)
+            if key_img is None:
+                continue
+            moved = transfer_patch(key_patch, key_face, dst_face)
+            w, h = key_patch.image.size
+            ref_img = key_img.convert("RGB").crop((key_patch.x, key_patch.y, key_patch.x + w, key_patch.y + h))
+            if s != 1:
+                ref_img = ref_img.resize(moved.image.size, Image.Resampling.LANCZOS)
+            ref = np.array(ref_img)
+            mask = np.array(moved.image.convert("RGBA"))[:, :, 3] > 0
+            found = _best_shift(ref, dst_arr, mask, moved.x, moved.y, radius)
+            if found is None:
+                continue
+            dx, dy, err = found
+            if err > 40:
+                continue
+            result = clip_patch(Patch(image=moved.image, x=moved.x + dx, y=moved.y + dy), dst_face)
+            break
+    assets._borrowed_cache[cache_key] = result
+    return result
 
 
 def frame_layers(
@@ -290,7 +438,11 @@ def frame_layers(
             if found is not None:
                 img = apply_patch(img, found)
             else:
-                warnings.append(f"f={f} {character} {drawing_used} {kind} patch missing")
+                borrowed = _borrowed_patch(exp, assets, character, drawing_used, kind)
+                if borrowed is not None:
+                    img = apply_patch(img, borrowed)
+                else:
+                    warnings.append(f"f={f} {character} {drawing_used} {kind} patch missing")
         mouth = mouths.get(character)
         if mouth is not None:
             shape = "X"
@@ -304,7 +456,11 @@ def frame_layers(
                 if found is not None:
                     img = apply_patch(img, found)
                 else:
-                    warnings.append(f"f={f} {character} {drawing_used} {kind} patch missing")
+                    borrowed = _borrowed_patch(exp, assets, character, drawing_used, kind)
+                    if borrowed is not None:
+                        img = apply_patch(img, borrowed)
+                    else:
+                        warnings.append(f"f={f} {character} {drawing_used} {kind} patch missing")
         placement = placements.get(character)
         if placement is None:
             continue
@@ -364,7 +520,11 @@ def _frame_layers_placement(
             if found is not None:
                 img = apply_patch(img, found)
             else:
-                warnings.append(f"f={f} {character} {drawing_used} {kind} patch missing")
+                borrowed = _borrowed_patch(exp, assets, character, drawing_used, kind)
+                if borrowed is not None:
+                    img = apply_patch(img, borrowed)
+                else:
+                    warnings.append(f"f={f} {character} {drawing_used} {kind} patch missing")
         mouth = mouths.get(character)
         if mouth is not None:
             shape = "X"
@@ -378,7 +538,11 @@ def _frame_layers_placement(
                 if found is not None:
                     img = apply_patch(img, found)
                 else:
-                    warnings.append(f"f={f} {character} {drawing_used} {kind} patch missing")
+                    borrowed = _borrowed_patch(exp, assets, character, drawing_used, kind)
+                    if borrowed is not None:
+                        img = apply_patch(img, borrowed)
+                    else:
+                        warnings.append(f"f={f} {character} {drawing_used} {kind} patch missing")
         char_places = placements.get(character, {})
         placement = char_places.get(drawing_used)
         if placement is None and fallback_key is not None:
