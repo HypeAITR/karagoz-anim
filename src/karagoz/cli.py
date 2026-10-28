@@ -282,6 +282,84 @@ def cmd_questions(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_parts(args: argparse.Namespace) -> int:
+    """List a shot's movement parts: one whole movement per checker."""
+    try:
+        from karagoz.engine.sheet import movement_parts
+
+        for part in movement_parts(Path(args.prod), args.episode, args.shot):
+            print(f"{part.id}  {' '.join(part.drawings)}")
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_sheet(args: argparse.Namespace) -> int:
+    """Write one contact sheet per movement part."""
+    try:
+        from karagoz.engine.sheet import movement_parts, part_sheet
+
+        prod = Path(args.prod)
+        parts = movement_parts(prod, args.episode, args.shot)
+        wanted: list[str] | None = args.part
+        if wanted:
+            by_id = {part.id: part for part in parts}
+            unknown = [pid for pid in wanted if pid not in by_id]
+            if unknown:
+                raise ValueError(f"unknown part(s): {', '.join(unknown)} (known: {', '.join(by_id) or 'none'})")
+            parts = [by_id[pid] for pid in wanted]
+        out_dir = Path(args.out) if args.out else prod / args.episode / "review" / args.shot / "sheets"
+        for part in parts:
+            out = out_dir / f"{part.id.replace(':', '__')}.png"
+            print(str(part_sheet(prod, args.episode, args.shot, part, out)))
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_sheet_files(args: argparse.Namespace) -> int:
+    """Write one contact sheet from image files."""
+    try:
+        from karagoz.engine.sheet import contact_sheet
+
+        out = contact_sheet([Path(s) for s in args.images], Path(args.out))
+        print(str(out))
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_look(args: argparse.Namespace) -> int:
+    """Crop a close look at one drawing by region name."""
+    try:
+        from karagoz.engine.sheet import look
+
+        image = Path(args.image)
+        out = Path(args.out) if args.out else Path(f"look-{image.stem}-{args.region}.png")
+        landmarks = Path(args.landmarks) if args.landmarks else None
+        print(str(look(image, out, region=args.region, landmarks=landmarks)))
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_strip(args: argparse.Namespace) -> int:
+    """Write a contact sheet of a run of video frames."""
+    try:
+        from karagoz.engine.sheet import frame_strip
+
+        out = Path(args.out) if args.out else Path(f"strip-{args.start}-{args.end}.png")
+        print(str(frame_strip(Path(args.video), args.start, args.end, out, step=args.step)))
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="karagoz", description=__doc__)
     parser.add_argument("--version", action="version", version=__version__)
@@ -369,6 +447,39 @@ def build_parser() -> argparse.ArgumentParser:
     landmarks_p.add_argument("episode", help="episode id")
     landmarks_p.add_argument("shot", help="shot id")
     landmarks_p.set_defaults(func=cmd_landmarks)
+    parts_p = sub.add_parser("parts", help="list a shot's movement parts (one whole movement per checker)")
+    parts_p.add_argument("prod", help="production directory")
+    parts_p.add_argument("episode", help="episode id")
+    parts_p.add_argument("shot", help="shot id")
+    parts_p.set_defaults(func=cmd_parts)
+
+    sheet_p = sub.add_parser("sheet", help="write one contact sheet per movement part")
+    sheet_p.add_argument("prod", help="production directory")
+    sheet_p.add_argument("episode", help="episode id")
+    sheet_p.add_argument("shot", help="shot id")
+    sheet_p.add_argument("--part", action="append", default=None, metavar="ID", help="only this part id")
+    sheet_p.add_argument("--out", default=None, metavar="DIR", help="output directory")
+    sheet_p.set_defaults(func=cmd_sheet)
+
+    sheet_files_p = sub.add_parser("sheet-files", help="write one contact sheet from image files")
+    sheet_files_p.add_argument("out", help="output PNG path")
+    sheet_files_p.add_argument("images", nargs="+", help="image files in order")
+    sheet_files_p.set_defaults(func=cmd_sheet_files)
+
+    look_p = sub.add_parser("look", help="crop a close look at one drawing by region name")
+    look_p.add_argument("image", help="drawing to look at")
+    look_p.add_argument("--region", default="full", help="region name")
+    look_p.add_argument("--landmarks", default=None, metavar="FILE", help="landmarks JSON")
+    look_p.add_argument("--out", default=None, metavar="FILE", help="output PNG path")
+    look_p.set_defaults(func=cmd_look)
+
+    strip_p = sub.add_parser("strip", help="write a contact sheet of a run of video frames")
+    strip_p.add_argument("video", help="video file")
+    strip_p.add_argument("start", type=int, help="first frame (0-based, included)")
+    strip_p.add_argument("end", type=int, help="last frame (excluded)")
+    strip_p.add_argument("--step", type=int, default=1, help="take every Nth frame")
+    strip_p.add_argument("--out", default=None, metavar="FILE", help="output PNG path")
+    strip_p.set_defaults(func=cmd_strip)
     return parser
 
 
