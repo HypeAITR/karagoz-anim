@@ -653,8 +653,11 @@ def run_checks(
     parallel: int = 4,
     stagger_s: float = 5.0,
     on_event: OnEvent | None = None,
+    jev_score: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run one checker per movement part, in parallel with staggered starts."""
+    from karagoz.studio.claims import part_status
+
     jobs = plan_checks(prod, episode, shot)
     factory: Callable[[], Carrier] = (
         carrier_factory if carrier_factory is not None else make_checker_factory("api", CHECKER_MODEL)
@@ -678,8 +681,31 @@ def run_checks(
     fresh: list[tuple[int, CheckJob]] = []
     for idx, job in enumerate(jobs):
         key = _job_key(prod, episode, job)
+        if jev_score is not None and not job.critical and part_status(jev_score, job.part) == "clean":
+            parts_by_idx[idx] = {
+                "part": job.part.id,
+                "copy": job.copy,
+                "critical": job.critical,
+                "ok": [f"{job.part.character}/{name}.png" for name in job.part.drawings],
+                "findings": [],
+                "error": None,
+                "skipped": "jev: clean",
+                "cost_usd": 0.0,
+                "seconds": 0.0,
+                "session": None,
+                "key": key,
+                "reused": False,
+                "tokens_in": 0,
+                "tokens_out": 0,
+            }
+            continue
         candidate = prev.get((job.part.id, job.copy))
-        if candidate is not None and candidate.get("key") == key and candidate.get("error") is None:
+        if (
+            candidate is not None
+            and candidate.get("key") == key
+            and candidate.get("error") is None
+            and not candidate.get("skipped")
+        ):
             entry = dict(candidate)
             entry["reused"] = True
             entry["cost_usd"] = 0.0
@@ -732,6 +758,48 @@ def run_checks(
             union |= s
         one = sorted(union - set(both))
         agreement[part_id] = {"both": both, "one": one}
+    if jev_score is not None:
+        raw_jev = jev_score.get("drawings", {})
+        jev_drawings = raw_jev if isinstance(raw_jev, dict) else {}
+        for idx, job in enumerate(jobs):
+            if job.copy != 1:
+                continue
+            entry = parts_by_idx[idx]
+            findings = entry.get("findings")
+            if not isinstance(findings, list):
+                findings = []
+                entry["findings"] = findings
+            for name in job.part.drawings:
+                full = f"{job.part.character}/{name}"
+                drawing_entry = jev_drawings.get(full)
+                if not isinstance(drawing_entry, dict):
+                    continue
+                flags = drawing_entry.get("flags", [])
+                if not isinstance(flags, list):
+                    continue
+                for flag in flags:
+                    if not isinstance(flag, str):
+                        continue
+                    findings.append(
+                        {
+                            "drawing": f"{full}.png",
+                            "frames": None,
+                            "look": "drawing",
+                            "problem": f"jev: {flag}",
+                            "reason": "Jev answered a typed question about this drawing",
+                            "severity": "medium",
+                        }
+                    )
+        skipped_n = sum(1 for entry in parts if entry.get("skipped"))
+        if on_event is not None:
+            on_event(
+                {
+                    "payload_type": "code.note",
+                    "payload": {
+                        "text": f"jev: {skipped_n} part(s) clean and skipped, {len(jobs) - skipped_n} to the checkers"
+                    },
+                }
+            )
     out: dict[str, Any] = {"shot": shot, "parts": parts, "agreement": agreement}
     checks_path = prod / episode / "review" / shot / "checks.json"
     checks_path.parent.mkdir(parents=True, exist_ok=True)

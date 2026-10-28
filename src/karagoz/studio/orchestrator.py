@@ -107,6 +107,28 @@ def _review_on(prod: Path, episode: str) -> bool:
     return False
 
 
+def _jev_on(prod: Path, episode: str) -> bool:
+    """True when <episode>/studio.yaml says jev: on (default off; YAML 1.1 off -> False is off)."""
+    try:
+        text = (prod / episode / "studio.yaml").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return False
+    if not isinstance(data, dict):
+        return False
+    value = data.get("jev", "off")
+    if value is True:
+        return True
+    if value is False or value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() == "on"
+    return False
+
+
 def _interview_on(prod: Path, episode: str) -> bool:
     """True when <episode>/studio.yaml says interview: on (default off)."""
     try:
@@ -471,15 +493,59 @@ def code_work(
             synthesize_episode(prod, episode)
             return RunResult(ok=True, cost_usd=0.0)
         if department == "draw":
+            import threading
+
             from karagoz.meta.client import MetaClient
             from karagoz.meta.image import MuseImage
+            from karagoz.studio import claims as claims_module
             from karagoz.studio.draw import link_location_background, plan_draw, run_draw
+
+            claims_thread: threading.Thread | None = None
+            claims_holder: dict[str, Any] = {}
+            if _review_on(prod, episode) and _jev_on(prod, episode):
+
+                def _make_claims() -> None:
+                    try:
+                        claims_holder["result"] = claims_module.make_claims(prod, episode, task.unit)
+                    except Exception as exc:
+                        claims_holder["error"] = exc
+
+                claims_thread = threading.Thread(target=_make_claims, daemon=True)
+                claims_thread.start()
+
+            def _join_claims() -> None:
+                if claims_thread is not None:
+                    claims_thread.join()
+                    if "error" in claims_holder:
+                        exc = claims_holder["error"]
+                        message = str(exc) if str(exc) else type(exc).__name__
+                        if on_event is not None:
+                            on_event({"payload_type": "code.note", "payload": {"text": f"claims failed: {message}"}})
+                    else:
+                        result = claims_holder.get("result", {})
+                        drawings_n = len(result.get("drawings", {})) if isinstance(result, dict) else 0
+                        pairs_n = len(result.get("pairs", {})) if isinstance(result, dict) else 0
+                        seconds = result.get("seconds", 0.0) if isinstance(result, dict) else 0.0
+                        try:
+                            seconds_f = float(seconds)
+                        except (TypeError, ValueError):
+                            seconds_f = 0.0
+                        if on_event is not None:
+                            on_event(
+                                {
+                                    "payload_type": "code.note",
+                                    "payload": {
+                                        "text": f"claims: {drawings_n} drawings, {pairs_n} pairs, {seconds_f} s"
+                                    },
+                                }
+                            )
 
             link_location_background(prod, episode, task.unit)
             active = image if image is not None else MuseImage(MetaClient())
             report = run_draw(plan_draw(prod, episode, task.unit), active, on_event=on_event)
             if report.failed:
                 error = ", ".join(f"{path}: {message}" for path, message in report.failed)
+                _join_claims()
                 return RunResult(ok=False, error=error, cost_usd=report.cost_usd)
             # With a region map the render places drawings by their landmarks (WP-11): measure them now (cached by
             # image hash, so only new drawings cost SAM calls).
@@ -489,7 +555,9 @@ def code_work(
 
                 measured = measure_shot(prod, episode, task.unit, sam if sam is not None else Sam(MetaClient()))
                 final = f"{len(report.done)} drawn, {len(report.cached)} cached, {len(measured)} landmarks"
+                _join_claims()
                 return RunResult(ok=True, final_text=final, cost_usd=report.cost_usd)
+            _join_claims()
             return RunResult(ok=True, cost_usd=report.cost_usd)
         if department == "render":
             from karagoz.engine.shot import render_shot
@@ -548,6 +616,26 @@ def code_work(
                     if isinstance(models_cfg, dict) and models_cfg.get("checker") is not None:
                         checker_model = str(models_cfg["checker"])
                 factory = review_module.make_checker_factory(checker_name, checker_model)
+            from karagoz.studio import claims as claims_module
+
+            jev_score: dict[str, Any] | None = None
+            jev_cost = 0.0
+            if _review_on(prod, episode) and _jev_on(prod, episode):
+                claims_path = prod / episode / "review" / task.unit / "claims.json"
+                if claims_path.is_file():
+                    try:
+                        jev_score = claims_module.score_shot(prod, episode, task.unit)
+                        raw_cost = jev_score.get("cost_usd", 0.0) if isinstance(jev_score, dict) else 0.0
+                        try:
+                            jev_cost = float(raw_cost)
+                        except (TypeError, ValueError):
+                            jev_cost = 0.0
+                    except Exception as exc:
+                        jev_score = None
+                        jev_cost = 0.0
+                        message = str(exc) if str(exc) else type(exc).__name__
+                        if on_event is not None:
+                            on_event({"payload_type": "code.note", "payload": {"text": f"jev failed: {message}"}})
             out = review_module.run_checks(
                 prod,
                 episode,
@@ -557,8 +645,9 @@ def code_work(
                 guide_dir=effective_guide,
                 skills_dir=effective_skills,
                 on_event=on_event,
+                jev_score=jev_score,
             )
-            total = sum(float(p.get("cost_usd", 0.0)) for p in out.get("parts", []))
+            total = sum(float(p.get("cost_usd", 0.0)) for p in out.get("parts", [])) + jev_cost
             return RunResult(ok=True, final_text=f"{len(out.get('parts', []))} checks", cost_usd=total)
         if department == "review":
             from karagoz.studio import loop as loop_module
