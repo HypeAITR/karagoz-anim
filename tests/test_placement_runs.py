@@ -97,15 +97,15 @@ def test_run_keeps_every_hip_on_the_seat(placed: dict[str, DrawingPlacement]) ->
 
 def test_standing_run_scale_from_the_face(placed: dict[str, DrawingPlacement]) -> None:
     p = placed["p3"]
-    assert (p.scale, p.x, p.y, p.anchor, p.depth) == (pytest.approx(S3), 645, 419, "foot", 874)
+    assert (p.scale, p.x, p.y, p.anchor, p.depth) == (pytest.approx(S3), 704, 419, "foot", 874)  # WP-11f
 
 
 def test_transition_inbetween_keeps_its_face_scale_between_the_runs(placed: dict[str, DrawingPlacement]) -> None:
     p = placed["p2-p3.1"]
     assert p.scale == pytest.approx(118 / 560) and p.anchor == "foot"
     # sit -> stand (WP-11d): the foot is lerped a quarter of the way between the keys' feet on screen,
-    # (861.3, 714.6) -> (802.3, 874.3)
-    assert p.x + 600 * p.scale == pytest.approx(846.57, abs=1)
+    # (861.3, 714.6) -> (861.3, 874.3)
+    assert p.x + 600 * p.scale == pytest.approx(861.32, abs=1)  # WP-11f: both keys feet at x 861.3
     assert p.y + 1850 * p.scale == pytest.approx(754.49, abs=1)
 
 
@@ -115,7 +115,7 @@ def test_transition_inbetween_scale_is_clamped(placed: dict[str, DrawingPlacemen
 
 def test_transition_inbetween_without_points_is_lerped(placed: dict[str, DrawingPlacement]) -> None:
     p = placed["p2-p3.3"]
-    assert (p.scale, p.x, p.y, p.anchor) == (pytest.approx(S1 + 0.75 * (S3 - S1)), 660, 407, "fallback")
+    assert (p.scale, p.x, p.y, p.anchor) == (pytest.approx(S1 + 0.75 * (S3 - S1)), 704, 407, "fallback")
     assert (p.depth, p.occluders) == (874, ("coffee_table",))
 
 

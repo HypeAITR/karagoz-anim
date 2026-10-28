@@ -357,7 +357,7 @@ def solve(
             support = info.support or ("sit" if place.kind == "seat" else "stand")
             anchor = "fallback"
             pt: tuple[float, float] | None = None
-            target: tuple[int, int] | None = None
+            target: tuple[float, float] | None = None
             if support in ("sit", "lie"):
                 if d.hip is not None:
                     anchor = "hip"
@@ -377,6 +377,33 @@ def solve(
                 anchor = "hip"
                 pt = d.hip
                 target = (place.seat[0], place.seat[1]) if place.seat is not None else (place.floor[0], place.floor[1])
+            if support in ("stand", "crouch") and anchor == "foot" and pt is not None and target is not None:
+                # WP-11f: a planted contact stays where it is. An upright key next to a seated
+                # key at the same place rises over the seated key's feet instead of sliding
+                # back to the place's floor point.
+                idx = key_names.index(name)
+                neighbours: list[str] = []
+                if idx > 0:
+                    neighbours.append(key_names[idx - 1])
+                if idx + 1 < len(key_names):
+                    neighbours.append(key_names[idx + 1])
+                for cand in neighbours:
+                    cand_setup = setups.get(cand)
+                    if cand_setup is None or cand_setup.place_name != place_name:
+                        continue
+                    if cand_setup.support not in ("sit", "lie") or cand_setup.info.rests_on:
+                        continue
+                    if place.seat is None:
+                        continue
+                    cand_data = data.get(cand)
+                    if cand_data is None or cand_data.hip is None or cand_data.foot is None:
+                        continue
+                    s = key_scale[cand]
+                    target = (
+                        place.seat[0] - cand_data.hip[0] * s + cand_data.foot[0] * s,
+                        float(place.floor[1]),
+                    )
+                    break
             if name in key_scale_fallback:
                 anchor = "fallback"
             if pt is not None and target is not None:
