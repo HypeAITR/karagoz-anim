@@ -30,18 +30,22 @@ def make_brief(
     skills_dir: Path,
     questions_left: int | None = None,
     previous: list[str] | None = None,
+    context: str | None = None,
 ) -> str:
     """Render the brief for ``task``. ``prod``/``episode``/``workdir`` locate the work; paths stay relative."""
-    lines = [
-        f"# Task: {task.id}",
-        "",
-        f"Department: {task.department}",
-        "",
-        _skill_body(skills_dir, task.department),
-        "",
-        "## Inputs",
-        "",
-    ]
+    if context is None:
+        lines = [
+            f"# Task: {task.id}",
+            "",
+            f"Department: {task.department}",
+            "",
+            _skill_body(skills_dir, task.department),
+            "",
+            "## Inputs",
+            "",
+        ]
+    else:
+        lines = [context.rstrip("\n"), "", "## Inputs", ""]
     lines.extend(f"- {rel}" for rel in task.files_in)
     lines += [
         "",
@@ -70,6 +74,8 @@ def make_brief(
         questions_text = NO_QUESTIONS_TEXT
     else:
         questions_text = f"You may ask at most {questions_left} question(s). {QUESTION_TEXT} {QUESTION_TOPIC_LINE}"
+    if context is not None:
+        questions_text = questions_text.replace("DECISIONS.md", f"notes/{task.department}/DECISIONS.md")
     lines += ["## Questions", "", questions_text, "", "## Finish", "", FINISH_TEXT, ""]
     return "\n".join(lines)
 
