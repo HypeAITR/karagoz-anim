@@ -16,6 +16,7 @@ from PIL import Image, ImageOps
 from karagoz.engine.camera import BBox, Box
 from karagoz.engine.patch import Patch, apply_patch, clip_patch, load_patch, transfer_patch
 from karagoz.engine.placement import DrawingPlacement
+from karagoz.engine.shading import SHADOW_FLAT, SHADOW_WIDTH, ambient_tint, apply_shadow, background_tint, shadow_alpha
 from karagoz.engine.xsheet import Exposure
 from karagoz.spec import Mouth
 
@@ -129,17 +130,25 @@ def _composite_layers(base_rgb: Image.Image, layers: list[tuple[Image.Image, Pla
     return base.convert("RGB")
 
 
+_ShadowSpec = tuple[tuple[float, float], float, float] | None
+
+
 def _composite_layers_placement(
     base_rgb: Image.Image,
     layers: list[tuple[Image.Image, DrawingPlacement]],
     occluders: dict[str, np.ndarray] | None,
+    shadows: list[_ShadowSpec] | None = None,
 ) -> Image.Image:
     base = base_rgb.convert("RGBA")
     tw, th = base.size
     bg_arr: np.ndarray | None = None
     if occluders:
         bg_arr = np.array(base_rgb.convert("RGBA"))
-    for img, pl in layers:
+    for i, (img, pl) in enumerate(layers):
+        spec = shadows[i] if shadows is not None and i < len(shadows) else None
+        if spec is not None:
+            center, rx, ry = spec
+            base = apply_shadow(base.convert("RGB"), shadow_alpha((tw, th), center, rx, ry)).convert("RGBA")
         w, h = img.size
         sw = max(1, int(round(w * pl.scale)))
         sh = max(1, int(round(h * pl.scale)))
@@ -305,6 +314,70 @@ def _face_box(assets: ShotAssets, character: str, drawing: str) -> tuple[float, 
                     y1 * image_h / float(sh),
                 )
     return (x0, y0, x1, y1)
+
+
+def _feet_shadow(
+    assets: ShotAssets,
+    character: str,
+    drawing_used: str,
+    img: Image.Image,
+    pl: DrawingPlacement,
+) -> _ShadowSpec:
+    """Contact-shadow ellipse of a placed drawing, or None when it has no feet boxes."""
+    landmarks = assets.landmarks(character, drawing_used)
+    if landmarks is None:
+        return None
+    feet = landmarks.get("feet")
+    if not isinstance(feet, list) or not feet:
+        return None
+    boxes: list[tuple[float, float, float, float]] = []
+    for entry in feet:
+        box = entry.get("box") if isinstance(entry, dict) else None
+        if not isinstance(box, (list, tuple)) or len(box) != 4:
+            continue
+        coords: list[float] = []
+        for value in box:
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                break
+            coords.append(float(value))
+        if len(coords) == 4:
+            boxes.append((coords[0], coords[1], coords[2], coords[3]))
+    if not boxes:
+        return None
+    image_w, image_h = img.size
+    size = landmarks.get("size")
+    if isinstance(size, (list, tuple)) and len(size) == 2:
+        sw, sh = size[0], size[1]
+        if (
+            isinstance(sw, (int, float))
+            and isinstance(sh, (int, float))
+            and not isinstance(sw, bool)
+            and not isinstance(sh, bool)
+            and sw != 0
+            and sh != 0
+            and (image_w != sw or image_h != sh)
+        ):
+            boxes = [
+                (
+                    x0 * image_w / float(sw),
+                    y0 * image_h / float(sh),
+                    x1 * image_w / float(sw),
+                    y1 * image_h / float(sh),
+                )
+                for x0, y0, x1, y1 in boxes
+            ]
+    if pl.mirror:
+        boxes = [(image_w - x1, y0, image_w - x0, y1) for x0, y0, x1, y1 in boxes]
+    mapped = [
+        (pl.x + x0 * pl.scale, pl.y + y0 * pl.scale, pl.x + x1 * pl.scale, pl.y + y1 * pl.scale)
+        for x0, y0, x1, y1 in boxes
+    ]
+    ux0 = min(b[0] for b in mapped)
+    ux1 = max(b[2] for b in mapped)
+    uy1 = max(b[3] for b in mapped)
+    rx = SHADOW_WIDTH * (ux1 - ux0)
+    ry = max(3.0, SHADOW_FLAT * rx)
+    return (((ux0 + ux1) / 2.0, uy1), rx, ry)
 
 
 def _best_shift(
@@ -475,13 +548,14 @@ def _frame_layers_placement(
     order: list[str],
     placements: dict[str, dict[str, DrawingPlacement]],
     f: int,
-) -> tuple[list[tuple[Image.Image, DrawingPlacement]], list[str]]:
+    tint: tuple[float, float, float] | None = None,
+) -> tuple[list[tuple[Image.Image, DrawingPlacement]], list[str], list[_ShadowSpec]]:
     """Build one frame's layers using per-drawing placements."""
     warnings: list[str] = []
     if f < 0 or f >= exp.length:
-        return ([], [])
+        return ([], [], [])
     order_index = {ch: i for i, ch in enumerate(order)}
-    collected: list[tuple[str, Image.Image, DrawingPlacement]] = []
+    collected: list[tuple[str, Image.Image, DrawingPlacement, str]] = []
     for character in order:
         body_cells = exp.body.get(character, [])
         drawing_name: str | None = body_cells[f] if 0 <= f < len(body_cells) else None
@@ -552,10 +626,13 @@ def _frame_layers_placement(
             continue
         if placement.mirror:
             img = ImageOps.mirror(img)
-        collected.append((character, img, placement))
+        if tint is not None:
+            img = ambient_tint(img, tint)
+        collected.append((character, img, placement, drawing_used))
     collected.sort(key=lambda item: (item[2].depth, order_index.get(item[0], 0)))
-    layers = [(img, pl) for _, img, pl in collected]
-    return (layers, warnings)
+    layers = [(img, pl) for _, img, pl, _ in collected]
+    shadows = [_feet_shadow(assets, ch, used, img, pl) for ch, img, pl, used in collected]
+    return (layers, warnings, shadows)
 
 
 def _layers_equal(a: list[tuple[Image.Image, Any]], b: list[tuple[Image.Image, Any]]) -> bool:
@@ -741,13 +818,14 @@ def render_frames(
     out_dir.mkdir(parents=True, exist_ok=True)
     if placements is not None:
         fitted_bg = _fit_background(assets.background(), frame)
+        tint = background_tint(fitted_bg)
         all_warnings: list[str] = []
         prev_layers: list[tuple[Image.Image, Any]] | None = None
         prev_path: Path | None = None
         prev_box: Box | None = None
         fw, fh = frame
         for f in range(exp.length):
-            layers, warnings = _frame_layers_placement(exp, mouths, assets, order, placements, f)
+            layers, warnings, shadows = _frame_layers_placement(exp, mouths, assets, order, placements, f, tint)
             all_warnings.extend(warnings)
             path = out_dir / f"{f:05d}.png"
             cur_box: Box | None = None
@@ -757,7 +835,7 @@ def render_frames(
             if prev_layers is not None and prev_path is not None and _layers_equal(layers, prev_layers) and box_same:
                 shutil.copyfile(prev_path, path)
             else:
-                frame_img = _composite_layers_placement(fitted_bg, layers, occluders)
+                frame_img = _composite_layers_placement(fitted_bg, layers, occluders, shadows)
                 if cur_box is not None and not (
                     cur_box.x == 0 and cur_box.y == 0 and cur_box.w == fw and cur_box.h == fh
                 ):
