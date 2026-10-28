@@ -29,8 +29,9 @@ Example lesson:
 ```
 
 Keep them true. If a lesson turns out wrong, correct it and say why; do not delete it silently. When two lessons say
-the same thing, merge them. If a note contradicts the guide, the guide wins until a human changes it — write the
-contradiction down.
+the same thing, merge them. If one of your own lessons contradicts the guide, the guide wins until a human changes
+it — write the contradiction down. (A retake note from the orchestrator is different: see "Your brief" in the
+studio core.)
 
 ## When
 

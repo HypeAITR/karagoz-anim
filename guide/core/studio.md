@@ -53,6 +53,12 @@ meant to show but not the gate's flags. The orchestrator decides: keep, or retak
   A **retake note always means change**. When your guide changed since your last run, re-check your old output
   against it even without a note: an agent once kept its old output after its guide gained new fields, and the
   drawings were made without them.
+- **When a retake note contradicts your guide or a section:** the note says *what* must change (the problem the
+  orchestrator saw); your guide says *how* a movement is drawn and timed. Reach the note's aim in the guide's way
+  (a "quick handover" is a short contact, not a handover without contact). Where the aim itself breaks the guide (a
+  held low crouch in a stand-up), keep the guide for that part. Either way write the contradiction as the **first
+  line** of your decisions note — quote both sentences — so the orchestrator sees it. The orchestrator can be wrong:
+  an earlier retake note asked for exactly the crouch that ruined a stand-up.
 - **Questions:** the brief says whether you may ask (`QUESTION.md`, one short question, then stop) or must decide
   yourself (one line per uncertain choice in your decisions note).
 - **Sections:** the sections printed in your brief are complete; do not open their files again. The index lists
