@@ -1,4 +1,4 @@
-"""Acceptance tests for WP-11 (placement solver). Written by the maintainer; do not edit.
+"""Acceptance tests for WP-11 (placement solver), updated for WP-11c (Deniz p1 crouches). Do not edit.
 
 The region map is the slice's salon as measured by SAM (D30, WP-10); drawings are 1280x1920 like Muse's.
 """
@@ -86,7 +86,7 @@ DENIZ = CharacterInput(
     target_head_px=100.0,
     mirror=False,
     place="kapi",
-    poses={},  # no support: the place is a floor place, so they stand
+    poses={"p1": PoseInfo(support="crouch")},  # p2 has no support: a floor place, so he stands (WP-11c: own run)
     landmarks={
         "p1": lm(head=[0, 0, 100, 200], face=[0, 0, 100, 100], foot=[50, 380], size=(100, 400)),
         "p2": lm(face=[0, 0, 100, 150], foot=[50, 400], size=(100, 400)),
