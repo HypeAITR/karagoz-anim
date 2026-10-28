@@ -2,6 +2,7 @@
 
 Written by the maintainer; do not edit. Uses the mini production of the WP-09a tests (`test_draw.py`), the checker
 fakes of the WP-F10 tests (`test_review.py`) and the orchestrator harness of the WP-F4 tests (`test_orchestrator.py`).
+WP-F13 updated two tests: a review between decision rounds.
 """
 
 from __future__ import annotations
@@ -200,6 +201,7 @@ def test_redraw_moves_drawings_to_history(prod: Path, tmp_path: Path) -> None:  
     assert [(e["task"], e["action"], e["round"], e["note"]) for e in d] == [("sh01/review", "redraw", 1, "head jumps")]
     assert d[0]["drawings"] == ["ali/p1", "ali/p1-p2.1"]
     Image.new("RGB", (400, 600), (1, 2, 3)).save(ali / "p1.png")  # the draw task drew it again
+    loop.write_review(prod, EP, "sh01")  # WP-F13: a new review opens a new decision round
     loop.redraw(s, "sh01", ["ali/p1"], "still jumps")
     assert (ali / "history" / "p1.2.png").is_file() and (ali / "history" / "p1.1.png").is_file()
     assert len(json.loads((prod / REVIEW_DIR / "redraw.json").read_text(encoding="utf-8"))) == 2
@@ -405,6 +407,7 @@ def test_cli_retake_counts_the_round(oprod: Path, skills: Path, tmp_path: Path) 
     assert cli.main(["retake", str(oprod), OEP, "sh01/layout", "do it again"]) == 0
     assert loop.current_round(oprod, OEP, "sh01") == 2
     (oprod / OEP / "review" / "sh01" / "rounds.json").write_text('{"round": 3}', encoding="utf-8")
+    loop.write_review(oprod, OEP, "sh01")  # WP-F13: the limit applies when a new decision round starts
     assert cli.main(["retake", str(oprod), OEP, "sh01/timer", "again"]) == 1
     assert Board.load(oprod / OEP / "run" / "tasks.json").tasks["sh01/review"].state is State.QUESTION
 

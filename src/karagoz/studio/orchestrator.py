@@ -784,7 +784,7 @@ class Studio:
                 self._note_changed_inputs(change.task)
         review_staled = False
         for task in self.board.tasks.values():
-            if task.department != "review" or task.state is not State.REVIEW:
+            if task.department not in CODE_DEPARTMENTS or task.state is not State.REVIEW:
                 continue
             if self._task_digest(task) != task.input_digest:
                 old = task.state
