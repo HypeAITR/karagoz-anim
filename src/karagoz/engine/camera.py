@@ -115,6 +115,41 @@ def _cam_int(style: Style, key: str, default: int) -> int:
     return int(round(_cam_float(style, key, float(default))))
 
 
+def _resolve_at_frame(
+    target: str | None,
+    at: str,
+    bboxes: dict[str, BBox],
+    union: BBox | None,
+    ft: dict[str, BBox],
+    warnings: list[str],
+) -> BBox | None:
+    """Resolve one event's target from one frame's boxes, falling back to today's resolution."""
+    if target is None:
+        bodies = [box for key, box in ft.items() if "." not in key]
+        if not bodies:
+            return union
+        return (
+            min(b[0] for b in bodies),
+            min(b[1] for b in bodies),
+            max(b[2] for b in bodies),
+            max(b[3] for b in bodies),
+        )
+    if "." in target:
+        char = target.split(".", 1)[0]
+        if target == f"{char}.face" and target in ft:
+            return ft[target]
+        if char in ft:
+            x0, y0, x1, y1 = ft[char]
+            return (x0, y0, x1, y0 + round(FACE_PART * (y1 - y0)))
+    elif target in ft:
+        return ft[target]
+    try:
+        return target_bbox(target, bboxes)
+    except KeyError:
+        warnings.append(f"unknown camera target '{target}' at '{at}', using all characters")
+        return union
+
+
 def _blend(a: Box, b: Box, wgt: float) -> Box:
     return Box(
         a.x + (b.x - a.x) * wgt,
@@ -133,6 +168,7 @@ def camera_track(
     style: Style,
     bboxes: dict[str, BBox],
     frame: tuple[int, int] = FRAME,
+    frame_targets: list[dict[str, BBox]] | None = None,
 ) -> tuple[list[Box], list[str]]:
     fw, fh = frame
     fw_f = float(fw)
@@ -158,11 +194,21 @@ def camera_track(
     current_framing = shot_framing
     current_box = start_box
     for at, until_c, _idx, event in enriched:
-        try:
-            tgt = target_bbox(event.target, bboxes)
-        except KeyError:
-            tgt = union
-            warnings.append(f"unknown camera target '{event.target}' at '{event.at}', using all characters")
+        if frame_targets is None:
+            try:
+                tgt = target_bbox(event.target, bboxes)
+            except KeyError:
+                tgt = union
+                warnings.append(f"unknown camera target '{event.target}' at '{event.at}', using all characters")
+        else:
+            if event.hold is not None or event.move not in ("push_in", "pull_out", "pan"):
+                g = at
+            else:
+                end_g = until_c if until_c is not None else min(length, at + _cam_int(style, "ease_min", 16))
+                g = end_g - 1 if end_g > at else at
+            g = max(0, min(length - 1, g)) if length > 0 else 0
+            ft = frame_targets[g] if g < len(frame_targets) else {}
+            tgt = _resolve_at_frame(event.target, event.at, bboxes, union, ft, warnings)
         if event.hold is not None:
             new_box = framing_box(event.hold, tgt, frame)
             current_framing = event.hold
