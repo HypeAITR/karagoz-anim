@@ -57,9 +57,10 @@ DEPARTMENTS = [
     "render",
     "gate",
     "check",
+    "review",
     "edit",
 ]
-CODE_DEPARTMENTS = {"location", "voice", "draw", "render", "edit", "gate", "check"}
+CODE_DEPARTMENTS = {"location", "voice", "draw", "render", "edit", "gate", "check", "review"}
 
 DEFAULT_CARRIER = "muse-exec"
 DEFAULT_MAX_STEPS = 40
@@ -97,6 +98,28 @@ def _review_on(prod: Path, episode: str) -> bool:
     if not isinstance(data, dict):
         return False
     value = data.get("review", "off")
+    if value is True:
+        return True
+    if value is False or value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() == "on"
+    return False
+
+
+def _interview_on(prod: Path, episode: str) -> bool:
+    """True when <episode>/studio.yaml says interview: on (default off)."""
+    try:
+        text = (prod / episode / "studio.yaml").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return False
+    if not isinstance(data, dict):
+        return False
+    value = data.get("interview", "off")
     if value is True:
         return True
     if value is False or value is None:
@@ -326,11 +349,18 @@ def plan_tasks(prod: Path, episode: str) -> list[Task]:
                 files_out=[f"{episode}/shots/{shot.id}/xsheet.yaml"],
             )
         )
+        redraw_json = f"{episode}/review/{shot.id}/redraw.json"
+        review_mode = _review_on(prod, episode)
+        draw_in = ["characters.yaml", "locations.yaml", poses, xsheet, *shot_aligns, *loc_files]
+        render_in = [xsheet, f"{episode}/assets/{shot.id}/manifest.json"]
+        if review_mode:
+            draw_in.append(redraw_json)
+            render_in.append(redraw_json)
         tasks.append(
             Task(
                 id=f"{shot.id}/draw",
                 inputs=[f"{shot.id}/timer", *loc_inputs],
-                files_in=["characters.yaml", "locations.yaml", poses, xsheet, *shot_aligns, *loc_files],
+                files_in=draw_in,
                 files_out=[f"{episode}/assets/{shot.id}/manifest.json"],
             )
         )
@@ -338,17 +368,17 @@ def plan_tasks(prod: Path, episode: str) -> list[Task]:
             Task(
                 id=f"{shot.id}/render",
                 inputs=[f"{shot.id}/draw"],
-                files_in=[xsheet, f"{episode}/assets/{shot.id}/manifest.json"],
+                files_in=render_in,
                 files_out=[f"{episode}/render/{shot.id}.mp4"],
             )
         )
-        if _review_on(prod, episode):
+        if review_mode:
             manifest = f"{episode}/assets/{shot.id}/manifest.json"
             tasks.append(
                 Task(
                     id=f"{shot.id}/gate",
                     inputs=[f"{shot.id}/render"],
-                    files_in=[poses, xsheet, manifest, f"{episode}/continuity.yaml"],
+                    files_in=[poses, xsheet, manifest, f"{episode}/continuity.yaml", redraw_json],
                     files_out=[f"{episode}/review/{shot.id}/gate.json"],
                 )
             )
@@ -356,8 +386,17 @@ def plan_tasks(prod: Path, episode: str) -> list[Task]:
                 Task(
                     id=f"{shot.id}/check",
                     inputs=[f"{shot.id}/render"],
-                    files_in=[poses, xsheet, manifest, f"{episode}/render/{shot.id}.mp4"],
+                    files_in=[poses, xsheet, manifest, f"{episode}/render/{shot.id}.mp4", redraw_json],
                     files_out=[f"{episode}/review/{shot.id}/checks.json"],
+                )
+            )
+            tasks.append(
+                Task(
+                    id=f"{shot.id}/review",
+                    inputs=[f"{shot.id}/gate", f"{shot.id}/check"],
+                    files_in=[f"{episode}/review/{shot.id}/gate.json", f"{episode}/review/{shot.id}/checks.json"],
+                    files_out=[f"{episode}/review/{shot.id}/REVIEW.md"],
+                    needs_approval=True,
                 )
             )
     edit_inputs = [f"{s.id}/render" for s in shots.shots]
@@ -366,6 +405,8 @@ def plan_tasks(prod: Path, episode: str) -> list[Task]:
             edit_inputs.append(f"{s.id}/gate")
         for s in shots.shots:
             edit_inputs.append(f"{s.id}/check")
+        for s in shots.shots:
+            edit_inputs.append(f"{s.id}/review")
     tasks.append(
         Task(
             id="ep/edit",
@@ -503,6 +544,37 @@ def code_work(
             )
             total = sum(float(p.get("cost_usd", 0.0)) for p in out.get("parts", []))
             return RunResult(ok=True, final_text=f"{len(out.get('parts', []))} checks", cost_usd=total)
+        if department == "review":
+            from karagoz.studio import loop as loop_module
+
+            loop_module.write_review(prod, episode, task.unit)
+            round_n = loop_module.current_round(prod, episode, task.unit)
+            flags_n = 0
+            findings_n = 0
+            try:
+                gate_data = json.loads(
+                    (prod / episode / "review" / task.unit / "gate.json").read_text(encoding="utf-8")
+                )
+                raw = gate_data.get("flags") if isinstance(gate_data, dict) else None
+                flags_n = len(raw) if isinstance(raw, list) else 0
+            except (OSError, json.JSONDecodeError):
+                flags_n = 0
+            try:
+                checks_data = json.loads(
+                    (prod / episode / "review" / task.unit / "checks.json").read_text(encoding="utf-8")
+                )
+                raw_parts = checks_data.get("parts") if isinstance(checks_data, dict) else None
+                if isinstance(raw_parts, list):
+                    for entry in raw_parts:
+                        if isinstance(entry, dict):
+                            findings = entry.get("findings")
+                            if isinstance(findings, list):
+                                findings_n += len(findings)
+            except (OSError, json.JSONDecodeError):
+                findings_n = 0
+            return RunResult(
+                ok=True, final_text=f"round {round_n}: {flags_n} flags, {findings_n} findings", cost_usd=0.0
+            )
         raise ValueError(f"not a code department: {department!r}")
     except Exception as exc:  # noqa: BLE001 - a code failure fails the task, not the studio
         return RunResult(ok=False, error=f"{type(exc).__name__}: {exc}")
@@ -662,6 +734,21 @@ class Studio:
         self._record(self.board.answer(task_id, note))
         self._save_board()
 
+    def hold(self, task_id: str, note: str) -> None:
+        """Put a task that is not running into question with a note (round limit)."""
+        from karagoz.studio.tasks import TransitionError
+
+        task = self.board.tasks.get(task_id)
+        if task is None:
+            raise TransitionError(f"unknown task: {task_id}")
+        if task.state is State.RUNNING:
+            raise TransitionError(f"cannot hold {task_id} from running")
+        old = task.state
+        task.state = State.QUESTION
+        task.notes.append(note)
+        self._record(Change(task_id, old, State.QUESTION, note))
+        self._save_board()
+
     def status(self) -> str:
         return "\n".join(
             f"{t.state.value}  {t.id}  attempts={t.attempts} retakes={t.retakes}" for t in self.board.tasks.values()
@@ -673,21 +760,42 @@ class Studio:
             self._record(change)
         for change in changes:
             if change.old is State.DONE and change.new is State.REVIEW:
-                task = self.board.tasks[change.task]
-                if not task.input_files:
-                    files_text = "unknown (no per-file record)"
-                else:
-                    current = file_digests(self.prod, task)
-                    old = task.input_files
-                    changed_files = sorted(
-                        [rel for rel in current if old.get(rel) != current[rel]]
-                        + [rel for rel in old if rel not in current]
-                    )
-                    files_text = ", ".join(changed_files)
-                text = f"inputs changed: {files_text} — approve keeps the approved output, retake redoes it"
-                self.log.append(task.id, "note", text=text)
-                task.notes.append(text)
+                self._note_changed_inputs(change.task)
+        review_staled = False
+        for task in self.board.tasks.values():
+            if task.department != "review" or task.state is not State.REVIEW:
+                continue
+            if self._task_digest(task) != task.input_digest:
+                old = task.state
+                task.state = State.STALE
+                change = Change(task.id, old, State.STALE)
+                changes.append(change)
+                self._record(change)
+                review_staled = True
+        if review_staled:
+            more = self.board.refresh(self._digest, task_digest=self._task_digest)
+            for change in more:
+                self._record(change)
+            for change in more:
+                if change.old is State.DONE and change.new is State.REVIEW:
+                    self._note_changed_inputs(change.task)
+            changes.extend(more)
         return changes
+
+    def _note_changed_inputs(self, task_id: str) -> None:
+        task = self.board.tasks[task_id]
+        if not task.input_files:
+            files_text = "unknown (no per-file record)"
+        else:
+            current = file_digests(self.prod, task)
+            old = task.input_files
+            changed_files = sorted(
+                [rel for rel in current if old.get(rel) != current[rel]] + [rel for rel in old if rel not in current]
+            )
+            files_text = ", ".join(changed_files)
+        text = f"inputs changed: {files_text} — approve keeps the approved output, retake redoes it"
+        self.log.append(task.id, "note", text=text)
+        task.notes.append(text)
 
     def _auto_approve(self) -> list[Change]:
         if self._human != "off":
@@ -813,10 +921,39 @@ class Studio:
             self._restore_outputs(previous)
             note = "\n".join(str(f) for f in errors)
             changes.append(self.board.finish(task.id, ok=False, note=note))
-        else:
-            changes.append(self.board.finish(task.id, ok=True))
+            self._record(changes[-1])
+            return changes
+        changes.append(self.board.finish(task.id, ok=True))
         self._record(changes[-1])
+        self._maybe_interview(task, carrier, workdir, result.session_id)
         return changes
+
+    def _maybe_interview(self, task: Task, carrier: Carrier, workdir: Path, session_id: str | None) -> None:
+        """Ask a retaken agent what was unclear; never fails the task."""
+        if task.retakes <= 0 or session_id is None:
+            return
+        if not _interview_on(self.prod, self.episode):
+            return
+        from karagoz.studio.loop import INTERVIEW_PROMPT
+
+        brief = Brief(task_id=task.id, prompt=INTERVIEW_PROMPT, workdir=workdir, max_steps=5, session_id=session_id)
+        try:
+            answer = carrier.run(brief, on_event=lambda obj: self._on_carrier_event(task.id, obj))
+        except Exception as exc:  # noqa: BLE001 - a failing interview never fails the task
+            self.log.append(task.id, "interview", text="", error=f"{type(exc).__name__}: {exc}", usd=0.0, session=None)
+            return
+        self.budget.charge(task.unit, answer.cost_usd)
+        if not answer.ok:
+            self.log.append(
+                task.id,
+                "interview",
+                text=answer.final_text,
+                error=answer.error,
+                usd=answer.cost_usd,
+                session=answer.session_id,
+            )
+            return
+        self.log.append(task.id, "interview", text=answer.final_text, usd=answer.cost_usd, session=answer.session_id)
 
     def _run_code_task(self, task: Task, changes: list[Change]) -> list[Change]:
         """Run a task whose carrier is "code": trusted code straight in the production directory."""

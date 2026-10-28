@@ -1,4 +1,7 @@
-"""Acceptance tests for WP-F4 + WP-09c (orchestrator, code departments). Written by the maintainer; do not edit."""
+"""Acceptance tests for WP-F4 + WP-09c (orchestrator, code departments); WP-F11 adds `review`.
+
+Written by the maintainer; do not edit.
+"""
 
 from __future__ import annotations
 
@@ -157,9 +160,10 @@ def test_plan_before_and_after_director(prod: Path) -> None:
         "render",
         "gate",
         "check",
+        "review",
         "edit",
     ]
-    assert {"location", "voice", "draw", "render", "edit", "gate", "check"} == CODE_DEPARTMENTS  # WP-F6
+    assert {"location", "voice", "draw", "render", "edit", "gate", "check", "review"} == CODE_DEPARTMENTS  # WP-F11
     assert tasks["sh01/timer"].files_out == [f"{EP}/shots/sh01/xsheet.yaml"]
     assert f"{EP}/shots/sh01/poses.yaml" in tasks["sh01/timer"].files_in
 

@@ -2,7 +2,7 @@
 
 Written by the maintainer; do not edit. Uses the mini production of the WP-09a tests (`test_draw.py`: ali p1 -> p2
 with two inbetweens, ayse one pose, glass handed from ali to ayse in continuity) and the orchestrator harness of the
-WP-F4 tests (`test_orchestrator.py`).
+WP-F4 tests (`test_orchestrator.py`). WP-F11 updated `test_review_on_adds_gate_and_check` (review task).
 """
 
 from __future__ import annotations
@@ -287,6 +287,9 @@ def test_review_on_adds_gate_and_check(oprod: Path, skills: Path, tmp_path: Path
     assert tasks["sh01/gate"].files_out == [f"{OEP}/review/sh01/gate.json"]
     assert {"sh01/check", "sh01/gate"} <= set(tasks["ep/edit"].inputs)
     assert code.ran.index("sh01/check") > code.ran.index("sh01/render")
+    assert "ep/edit" not in code.ran  # WP-F11: the edit waits for the shot's review decision
+    s.approve("sh01/review")
+    s.run()
     assert code.ran.index("ep/edit") > max(code.ran.index("sh01/check"), code.ran.index("sh01/gate"))
 
 

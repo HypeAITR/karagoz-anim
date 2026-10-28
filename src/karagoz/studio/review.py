@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 import sys
@@ -458,6 +459,24 @@ def _load_result(workdir: Path) -> CheckResult:
     return CheckResult.model_validate(data)
 
 
+def _job_key(prod: Path, episode: str, job: CheckJob) -> str:
+    """sha256 over the job's images sorted by path: rel path + NUL + bytes each."""
+    assets = prod / episode / "assets" / job.shot
+    digest = hashlib.sha256()
+    for image in sorted(job.images):
+        try:
+            rel = image.relative_to(assets).as_posix()
+        except ValueError:
+            rel = image.name
+        digest.update(rel.encode("utf-8"))
+        digest.update(b"\0")
+        try:
+            digest.update(image.read_bytes())
+        except OSError:
+            digest.update(b"<missing>")
+    return digest.hexdigest()
+
+
 def _run_one(
     prod: Path,
     episode: str,
@@ -470,6 +489,7 @@ def _run_one(
 ) -> dict[str, Any]:
     safe = job.part.id.replace(":", "__")
     workdir = work_root / episode / f"{job.shot}__check__{safe}#{job.copy}"
+    key = _job_key(prod, episode, job)
     try:
         prepare_check(prod, episode, job, workdir, guide_dir=guide_dir, skills_dir=skills_dir)
     except Exception as exc:
@@ -487,6 +507,8 @@ def _run_one(
             "cost_usd": 0.0,
             "seconds": 0.0,
             "session": None,
+            "key": key,
+            "reused": False,
         }
     task_id = f"{job.shot}/check/{job.part.id}#{job.copy}"
     carrier = factory()
@@ -545,6 +567,8 @@ def _run_one(
         "cost_usd": total_cost,
         "seconds": total_seconds,
         "session": session,
+        "key": key,
+        "reused": False,
     }
 
 
@@ -566,18 +590,55 @@ def run_checks(
     factory: Callable[[], Carrier] = (
         carrier_factory if carrier_factory is not None else lambda: MuseExecCarrier(model=CHECKER_MODEL)
     )
-    parts: list[dict[str, Any]] = []
-    if jobs:
+    prev: dict[tuple[str, int], dict[str, Any]] = {}
+    try:
+        prev_data = json.loads((prod / episode / "review" / shot / "checks.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        prev_data = None
+    if isinstance(prev_data, dict):
+        raw_prev = prev_data.get("parts")
+        if isinstance(raw_prev, list):
+            for entry in raw_prev:
+                if not isinstance(entry, dict):
+                    continue
+                part = entry.get("part")
+                copy = entry.get("copy")
+                if isinstance(part, str) and isinstance(copy, int) and not isinstance(copy, bool):
+                    prev[(part, copy)] = entry
+    parts_by_idx: dict[int, dict[str, Any]] = {}
+    fresh: list[tuple[int, CheckJob]] = []
+    for idx, job in enumerate(jobs):
+        key = _job_key(prod, episode, job)
+        candidate = prev.get((job.part.id, job.copy))
+        if candidate is not None and candidate.get("key") == key and candidate.get("error") is None:
+            entry = dict(candidate)
+            entry["reused"] = True
+            entry["cost_usd"] = 0.0
+            entry["seconds"] = 0.0
+            parts_by_idx[idx] = entry
+            if on_event is not None:
+                on_event(
+                    {
+                        "payload_type": "code.note",
+                        "payload": {"text": f"check {job.part.id}#{job.copy} reused"},
+                    }
+                )
+        else:
+            fresh.append((idx, job))
+    if fresh:
         with ThreadPoolExecutor(max_workers=max(1, parallel)) as pool:
             futures = []
-            for i, job in enumerate(jobs):
+            indices = []
+            for i, (idx, job) in enumerate(fresh):
                 if i > 0 and stagger_s > 0:
                     time.sleep(stagger_s)
                 futures.append(
                     pool.submit(_run_one, prod, episode, job, work_root, guide_dir, skills_dir, factory, on_event)
                 )
-            for fut in futures:
-                parts.append(fut.result())
+                indices.append(idx)
+            for fut, idx in zip(futures, indices, strict=True):
+                parts_by_idx[idx] = fut.result()
+    parts: list[dict[str, Any]] = [parts_by_idx[i] for i in range(len(jobs))]
     by_part: dict[str, list[dict[str, Any]]] = {}
     for entry in parts:
         by_part.setdefault(str(entry["part"]), []).append(entry)
