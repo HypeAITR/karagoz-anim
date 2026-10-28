@@ -17,6 +17,7 @@ from PIL import Image
 
 from karagoz.engine.camera import camera_track
 from karagoz.engine.compose import ShotAssets, character_bboxes, cutout, render_frames
+from karagoz.engine.framing import frame_targets
 from karagoz.engine.landmarks import body_drawings
 from karagoz.engine.mouth import mouth_track
 from karagoz.engine.placement import (
@@ -451,9 +452,15 @@ def render_shot(prod: Path, episode: str, shot: str) -> ShotRender:
     frames_dir.mkdir(parents=True)
     if placements_map is not None:
         bboxes = character_bboxes(exp, assets, order, placements=placements_map)
+        targets = frame_targets(exp, assets, order, placements_map)
+        camera_boxes, camera_warnings = camera_track(
+            xs.camera, shot_entry.framing, shot, exp.length, timing, style, bboxes, frame_targets=targets
+        )
     else:
         bboxes = character_bboxes(exp, assets, order, mirror=mirror, scales=scales)
-    camera_boxes, camera_warnings = camera_track(xs.camera, shot_entry.framing, shot, exp.length, timing, style, bboxes)
+        camera_boxes, camera_warnings = camera_track(
+            xs.camera, shot_entry.framing, shot, exp.length, timing, style, bboxes
+        )
     warnings.extend(camera_warnings)
     if placements_map is not None:
         render_warnings = render_frames(
