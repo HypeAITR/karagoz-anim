@@ -43,7 +43,7 @@ def landmarks(face: list[int], size: tuple[int, int] = (400, 600)) -> dict[str, 
 def shot_dir(tmp_path: Path) -> Path:
     root = tmp_path / "assets" / "sh01"
     (root / "ali").mkdir(parents=True)
-    Image.new("RGB", (1920, 1080), (40, 40, 60)).save(root / "background.png")
+    Image.new("RGB", (1920, 1080), (50, 50, 50)).save(root / "background.png")  # neutral grey: no ambient tint (WP-21)
     drawing().save(root / "ali" / "p1.png")
     drawing(20).save(root / "ali" / "p1-p2.1.png")
     drawing(20).save(root / "ali" / "p1-p2.2.png")
