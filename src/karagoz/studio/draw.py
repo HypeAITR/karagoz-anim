@@ -782,6 +782,45 @@ def _run_patch(job: DrawJob, image: MuseImageLike) -> tuple[int, float, str | No
     return (calls, time.monotonic() - start, None)
 
 
+def retire_stale(jobs: list[DrawJob], shot_assets: Path) -> list[Path]:
+    """Move character drawings no planned job keeps into `<character>/history/`; return the new paths, sorted."""
+    if not shot_assets.is_dir():
+        return []
+    bases: dict[str, set[str]] = {}
+    for job in jobs:
+        if job.character is None:
+            continue
+        name = job.out.name
+        bases.setdefault(job.character, set()).add(name[:-4] if name.endswith(".png") else name)
+    retired: list[Path] = []
+    for entry in sorted(shot_assets.iterdir(), key=lambda p: p.name):
+        if entry.name == "history" or not entry.is_dir():
+            continue
+        char_bases = bases.get(entry.name)
+        if not char_bases:
+            continue
+        for item in sorted(entry.iterdir(), key=lambda p: p.name):
+            if not item.is_file():
+                continue
+            name = item.name
+            if name.startswith("ref."):
+                continue
+            if any(name == base or name.startswith(base + ".") for base in char_bases):
+                continue
+            history = entry / "history"
+            history.mkdir(parents=True, exist_ok=True)
+            suffix = Path(name).suffix
+            stem = name[: len(name) - len(suffix)] if suffix else name
+            candidate = history / f"{stem}.stale{suffix}"
+            n = 2
+            while candidate.exists():
+                candidate = history / f"{stem}.{n}.stale{suffix}"
+                n += 1
+            item.rename(candidate)
+            retired.append(candidate)
+    return sorted(retired)
+
+
 def run_draw(
     jobs: list[DrawJob],
     image: MuseImageLike,
