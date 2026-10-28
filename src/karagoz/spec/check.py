@@ -18,6 +18,7 @@ from karagoz.spec.models import (
     Lines,
     LoopEvent,
     Name,
+    Place,
     Poses,
     Regions,
     SequenceEvent,
@@ -55,6 +56,24 @@ def words(text: str) -> list[str]:
 def _holds_prop(holds: dict[Hand, Name | None] | None, prop: str) -> bool:
     """True when either hand holds ``prop``."""
     return holds is not None and prop in holds.values()
+
+
+def _view_side(view: str | None) -> int | None:
+    if view in ("three_quarter_right", "profile_right"):
+        return 1
+    if view in ("three_quarter_left", "profile_left"):
+        return -1
+    return None
+
+
+def _side_word(side: int) -> str:
+    return "right" if side == 1 else "left"
+
+
+def _place_x(place: Place) -> int:
+    if place.seat is not None:
+        return place.seat[0]
+    return place.floor[0]
 
 
 def _rel(path: Path, episode_dir: Path) -> str:
@@ -917,6 +936,218 @@ def check_episode(episode_dir: Path, style_path: Path | None = None) -> list[Fin
                                     f"characters.{receiver}.transitions[{i}].holds[{k}]",
                                     f"{receiver} {tr.from_} -> {tr.to}: the receiver takes at {tr.to}, but "
                                     f"inbetween {k + 1} already holds '{pr.prop}' (two props on screen)",
+                                )
+                            )
+
+    # WP-20: gaze and the 180-degree line, from names only.
+    poses_rel_by_shot: dict[str, list[tuple[str, Poses]]] = {}
+    for _pfolder, _prel, _pm in poses_loaded:
+        poses_rel_by_shot.setdefault(_pm.shot, []).append((_prel, _pm))
+
+    expected_by_shot: dict[str, dict[str, tuple[int | None, str | None]]] = {}
+    if shots is not None:
+        for s_idx, sh in enumerate(shots.shots):
+            regions = regions_by_location.get(sh.location)
+            place_map: dict[str, Place] = {}
+            if regions is not None:
+                place_map = {p.name: p for p in regions.places}
+            object_map = {o.name: o for o in regions.objects} if regions is not None else {}
+            g_chars = sh.characters or []
+            char_by_name = {c.name: c for c in g_chars}
+            char_x: dict[str, float | None] = {}
+            for c in g_chars:
+                cx: float | None = None
+                if regions is not None and c.place is not None:
+                    pl = place_map.get(c.place)
+                    if pl is not None:
+                        cx = float(_place_x(pl))
+                char_x[c.name] = cx
+            expected: dict[str, tuple[int | None, str | None]] = {}
+            for c_idx, c in enumerate(g_chars):
+                if c.offscreen is True:
+                    expected[c.name] = (None, c.facing)
+                    continue
+                if c.facing is None:
+                    expected[c.name] = (None, None)
+                    continue
+                target = c.facing
+                is_character = target in char_by_name and target != c.name
+                if not is_character:
+                    if regions is None:
+                        findings.append(
+                            Finding(
+                                "warn",
+                                "gaze.unknown_target",
+                                shots_rel,
+                                f"shots[{s_idx}].characters[{c_idx}].facing",
+                                f"{c.name} faces '{target}', which is not a character of {sh.id}",
+                            )
+                        )
+                    elif target not in object_map and target not in place_map:
+                        findings.append(
+                            Finding(
+                                "warn",
+                                "gaze.unknown_target",
+                                shots_rel,
+                                f"shots[{s_idx}].characters[{c_idx}].facing",
+                                f"{c.name} faces '{target}', which is not a character of {sh.id}"
+                                f" nor an object/place of {sh.location}",
+                            )
+                        )
+                target_x: float | None = None
+                if target in char_by_name and target != c.name:
+                    t_char = char_by_name[target]
+                    if t_char.offscreen is not True:
+                        target_x = char_x.get(t_char.name)
+                elif regions is not None:
+                    if target in object_map:
+                        box = object_map[target].box
+                        target_x = (box[0] + box[2]) / 2
+                    elif target in place_map:
+                        target_x = float(_place_x(place_map[target]))
+                self_x = char_x.get(c.name)
+                exp_side: int | None = None
+                if self_x is not None and target_x is not None:
+                    diff = target_x - self_x
+                    if diff >= 1:
+                        exp_side = 1
+                    elif diff <= -1:
+                        exp_side = -1
+                expected[c.name] = (exp_side, target)
+                if exp_side is not None:
+                    view_side = _view_side(c.view)
+                    if view_side is not None and view_side != exp_side:
+                        findings.append(
+                            Finding(
+                                "warn",
+                                "gaze.wrong_side",
+                                shots_rel,
+                                f"shots[{s_idx}].characters[{c_idx}].view",
+                                f"{c.name} faces {target} on screen {_side_word(exp_side)}"
+                                f" but view '{c.view}' looks {_side_word(view_side)}",
+                            )
+                        )
+            expected_by_shot[sh.id] = expected
+
+    if shots is not None:
+        for sh in shots.shots:
+            exp_map = expected_by_shot.get(sh.id)
+            if not exp_map:
+                continue
+            for prel_file, pm in poses_rel_by_shot.get(sh.id, []):
+                for char_name, (exp_side, p_target) in exp_map.items():
+                    if exp_side is None or p_target is None:
+                        continue
+                    g_cposes = pm.characters.get(char_name)
+                    if g_cposes is None:
+                        continue
+                    for k, pose in enumerate(g_cposes.poses):
+                        pose_side = _view_side(pose.view)
+                        if pose_side is not None and pose_side != exp_side:
+                            findings.append(
+                                Finding(
+                                    "info",
+                                    "gaze.pose_away",
+                                    prel_file,
+                                    f"characters.{char_name}.poses[{k}].view",
+                                    f"{char_name} {pose.id} looks {_side_word(pose_side)}, away from {p_target}",
+                                )
+                            )
+
+    if shots is not None:
+        for ax_i in range(len(shots.shots) - 1):
+            s1 = shots.shots[ax_i]
+            s2 = shots.shots[ax_i + 1]
+            if s1.scene != s2.scene:
+                continue
+            on1 = {c.name: c for c in (s1.characters or []) if c.offscreen is not True}
+            on2 = {c.name: c for c in (s2.characters or []) if c.offscreen is not True}
+            common = sorted(set(on1) & set(on2))
+            if len(common) < 2:
+                continue
+            same_location = s1.location == s2.location
+            reg1 = regions_by_location.get(s1.location)
+            reg2 = regions_by_location.get(s2.location)
+            pmap1: dict[str, Place] = {}
+            if reg1 is not None:
+                pmap1 = {p.name: p for p in reg1.places}
+            pmap2: dict[str, Place] = {}
+            if reg2 is not None:
+                pmap2 = {p.name: p for p in reg2.places}
+            ax1: dict[str, float | None] = {}
+            for ax_name, ax_c in on1.items():
+                ax_v: float | None = None
+                if reg1 is not None and ax_c.place is not None:
+                    ax_pl = pmap1.get(ax_c.place)
+                    if ax_pl is not None:
+                        ax_v = float(_place_x(ax_pl))
+                ax1[ax_name] = ax_v
+            ax2: dict[str, float | None] = {}
+            for ax_name, ax_c in on2.items():
+                ax_v2: float | None = None
+                if reg2 is not None and ax_c.place is not None:
+                    ax_pl2 = pmap2.get(ax_c.place)
+                    if ax_pl2 is not None:
+                        ax_v2 = float(_place_x(ax_pl2))
+                ax2[ax_name] = ax_v2
+            for ia in range(len(common)):
+                for ib in range(ia + 1, len(common)):
+                    pair_a = common[ia]
+                    pair_b = common[ib]
+                    if same_location and reg1 is not None:
+                        xa1 = ax1.get(pair_a)
+                        xb1 = ax1.get(pair_b)
+                        xa2 = ax2.get(pair_a)
+                        xb2 = ax2.get(pair_b)
+                        if xa1 is not None and xb1 is not None and xa2 is not None and xb2 is not None:
+                            d1 = xb1 - xa1
+                            d2 = xb2 - xa2
+                            sgn1 = 1 if d1 > 0 else (-1 if d1 < 0 else 0)
+                            sgn2 = 1 if d2 > 0 else (-1 if d2 < 0 else 0)
+                            if sgn1 != 0 and sgn2 != 0 and sgn1 != sgn2:
+                                findings.append(
+                                    Finding(
+                                        "warn",
+                                        "axis.crossed",
+                                        shots_rel,
+                                        f"shots[{ax_i + 1}].characters",
+                                        f"{pair_a} and {pair_b} swap screen sides between {s1.id} and {s2.id}"
+                                        " (crossing the 180° line)",
+                                    )
+                                )
+                            continue
+                    pa1 = on1[pair_a]
+                    pb1 = on1[pair_b]
+                    pa2 = on2[pair_a]
+                    pb2 = on2[pair_b]
+                    crossed_done = False
+                    if pa1.facing == pair_b and pa2.facing == pair_b:
+                        va1 = _view_side(pa1.view)
+                        va2 = _view_side(pa2.view)
+                        if va1 is not None and va2 is not None and va1 != va2:
+                            findings.append(
+                                Finding(
+                                    "warn",
+                                    "axis.crossed",
+                                    shots_rel,
+                                    f"shots[{ax_i + 1}].characters",
+                                    f"{pair_a} looks {_side_word(va1)} at {pair_b} in {s1.id}"
+                                    f" but {_side_word(va2)} in {s2.id} (crossing the 180° line)",
+                                )
+                            )
+                            crossed_done = True
+                    if not crossed_done and pb1.facing == pair_a and pb2.facing == pair_a:
+                        vb1 = _view_side(pb1.view)
+                        vb2 = _view_side(pb2.view)
+                        if vb1 is not None and vb2 is not None and vb1 != vb2:
+                            findings.append(
+                                Finding(
+                                    "warn",
+                                    "axis.crossed",
+                                    shots_rel,
+                                    f"shots[{ax_i + 1}].characters",
+                                    f"{pair_b} looks {_side_word(vb1)} at {pair_a} in {s1.id}"
+                                    f" but {_side_word(vb2)} in {s2.id} (crossing the 180° line)",
                                 )
                             )
 
