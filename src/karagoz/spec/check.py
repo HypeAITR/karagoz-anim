@@ -30,6 +30,8 @@ from karagoz.spec.models import (
 
 _WORD_RE = re.compile(r"[^\W\d_]+(?:['’][^\W\d_]+)*")
 
+MIN_SUPPORT_CHANGE_FRAMES = 12
+
 
 def norm_word(w: str) -> str:
     """Turkish-aware lower case with surrounding punctuation stripped."""
@@ -99,6 +101,39 @@ def _find_episode_dir(start: Path) -> Path | None:
             break
         cur = parent
     return None
+
+
+def _check_support_change(
+    findings: list[Finding], poses: Poses | None, char: str, prev: str | None, item: Transition, xrel: str, base: str
+) -> None:
+    if prev is None or poses is None or char not in poses.characters:
+        return
+    cposes = poses.characters[char]
+    by_id = {p.id: p for p in cposes.poses}
+    from_pose = by_id.get(prev)
+    to_pose = by_id.get(item.to)
+    pose_trans = next((t for t in (cposes.transitions or []) if t.from_ == prev and t.to == item.to), None)
+    if from_pose is None or to_pose is None or pose_trans is None:
+        return
+    if from_pose.support is None or to_pose.support is None or from_pose.support == to_pose.support:
+        return
+    n = len(pose_trans.inbetweens)
+    cadence_word = "ones" if item.cadence == "ones" else "twos"
+    frames = n * (1 if item.cadence == "ones" else 2)
+    if frames >= MIN_SUPPORT_CHANGE_FRAMES:
+        return
+    findings.append(
+        Finding(
+            "warn",
+            "transition.too_short",
+            xrel,
+            base,
+            f"{char} {prev} -> {item.to} ({from_pose.support} -> {to_pose.support})"
+            f" is on screen for {frames} frames ({n} inbetweens on {cadence_word});"
+            f" a whole-body move needs at least {MIN_SUPPORT_CHANGE_FRAMES}",
+            "give the transition 6 inbetweens on twos (Layout) instead of stretching the hold",
+        )
+    )
 
 
 def check_episode(episode_dir: Path, style_path: Path | None = None) -> list[Finding]:
@@ -504,6 +539,8 @@ def check_episode(episode_dir: Path, style_path: Path | None = None) -> list[Fin
                                         f"No inbetween transition from '{prev}' to '{item.to}' for '{char}'.",
                                     )
                                 )
+                    if kind == "body" and item.via == "inbetween":
+                        _check_support_change(findings, poses, char, prev, item, xrel, base)
                     prev = item.to
                 elif isinstance(item, LoopEvent):
                     for k, loop_item in enumerate(item.loop):
