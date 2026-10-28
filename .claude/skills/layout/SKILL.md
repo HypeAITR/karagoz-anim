@@ -56,9 +56,10 @@ inbetween sentences need not repeat it (the template adds it).
 
 - `support`: what carries the body in this pose: `sit`, `stand`, `crouch` or `lie`. **Always write it.** The
   engine anchors a sitting pose's hip on the seat and a standing pose's feet on the floor; the drawing prompt adds
-  the exact sitting geometry, so a sitting pose is never drawn as a crouch (D30). **`crouch` is a held crouch**
-  (picking something up from the floor, hiding behind something): the model draws it as a deep squat. It is not
-  the middle of standing up — a stand-up goes from a `sit` key to a `stand` key through inbetweens (section `stand-up`).
+  the exact sitting geometry, so a sitting pose is never drawn as a crouch (D30). **`crouch` is drawn as half-way up
+  out of a seat** (hips just off it, leaning forward over the knees). Use it only for a pose that really stays
+  there; a stand-up still goes from a `sit` key to a `stand` key through inbetweens (section `stand-up`), and the
+  drawing prompt of each inbetween already says how far up the body is.
 - `on`: the place (a name from `regions.yaml`) when it differs from the character's `place` in `shots.yaml`; usually
   leave it out.
 - `rests_on`: objects (names from `regions.yaml`) the body touches besides its seat, e.g. feet on the
@@ -67,6 +68,11 @@ inbetween sentences need not repeat it (the template adds it).
   Write it for every pose of a character who ever holds a prop in the shot. **When a prop leaves a hand, that hand
   becomes `null` in the next pose**; the prompt then says "right hand is empty" explicitly (the first slice drew a
   second glass because nothing said the hand had let go).
+- Transition `holds`: when the hands differ between the two keys (a prop is given, taken, put down), write the
+  transition's `holds` too, one entry per inbetween in the same order (`null` for an entry you leave unsaid):
+  `holds: [{right: cup, left: null}, {right: cup, left: null}, {right: null, left: null}]`. Without it those
+  inbetweens get no HANDS line at all and the model guesses from the pictures (`check` warns
+  `holds.inbetween_missing`). Before, the nearer key's hands were copied in and contradicted your sentence.
 
 ## Rules
 
@@ -91,9 +97,9 @@ never describe furniture as something to draw, no anatomical close-ups. Your wor
 - **Inbetweens are on a path** (sections `feel`, `inbetweens`): every inbetween is between its two neighbours — the head, the
   hips and the moving hand progress one way. Write where they are ("hips just off the seat, head forward and higher
   than before, knees still bent"), never "halfway".
-- **Say the hands in every inbetween where a hand holds, takes or lets go of a prop**: "right hand open and empty",
-  "right hand closed around the empty tulip-shaped Turkish tea glass". The drawing follows your inbetween sentence; do not leave the hands to be
-  guessed from the neighbouring key pose.
+- **Say the hands in every inbetween where a hand holds, takes or lets go of a prop**, in the sentence and in the
+  transition's `holds`: "right hand open and empty", "right hand closed around the empty tulip-shaped Turkish tea
+  glass". Sentence and `holds` must say the same thing (when two parts of a prompt disagree the model picks one).
 - **A character stands up, sits down, turns away or leaves** → sections `body-moves` and `stand-up` / `sit-down` /
   `turn-exit`. In short: the two ends are the keys, the move is the inbetweens, never a held key in the middle.
 - **A prop goes from one character to another** → section `handover`. In short: a contact key pose for **both**

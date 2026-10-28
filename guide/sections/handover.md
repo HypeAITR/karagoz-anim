@@ -22,7 +22,8 @@ Never let the prop move to another place in the giver's drawing (to the other ha
 and never let the receiver hold it before contact: the result is two props on screen.
 
 Who does what: Continuity says on which word or moment the hands meet and who holds the prop before and after.
-Layout gives both characters the contact key pose and states the hands in every inbetween. Timer lands both contact
+Layout gives both characters the contact key pose and states the hands in every inbetween (in the sentence and in
+the transition's `holds`). Timer lands both contact
 poses on the same anchor with the same cadence and holds them. Checkers look at the rendered frames where both are
 together.
 

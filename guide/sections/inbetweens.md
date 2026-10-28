@@ -25,4 +25,7 @@ tags: [inbetweens]
   (`transition.settle`).
 - **Hands and props in an inbetween follow the description of that inbetween**, not the neighbouring key pose. If
   a hand lets go of something in the middle of a move, say in that inbetween which hand holds what and which hand
-  is empty.
+  is empty, and write the same in the transition's `holds`.
+- **Where the body is** between two keys with different `support` (sit → stand) is added to every inbetween's
+  prompt by the engine ("on the way from sitting to standing, drawing 2 of 4, about 40 % of the way, never lower
+  than image 1"). Your sentence should agree with it: hips and head a little further each drawing.
