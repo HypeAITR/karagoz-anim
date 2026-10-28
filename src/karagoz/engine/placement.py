@@ -14,9 +14,84 @@ INBETWEEN_RE = re.compile(r"^(p[0-9]{1,2})-(p[0-9]{1,2})\.([0-9]+)$")
 KEY_RE = re.compile(r"^p[0-9]{1,2}$")
 FEET_GAP_HEADS = 0.25
 OCCLUDE_MARGIN = 10
+REST_LIFT_HEADS = 0.5
+HOLE_PAD = 6
 
 _FRAME_FALLBACK = (960, 1015)
 _FALLBACK_DEPTH = 1015
+
+
+def _part_boxes(lm: dict[str, Any]) -> list[tuple[float, float, float, float]]:
+    parts: list[tuple[float, float, float, float]] = []
+    for key in ("feet", "hands"):
+        entries = lm.get(key)
+        if not isinstance(entries, list):
+            continue
+        for entry in entries:
+            box = _as_box(entry)
+            if box is not None:
+                parts.append(box)
+    return parts
+
+
+def _contact_layer(
+    rests: tuple[str, ...],
+    parts: list[tuple[float, float, float, float]],
+    w: float,
+    scale: float,
+    x: int,
+    y: int,
+    mirror: bool,
+    depth: int,
+    floor_y: int,
+    regions: Regions,
+    target_head_px: float,
+    character: str,
+    drawing: str,
+) -> tuple[tuple[str, ...], tuple[tuple[str, tuple[int, int, int, int]], ...], list[str]]:
+    rests_set = set(rests)
+    if not parts:
+        occluders = tuple(
+            o.name
+            for o in regions.objects
+            if o.front and o.name not in rests_set and o.floor_y >= depth - OCCLUDE_MARGIN
+        )
+        return (occluders, (), [])
+    occluders = tuple(o.name for o in regions.objects if o.front and o.floor_y >= depth - OCCLUDE_MARGIN)
+    screened: list[tuple[float, float, float, float]] = []
+    for px0, py0, px1, py1 in parts:
+        if mirror:
+            mx0, mx1 = w - px1, w - px0
+        else:
+            mx0, mx1 = px0, px1
+        screened.append((x + mx0 * scale, y + py0 * scale, x + mx1 * scale, y + py1 * scale))
+    holes: list[tuple[str, tuple[int, int, int, int]]] = []
+    rested: set[str] = set()
+    for o in regions.objects:
+        if o.name not in rests_set:
+            continue
+        if not o.front or o.floor_y < depth - OCCLUDE_MARGIN:
+            continue
+        ox0, oy0, ox1, oy1 = o.box
+        for sx0, sy0, sx1, sy1 in screened:
+            if floor_y - sy1 <= REST_LIFT_HEADS * target_head_px:
+                continue
+            if max(sx0, ox0) < min(sx1, ox1) and max(sy0, oy0) < min(sy1, oy1):
+                hx0 = math.floor(sx0) - HOLE_PAD
+                hy0 = math.floor(sy0) - HOLE_PAD
+                hx1 = math.ceil(sx1) + HOLE_PAD
+                hy1 = math.ceil(sy1) + HOLE_PAD
+                holes.append((o.name, (hx0, hy0, hx1, hy1)))
+                rested.add(o.name)
+    warnings: list[str] = []
+    for o in regions.objects:
+        if o.name not in rests_set:
+            continue
+        if not o.front or o.floor_y < depth - OCCLUDE_MARGIN:
+            continue
+        if o.name not in rested:
+            warnings.append(f"{character} {drawing}: rests on {o.name} but no foot or hand reaches it")
+    return (occluders, tuple(holes), warnings)
 
 
 @dataclass(frozen=True)
@@ -46,6 +121,7 @@ class DrawingPlacement:
     anchor: str
     occluders: tuple[str, ...]
     depth: int
+    holes: tuple[tuple[str, tuple[int, int, int, int]], ...] = ()
 
 
 def target_head_px(height_cm: float, px_per_cm: float, head_ratio: float) -> float:
@@ -317,12 +393,24 @@ def solve(
                 depth = obj.floor_y if obj is not None else place.floor[1]
             else:
                 depth = place.floor[1]
-            rests = set(info.rests_on)
-            occluders = tuple(
-                o.name
-                for o in regions.objects
-                if o.front and o.name not in rests and o.floor_y >= depth - OCCLUDE_MARGIN
+            parts = _part_boxes(character.landmarks[name])
+            occluders, holes, contact_warnings = _contact_layer(
+                info.rests_on,
+                parts,
+                d.w,
+                scale,
+                x,
+                y,
+                character.mirror,
+                depth,
+                place.floor[1],
+                regions,
+                character.target_head_px,
+                character.name,
+                name,
             )
+            for _w in contact_warnings:
+                char_warnings.append((name, _w))
             char_placements[name] = DrawingPlacement(
                 scale=scale,
                 x=x,
@@ -331,6 +419,7 @@ def solve(
                 anchor=anchor,
                 occluders=occluders,
                 depth=depth,
+                holes=holes,
             )
             if support == "sit" and d.foot is not None:
                 gap = place.floor[1] - (y + d.foot[1] * scale)
@@ -439,12 +528,6 @@ def solve(
                     depth = obj.floor_y if obj is not None else place_a.floor[1]
                 else:
                     depth = place_a.floor[1]
-                rests = set(info_a.rests_on)
-                occluders = tuple(
-                    o.name
-                    for o in regions.objects
-                    if o.front and o.name not in rests and o.floor_y >= depth - OCCLUDE_MARGIN
-                )
                 if rpt is not None and rtarget is not None:
                     x = int(round(rtarget[0] - rpt[0] * run_scale))
                     y = int(round(rtarget[1] - rpt[1] * run_scale))
@@ -452,6 +535,24 @@ def solve(
                     anchor = "fallback"
                     x = int(round(pa.x + t * (pb.x - pa.x)))
                     y = int(round(pa.y + t * (pb.y - pa.y)))
+                parts = _part_boxes(character.landmarks[name])
+                occluders, holes, contact_warnings = _contact_layer(
+                    info_a.rests_on,
+                    parts,
+                    d.w,
+                    run_scale,
+                    x,
+                    y,
+                    character.mirror,
+                    depth,
+                    place_a.floor[1],
+                    regions,
+                    character.target_head_px,
+                    character.name,
+                    name,
+                )
+                for _w in contact_warnings:
+                    char_warnings.append((name, _w))
                 char_placements[name] = DrawingPlacement(
                     scale=run_scale,
                     x=x,
@@ -460,6 +561,7 @@ def solve(
                     anchor=anchor,
                     occluders=occluders,
                     depth=depth,
+                    holes=holes,
                 )
                 continue
             da = data.get(a)
@@ -532,27 +634,91 @@ def solve(
                         anchor = "foot" if foot_planted else "fallback"
                     x = int(round(lx - pi_pt[0] * scale))
                     y = int(round(ly - pi_pt[1] * scale))
+                    _src_key = a if k <= n / 2 else b
+                    _src_setup = setups.get(_src_key)
+                    _src_floor: int | None = None
+                    if (
+                        _src_setup is not None
+                        and _src_setup.known
+                        and _src_setup.place_name is not None
+                        and _src_setup.place_name in places_by_name
+                    ):
+                        _src_floor = places_by_name[_src_setup.place_name].floor[1]
+                    if _src_floor is None:
+                        _occl, _holes = src.occluders, src.holes
+                    else:
+                        _parts = _part_boxes(character.landmarks[name])
+                        _occl, _holes, _cw = _contact_layer(
+                            character.poses.get(_src_key, PoseInfo()).rests_on,
+                            _parts,
+                            d.w,
+                            scale,
+                            x,
+                            y,
+                            character.mirror,
+                            src.depth,
+                            _src_floor,
+                            regions,
+                            character.target_head_px,
+                            character.name,
+                            name,
+                        )
+                        for _w in _cw:
+                            char_warnings.append((name, _w))
                     char_placements[name] = DrawingPlacement(
                         scale=scale,
                         x=x,
                         y=y,
                         mirror=character.mirror,
                         anchor=anchor,
-                        occluders=src.occluders,
+                        occluders=_occl,
                         depth=src.depth,
+                        holes=_holes,
                     )
             if best is None:
                 scale = pa.scale + t * (pb.scale - pa.scale)
                 x = int(round(pa.x + t * (pb.x - pa.x)))
                 y = int(round(pa.y + t * (pb.y - pa.y)))
+                _src_key = a if k <= n / 2 else b
+                _src_setup = setups.get(_src_key)
+                _src_floor = None
+                if (
+                    _src_setup is not None
+                    and _src_setup.known
+                    and _src_setup.place_name is not None
+                    and _src_setup.place_name in places_by_name
+                ):
+                    _src_floor = places_by_name[_src_setup.place_name].floor[1]
+                if _src_floor is None:
+                    _occl, _holes = src.occluders, src.holes
+                else:
+                    _parts = _part_boxes(character.landmarks[name])
+                    _occl, _holes, _cw = _contact_layer(
+                        character.poses.get(_src_key, PoseInfo()).rests_on,
+                        _parts,
+                        d.w,
+                        scale,
+                        x,
+                        y,
+                        character.mirror,
+                        src.depth,
+                        _src_floor,
+                        regions,
+                        character.target_head_px,
+                        character.name,
+                        name,
+                    )
+                    for _w in _cw:
+                        char_warnings.append((name, _w))
                 char_placements[name] = DrawingPlacement(
                     scale=scale,
                     x=x,
                     y=y,
                     mirror=character.mirror,
                     anchor="fallback",
-                    occluders=src.occluders,
+                    occluders=_occl,
                     depth=src.depth,
+                    holes=_holes,
                 )
         for name in other_names:
             if key_names and key_names[0] in char_placements:
@@ -604,6 +770,7 @@ def to_json(placements: dict[str, dict[str, DrawingPlacement]], warnings: list[s
                 "anchor": pl.anchor,
                 "occluders": list(pl.occluders),
                 "depth": pl.depth,
+                "holes": [{"object": name, "box": list(box)} for name, box in pl.holes],
             }
         characters[name] = out
     return {"characters": characters, "warnings": list(warnings)}
