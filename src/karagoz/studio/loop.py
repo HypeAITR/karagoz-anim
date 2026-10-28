@@ -152,7 +152,8 @@ def write_review(prod: Path, episode: str, shot: str) -> Path:
         for drawing in drawings:
             if not isinstance(drawing, str):
                 continue
-            tags.append(drawing if character_s is None else f"{character_s}/{drawing}")
+            # most flags name bare drawings plus a character; prop_count names "<char>/<name>" with no character
+            tags.append(drawing if character_s is None or "/" in drawing else f"{character_s}/{drawing}")
         for fid, drawing in findings_index:
             if drawing is None:
                 continue

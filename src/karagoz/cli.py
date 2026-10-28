@@ -413,6 +413,22 @@ def cmd_strip(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_gate(args: argparse.Namespace) -> int:
+    """Flag one shot (writes review/<shot>/gate.json) and print the shown flags."""
+    try:
+        from karagoz.engine.gate import gate_shot
+
+        out = gate_shot(Path(args.prod), args.episode, args.shot, limit=args.limit)
+        for flag in out["flags"]:
+            frames = f" frames {flag['frames']}" if flag["frames"] is not None else ""
+            print(f"{flag['id']}: {flag['message']}{frames}")
+        print(f"{len(out['flags'])} shown, {len(out['silenced'])} silenced, {out['dropped']} dropped")
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="karagoz", description=__doc__)
     parser.add_argument("--version", action="version", version=__version__)
@@ -525,6 +541,13 @@ def build_parser() -> argparse.ArgumentParser:
     look_p.add_argument("--landmarks", default=None, metavar="FILE", help="landmarks JSON")
     look_p.add_argument("--out", default=None, metavar="FILE", help="output PNG path")
     look_p.set_defaults(func=cmd_look)
+
+    gate_p = sub.add_parser("gate", help="flag a shot's drawings (jumps, wrong way, prop count); never rejects")
+    gate_p.add_argument("prod", help="production directory")
+    gate_p.add_argument("episode", help="episode id")
+    gate_p.add_argument("shot", help="shot id")
+    gate_p.add_argument("--limit", type=int, default=5, help="most flags shown (prop count always shown)")
+    gate_p.set_defaults(func=cmd_gate)
 
     strip_p = sub.add_parser("strip", help="write a contact sheet of a run of video frames")
     strip_p.add_argument("video", help="video file")

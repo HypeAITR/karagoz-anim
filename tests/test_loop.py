@@ -449,3 +449,13 @@ def test_no_interview_when_off(oprod: Path, skills: Path, tmp_path: Path) -> Non
     s.run()
     assert not any(b.prompt.startswith(QUESTION) for b in agent.briefs)
     assert not [e for e in read_events(oprod / OEP / "run" / "events.jsonl") if e["kind"] == "interview"]
+
+
+def test_prop_count_flag_meets_a_finding(prod: Path, tmp_path: Path) -> None:  # noqa: F811
+    """The gate's prop_count flag has no character and names drawings as "<char>/<name>" (engine/gate.py)."""
+    two_copy_checks(prod, tmp_path)
+    cups = {"id": "prop_count:-:ali/p1-p2.1", "kind": "prop_count", "character": None, "drawings": ["ali/p1-p2.1"],
+            "frames": [10, 12], "size": 1, "message": "2 cups, the shot has 1", "shas": ["x"]}  # fmt: skip
+    write_gate(prod, {"shot": "sh01", "flags": [cups], "silenced": [], "dropped": 0})
+    meet = section(loop.write_review(prod, EP, "sh01").read_text(encoding="utf-8"), "Where they meet")
+    assert any("prop_count:-:ali/p1-p2.1" in line and "finding:ali:p1-p2#1:1" in line for line in meet.splitlines())
