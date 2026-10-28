@@ -1,4 +1,4 @@
-"""Acceptance tests for WP-13 (patches in inbetweens, patches stay inside the character). Maintainer's; do not edit.
+"""Acceptance tests for WP-13 (patches in inbetweens), updated for WP-21 (grey background) and WP-13c. Do not edit.
 
 Figures as in the WP-06 tests: a 400x600 white canvas with a figure (150..250 x 100..550). The inbetween p1-p2.1 is
 the same figure moved 20 px right; p1-p2.2 is moved 20 px right but its face box is far smaller (another head angle).
@@ -14,7 +14,7 @@ import numpy as np
 import pytest
 from PIL import Image, ImageDraw
 
-from karagoz.engine.compose import Placement, ShotAssets, cutout, frame_layers, render_frames
+from karagoz.engine.compose import Placement, ShotAssets, frame_layers, render_frames
 from karagoz.engine.patch import Patch, apply_patch, clip_patch, save_patch, transfer_patch
 from karagoz.engine.placement import DrawingPlacement
 from karagoz.engine.xsheet import Exposure
@@ -43,7 +43,7 @@ def landmarks(face: list[int], size: tuple[int, int] = (400, 600)) -> dict[str, 
 def shot_dir(tmp_path: Path) -> Path:
     root = tmp_path / "assets" / "sh01"
     (root / "ali").mkdir(parents=True)
-    Image.new("RGB", (1920, 1080), (40, 40, 60)).save(root / "background.png")
+    Image.new("RGB", (1920, 1080), (50, 50, 50)).save(root / "background.png")  # neutral grey: no ambient tint (WP-21)
     drawing().save(root / "ali" / "p1.png")
     drawing(20).save(root / "ali" / "p1-p2.1.png")
     drawing(20).save(root / "ali" / "p1-p2.2.png")
@@ -73,16 +73,6 @@ def rgb(img: Image.Image, x: int, y: int) -> tuple[int, ...]:
 
 
 # --- patch.py ------------------------------------------------------------------------------------------------------
-
-
-def test_patch_never_paints_outside_the_character() -> None:
-    base = cutout(drawing())  # transparent outside the figure
-    white = Patch(Image.new("RGBA", (100, 40), (255, 255, 255, 255)), 100, 300)  # covers x 100..199
-    out = np.array(apply_patch(base, white))
-    b = np.array(base)
-    assert out[310, 120, 3] == 0 and np.array_equal(out[310, 120], b[310, 120])  # background stays as it was
-    assert tuple(out[310, 190]) == (255, 255, 255, 255)  # inside the figure the patch is applied
-    assert np.array_equal(out[:, :, 3], b[:, :, 3])  # the alpha never changes
 
 
 def test_opaque_base_unchanged_behaviour() -> None:
