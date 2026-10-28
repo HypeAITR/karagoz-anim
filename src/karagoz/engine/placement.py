@@ -34,6 +34,7 @@ class CharacterInput:
     place: str | None
     poses: dict[str, PoseInfo]
     landmarks: dict[str, dict[str, Any]]
+    head_per_face: float | None = None
 
 
 @dataclass(frozen=True)
@@ -135,6 +136,21 @@ def _point_of(data: _DrawingData, name: str) -> tuple[float, float] | None:
     return None
 
 
+def _key_sort_key(name: str) -> tuple[int, str]:
+    try:
+        return (int(name[1:]), name)
+    except ValueError:
+        return (0, name)
+
+
+@dataclass(frozen=True)
+class _KeySetup:
+    info: PoseInfo
+    place_name: str | None
+    support: str
+    known: bool
+
+
 def solve(
     characters: list[CharacterInput], regions: Regions
 ) -> tuple[dict[str, dict[str, DrawingPlacement]], list[str]]:
@@ -153,32 +169,88 @@ def solve(
             if d.head_h is not None and d.face_h is not None and d.head_h > 0 and d.face_h > 0
         ]
         ratio_med = median(ratios) if ratios else None
+        hpf = character.head_per_face
+        ratio: float | None = hpf if hpf is not None and hpf > 0 else ratio_med
         direct: dict[str, float] = {}
         for name, d in data.items():
-            if d.head_h is not None and d.head_h > 0:
+            if d.face_h is not None and d.face_h > 0 and ratio is not None and ratio > 0 and d.face_h * ratio > 0:
+                direct[name] = character.target_head_px / (d.face_h * ratio)
+            elif d.head_h is not None and d.head_h > 0:
                 direct[name] = character.target_head_px / d.head_h
-            elif (
-                d.face_h is not None
-                and d.face_h > 0
-                and ratio_med is not None
-                and ratio_med > 0
-                and d.face_h * ratio_med > 0
-            ):
-                direct[name] = character.target_head_px / (d.face_h * ratio_med)
-        key_names = sorted(n for n in character.landmarks if KEY_RE.match(n) is not None)
+        key_names = sorted((n for n in character.landmarks if KEY_RE.match(n) is not None), key=_key_sort_key)
         inbetween_names = sorted(n for n in character.landmarks if INBETWEEN_RE.match(n) is not None)
         other_names = sorted(
             n for n in character.landmarks if KEY_RE.match(n) is None and INBETWEEN_RE.match(n) is None
         )
+        setups: dict[str, _KeySetup] = {}
+        for name in key_names:
+            info = character.poses.get(name, PoseInfo())
+            place_name = info.on or character.place
+            if place_name is not None and place_name in places_by_name:
+                place = places_by_name[place_name]
+                support = info.support or ("sit" if place.kind == "seat" else "stand")
+                setups[name] = _KeySetup(info=info, place_name=place_name, support=support, known=True)
+            else:
+                support = info.support or "stand"
+                setups[name] = _KeySetup(info=info, place_name=place_name, support=support, known=False)
+        runs: list[list[str]] = []
+        current: list[str] = []
+        for name in key_names:
+            setup = setups[name]
+            if not setup.known:
+                if current:
+                    runs.append(current)
+                    current = []
+                runs.append([name])
+            elif not current:
+                current = [name]
+            else:
+                prev = setups[current[-1]]
+                if (setup.support, setup.place_name) == (prev.support, prev.place_name):
+                    current.append(name)
+                else:
+                    runs.append(current)
+                    current = [name]
+        if current:
+            runs.append(current)
+        key_to_run: dict[str, int] = {}
+        for idx, run in enumerate(runs):
+            for key in run:
+                key_to_run[key] = idx
+        parsed: dict[str, tuple[str, str, int]] = {}
+        prefix_max: dict[tuple[str, str], int] = {}
+        for name in inbetween_names:
+            m = INBETWEEN_RE.match(name)
+            if m is None:
+                continue
+            a, b, kstr = m.group(1), m.group(2), m.group(3)
+            k = int(kstr)
+            parsed[name] = (a, b, k)
+            prefix_max[(a, b)] = max(prefix_max.get((a, b), 0), k)
+        all_direct = list(direct.values())
+        fallback_all = median(all_direct) if all_direct else None
+        run_scales: list[float] = []
+        for idx, run in enumerate(runs):
+            scales: list[float] = []
+            for key in run:
+                if key in direct:
+                    scales.append(direct[key])
+            for inb_name, (a, b, _k) in parsed.items():
+                if key_to_run.get(a) == idx and key_to_run.get(b) == idx and inb_name in direct:
+                    scales.append(direct[inb_name])
+            if scales:
+                run_scales.append(float(median(scales)))
+            elif fallback_all is not None:
+                run_scales.append(float(fallback_all))
+            else:
+                run_scales.append(1.0)
         key_scale: dict[str, float] = {}
         key_scale_fallback: set[str] = set()
-        for name in key_names:
-            if name in direct:
-                key_scale[name] = direct[name]
-            else:
-                others = [s for n, s in direct.items() if n != name]
-                key_scale[name] = median(others) if others else 1.0
-                key_scale_fallback.add(name)
+        for idx, run in enumerate(runs):
+            for key in run:
+                key_scale[key] = run_scales[idx]
+                if key not in direct:
+                    key_scale_fallback.add(key)
         for name in key_names:
             d = data[name]
             scale = key_scale[name]
@@ -270,16 +342,6 @@ def solve(
                             f"while sitting on {place_name}",
                         )
                     )
-        parsed: dict[str, tuple[str, str, int]] = {}
-        prefix_max: dict[tuple[str, str], int] = {}
-        for name in inbetween_names:
-            m = INBETWEEN_RE.match(name)
-            if m is None:
-                continue
-            a, b, kstr = m.group(1), m.group(2), m.group(3)
-            k = int(kstr)
-            parsed[name] = (a, b, k)
-            prefix_max[(a, b)] = max(prefix_max.get((a, b), 0), k)
         for name in inbetween_names:
             if name not in parsed:
                 continue
@@ -319,6 +381,87 @@ def solve(
                         depth=_FALLBACK_DEPTH,
                     )
                 continue
+            ra = key_to_run.get(a)
+            rb = key_to_run.get(b)
+            if ra is not None and rb is not None and ra == rb:
+                run_scale = run_scales[ra]
+                info_a = character.poses.get(a, PoseInfo())
+                place_name_a = info_a.on or character.place
+                if place_name_a is None or place_name_a not in places_by_name:
+                    if d.foot is not None:
+                        px, py = d.foot
+                    else:
+                        px, py = d.w / 2.0, d.h
+                    x = int(round(_FRAME_FALLBACK[0] - px * run_scale))
+                    y = int(round(_FRAME_FALLBACK[1] - py * run_scale))
+                    char_placements[name] = DrawingPlacement(
+                        scale=run_scale,
+                        x=x,
+                        y=y,
+                        mirror=character.mirror,
+                        anchor="fallback",
+                        occluders=(),
+                        depth=_FALLBACK_DEPTH,
+                    )
+                    continue
+                place_a = places_by_name[place_name_a]
+                support_a = info_a.support or ("sit" if place_a.kind == "seat" else "stand")
+                anchor = "fallback"
+                rpt: tuple[float, float] | None = None
+                rtarget: tuple[int, int] | None = None
+                if support_a in ("sit", "lie"):
+                    if d.hip is not None:
+                        anchor = "hip"
+                        rpt = d.hip
+                        rtarget = (
+                            (place_a.seat[0], place_a.seat[1])
+                            if place_a.seat is not None
+                            else (place_a.floor[0], place_a.floor[1])
+                        )
+                    elif d.foot is not None:
+                        anchor = "foot"
+                        rpt = d.foot
+                        rtarget = (place_a.floor[0], place_a.floor[1])
+                elif d.foot is not None:
+                    anchor = "foot"
+                    rpt = d.foot
+                    rtarget = (place_a.floor[0], place_a.floor[1])
+                elif d.hip is not None:
+                    anchor = "hip"
+                    rpt = d.hip
+                    rtarget = (
+                        (place_a.seat[0], place_a.seat[1])
+                        if place_a.seat is not None
+                        else (place_a.floor[0], place_a.floor[1])
+                    )
+                if support_a in ("sit", "lie"):
+                    obj = objects_by_name.get(place_a.object)
+                    depth = obj.floor_y if obj is not None else place_a.floor[1]
+                else:
+                    depth = place_a.floor[1]
+                rests = set(info_a.rests_on)
+                occluders = tuple(
+                    o.name
+                    for o in regions.objects
+                    if o.front and o.name not in rests and o.floor_y >= depth - OCCLUDE_MARGIN
+                )
+                if rpt is not None and rtarget is not None:
+                    x = int(round(rtarget[0] - rpt[0] * run_scale))
+                    y = int(round(rtarget[1] - rpt[1] * run_scale))
+                else:
+                    anchor = "fallback"
+                    x = int(round(pa.x + t * (pb.x - pa.x)))
+                    y = int(round(pa.y + t * (pb.y - pa.y)))
+                char_placements[name] = DrawingPlacement(
+                    scale=run_scale,
+                    x=x,
+                    y=y,
+                    mirror=character.mirror,
+                    anchor=anchor,
+                    occluders=occluders,
+                    depth=depth,
+                )
+                continue
             da = data.get(a)
             db = data.get(b)
             best: str | None = None
@@ -352,10 +495,20 @@ def solve(
                     lx = ax + t * (bx - ax)
                     ly = ay + t * (by - ay)
                     if name in direct:
-                        scale = direct[name]
+                        sa = pa.scale
+                        sb = pb.scale
+                        lo = min(sa, sb)
+                        hi = max(sa, sb)
+                        raw = direct[name]
+                        if raw < lo:
+                            scale = lo
+                        elif raw > hi:
+                            scale = hi
+                        else:
+                            scale = raw
                         anchor = best
                     else:
-                        scale = (pa.scale + pb.scale) / 2.0
+                        scale = pa.scale + t * (pb.scale - pa.scale)
                         anchor = "fallback"
                     x = int(round(lx - pi_pt[0] * scale))
                     y = int(round(ly - pi_pt[1] * scale))
