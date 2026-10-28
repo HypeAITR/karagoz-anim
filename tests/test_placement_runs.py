@@ -102,10 +102,11 @@ def test_standing_run_scale_from_the_face(placed: dict[str, DrawingPlacement]) -
 
 def test_transition_inbetween_keeps_its_face_scale_between_the_runs(placed: dict[str, DrawingPlacement]) -> None:
     p = placed["p2-p3.1"]
-    assert p.scale == pytest.approx(118 / 560) and p.anchor == "hip"
-    # the hip moves least between p2 and p3: lerped a quarter of the way, (802.3, 704.3) -> (792.5, 787.75)
-    assert p.x + 480 * p.scale == pytest.approx(799.87, abs=1)
-    assert p.y + 1600 * p.scale == pytest.approx(725.2, abs=1)
+    assert p.scale == pytest.approx(118 / 560) and p.anchor == "foot"
+    # sit -> stand (WP-11d): the foot is lerped a quarter of the way between the keys' feet on screen,
+    # (861.3, 714.6) -> (802.3, 874.3)
+    assert p.x + 600 * p.scale == pytest.approx(846.57, abs=1)
+    assert p.y + 1850 * p.scale == pytest.approx(754.49, abs=1)
 
 
 def test_transition_inbetween_scale_is_clamped(placed: dict[str, DrawingPlacement]) -> None:

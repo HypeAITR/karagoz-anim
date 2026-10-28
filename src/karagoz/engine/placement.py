@@ -464,22 +464,42 @@ def solve(
                 continue
             da = data.get(a)
             db = data.get(b)
+            foot_planted = False
+            setup_a = setups.get(a)
+            setup_b = setups.get(b)
+            if setup_a is not None and setup_b is not None and da is not None and db is not None:
+                seated: _KeySetup | None = None
+                if setup_a.support in ("sit", "lie") and setup_b.support in ("stand", "crouch"):
+                    seated = setup_a
+                elif setup_b.support in ("sit", "lie") and setup_a.support in ("stand", "crouch"):
+                    seated = setup_b
+                if (
+                    seated is not None
+                    and not seated.info.rests_on
+                    and da.foot is not None
+                    and db.foot is not None
+                    and d.foot is not None
+                ):
+                    foot_planted = True
             best: str | None = None
             best_dist: float | None = None
-            for pt_name in ("hip", "foot", "head"):
-                pa_pt = _point_of(da, pt_name) if da is not None else None
-                pb_pt = _point_of(db, pt_name) if db is not None else None
-                pi_pt = _point_of(d, pt_name)
-                if pa_pt is None or pb_pt is None or pi_pt is None:
-                    continue
-                ax = pa.x + pa_pt[0] * pa.scale
-                ay = pa.y + pa_pt[1] * pa.scale
-                bx = pb.x + pb_pt[0] * pb.scale
-                by = pb.y + pb_pt[1] * pb.scale
-                dist = math.dist((ax, ay), (bx, by))
-                if best_dist is None or dist < best_dist:
-                    best_dist = dist
-                    best = pt_name
+            if foot_planted:
+                best = "foot"
+            else:
+                for pt_name in ("hip", "foot", "head"):
+                    pa_pt = _point_of(da, pt_name) if da is not None else None
+                    pb_pt = _point_of(db, pt_name) if db is not None else None
+                    pi_pt = _point_of(d, pt_name)
+                    if pa_pt is None or pb_pt is None or pi_pt is None:
+                        continue
+                    ax = pa.x + pa_pt[0] * pa.scale
+                    ay = pa.y + pa_pt[1] * pa.scale
+                    bx = pb.x + pb_pt[0] * pb.scale
+                    by = pb.y + pb_pt[1] * pb.scale
+                    dist = math.dist((ax, ay), (bx, by))
+                    if best_dist is None or dist < best_dist:
+                        best_dist = dist
+                        best = pt_name
             src = pa if k <= n / 2 else pb
             if best is not None and da is not None and db is not None:
                 pa_pt = _point_of(da, best)
@@ -509,7 +529,7 @@ def solve(
                         anchor = best
                     else:
                         scale = pa.scale + t * (pb.scale - pa.scale)
-                        anchor = "fallback"
+                        anchor = "foot" if foot_planted else "fallback"
                     x = int(round(lx - pi_pt[0] * scale))
                     y = int(round(ly - pi_pt[1] * scale))
                     char_placements[name] = DrawingPlacement(

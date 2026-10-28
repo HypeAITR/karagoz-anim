@@ -1,4 +1,4 @@
-"""Acceptance tests for WP-11 (placement solver), updated for WP-11c (Deniz p1 crouches). Do not edit.
+"""Acceptance tests for WP-11 (placement solver), updated for WP-11c (Deniz p1 crouches) and WP-11d. Do not edit.
 
 The region map is the slice's salon as measured by SAM (D30, WP-10); drawings are 1280x1920 like Muse's.
 """
@@ -125,8 +125,9 @@ def test_standing_key_on_the_floor(result: Any) -> None:
 
 def test_inbetween_anchored_on_the_least_moving_point(result: Any) -> None:
     p = result[0]["naime"]["p1-p2.1"]
-    # hip moves 83 px between the keys, the head 103, the foot 171: the hip is lerped to (797, 745)
-    assert (p.scale, p.x, p.y, p.anchor) == (pytest.approx(0.236), 667, 367, "hip")
+    # sit -> stand (WP-11d): the feet stay planted, so the foot is lerped from (862, 714) to (802, 874) -> (832, 794)
+    # (the hip would move least, 83 px, but a crouching inbetween anchored there floats: D41)
+    assert (p.scale, p.x, p.y, p.anchor) == (pytest.approx(0.236), 667, 360, "foot")
     assert (p.depth, p.occluders) == (874, ("coffee_table",))  # k = 1 > n / 2: key B's
 
 

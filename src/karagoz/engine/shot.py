@@ -186,6 +186,24 @@ def _ref_head_height(data: Any) -> float | None:
     return height if height > 0 else None
 
 
+def _ref_face_height(data: Any) -> float | None:
+    if not isinstance(data, dict):
+        return None
+    face = data.get("face")
+    if not isinstance(face, dict):
+        return None
+    box = face.get("box")
+    if not isinstance(box, (list, tuple)) or len(box) != 4:
+        return None
+    y0_raw, y1_raw = box[1], box[3]
+    if isinstance(y0_raw, bool) or isinstance(y1_raw, bool):
+        return None
+    if not isinstance(y0_raw, (int, float)) or not isinstance(y1_raw, (int, float)):
+        return None
+    height = float(y1_raw) - float(y0_raw)
+    return height if height > 0 else None
+
+
 def _opaque_height(img: Image.Image) -> int | None:
     cut = cutout(img)
     alpha = np.array(cut.convert("RGBA"))[:, :, 3]
@@ -256,6 +274,8 @@ def _placement_mode(
         head_h = _ref_head_height(ref_lm_data)
         if head_h is None:
             return None
+        face_h = _ref_face_height(ref_lm_data)
+        head_per_face: float | None = head_h / face_h if face_h is not None and face_h > 0 else None
         try:
             ref_img = Image.open(ref_path).convert("RGB")
         except OSError:
@@ -295,6 +315,7 @@ def _placement_mode(
                 place=place_by_char.get(character),
                 poses=poses_by_char.get(character, {}),
                 landmarks=landmarks,
+                head_per_face=head_per_face,
             )
         )
     placements, solver_warnings = solve(inputs, regions)
