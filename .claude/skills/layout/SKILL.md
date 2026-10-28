@@ -92,7 +92,8 @@ never describe furniture as something to draw, no anatomical close-ups. Your wor
   separate library and are timed to the voice.
 - Props in the drawing must show their continuity state, with the prop's **full description from `props.yaml`**
   every time ("empty tulip-shaped Turkish tea glass"); the example above abbreviates to "cup" only to stay short.
-- **Every pose change needs a transition with 3-4 inbetween descriptions** (fewer only for a snap). Each one says
+- **Every pose change needs a transition with 3-4 inbetween descriptions** (fewer only for a snap); **a whole-body
+  move (standing up, sitting down, turning away) needs 6**: the inbetweens are the length of the move on screen. Each one says
   what changed compared with the previous drawing; the last one may overshoot the target slightly.
 - **Inbetweens are on a path** (sections `feel`, `inbetweens`): every inbetween is between its two neighbours — the head, the
   hips and the moving hand progress one way. Write where they are ("hips just off the seat, head forward and higher

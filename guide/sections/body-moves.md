@@ -15,8 +15,9 @@ a typical way: the body goes the wrong way first (down before up), or stops half
 - The two **ends** of the move are the key poses (sitting and standing, facing and turned away). The move itself is
   the inbetweens. Never make a held key out of the middle of the move.
 - Each inbetween says where the head, the hips and the feet are, so the body progresses one way.
-- **Time** (starting value): with 4 inbetweens on twos plus anticipation and settle a whole-body move takes at least
-  `4 + 4 × 2 + 6` = 18 frames. Two big moves must not overlap; let the first settle before the second starts.
+- **Time** (starting value): only the inbetweens move on screen, so a whole-body move gets **6 inbetweens** (on
+  twos 12 frames of motion). Anticipation (4) and settle (6) are key-pose holds around it, not motion. Two big moves
+  must not overlap; let the first settle before the second starts.
 - A move that is not covered by a section of its own (walking, bending down, lying down) follows the same rules:
   ends as keys, a one-way path between them, enough time.
 

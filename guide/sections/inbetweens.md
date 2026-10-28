@@ -10,7 +10,9 @@ tags: [inbetweens]
 # Inbetweens
 
 - **Every pose change gets 3–4 inbetweens** (`transition.inbetweens`), fewer only for a deliberate snap. A single
-  change of drawing with nothing between looks like a cut.
+  change of drawing with nothing between looks like a cut. **A whole-body move** (standing up, sitting down,
+  turning away) **gets 6**: the inbetweens are the only drawings that move, so their number is the length of the
+  move on screen (inbetweens × cadence frames).
 - **Describe positions, not fractions.** "Halfway between the two poses" failed twice in a test: the model drew the
   target pose or something off the path. Writing where the hand, the head, the hips and the eyes are in this
   drawing worked six times out of six.

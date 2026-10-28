@@ -60,9 +60,14 @@ mouth:
 
 ## Movement (sections `feel` and `timing` are always yours; `body-moves`, `stand-up`, `handover` when the shot has them)
 
-- **A whole-body move needs room.** Standing up, sitting down or turning away: 4 inbetweens on twos plus
-  anticipation and settle is at least 18 frames (starting value). Do not squeeze two body moves into one second;
-  let the first settle before the next starts (`check` reports `timing.overlap`).
+- **What moves on screen is the inbetweens.** A transition shows its inbetweens for `cadence` frames each and
+  nothing else: 4 inbetweens on twos are 8 frames. `anticipate` and `settle` only keep room free around the move
+  (the key pose holds there); they do not make the move longer. You cannot lengthen a move in the xsheet: `ones`
+  makes it shorter, and there is no slower cadence for a transition.
+- **A whole-body move needs room.** Standing up, sitting down or turning away needs about 12 frames of moving
+  drawings (6 inbetweens on twos). If Layout gave fewer, keep `twos`, never `ones`, and write in your notes that
+  the move needs more inbetweens from Layout. Do not squeeze two body moves into one second; let the first settle
+  before the next starts (`check` reports `timing.overlap`).
 - **Never hold the middle of a move.** If Layout gave you a key pose that is only the middle of a motion (half risen),
   do not give it a long hold between the transitions: that freezes the body halfway and then it jumps. Ask, or
   tell the orchestrator in your notes; the fix belongs in Layout.
