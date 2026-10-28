@@ -13,9 +13,11 @@ from karagoz.spec.findings import Finding, SpecError
 from karagoz.spec.io import load
 from karagoz.spec.models import (
     Continuity,
+    Hand,
     Hold,
     Lines,
     LoopEvent,
+    Name,
     Poses,
     Regions,
     SequenceEvent,
@@ -48,6 +50,11 @@ def words(text: str) -> list[str]:
         if nw:
             out.append(nw)
     return out
+
+
+def _holds_prop(holds: dict[Hand, Name | None] | None, prop: str) -> bool:
+    """True when either hand holds ``prop``."""
+    return holds is not None and prop in holds.values()
 
 
 def _rel(path: Path, episode_dir: Path) -> str:
@@ -854,6 +861,64 @@ def check_episode(episode_dir: Path, style_path: Path | None = None) -> list[Fin
                                 f"Pose '{pose.id}' of '{char}' sits on floor place '{at}'.",
                             )
                         )
+
+    # Handover inside one shot: the giver lets go at the contact key, the receiver takes there (D34). Only
+    # when continuity names a giver and a receiver: picking a prop up over several inbetweens is fine.
+    if continuity is not None and continuity.props is not None:
+        for _folder, prel, pm in poses_loaded:
+            for pr in continuity.props:
+                if pr.shot != pm.shot:
+                    continue
+                giver = pr.in_.holder
+                receiver = pr.out.holder
+                if giver is None or receiver is None or giver == receiver:
+                    continue
+                giver_poses = pm.characters.get(giver)
+                if giver_poses is not None:
+                    by_id = {p.id: p for p in giver_poses.poses}
+                    for i, tr in enumerate(giver_poses.transitions or []):
+                        fp = by_id.get(tr.from_)
+                        tp = by_id.get(tr.to)
+                        if fp is None or tp is None or tr.holds is None:
+                            continue
+                        if not _holds_prop(fp.holds, pr.prop) or _holds_prop(tp.holds, pr.prop):
+                            continue
+                        for k, entry_holds in enumerate(tr.holds):
+                            if entry_holds is None or not _holds_prop(entry_holds, pr.prop):
+                                continue
+                            findings.append(
+                                Finding(
+                                    "warn",
+                                    "handover.holds_after_release",
+                                    prel,
+                                    f"characters.{giver}.transitions[{i}].holds[{k}]",
+                                    f"{giver} {tr.from_} -> {tr.to}: the giver lets go at {tr.from_}, but "
+                                    f"inbetween {k + 1} still holds '{pr.prop}' (two props on screen)",
+                                )
+                            )
+                receiver_poses = pm.characters.get(receiver)
+                if receiver_poses is not None:
+                    by_id = {p.id: p for p in receiver_poses.poses}
+                    for i, tr in enumerate(receiver_poses.transitions or []):
+                        fp = by_id.get(tr.from_)
+                        tp = by_id.get(tr.to)
+                        if fp is None or tp is None or tr.holds is None:
+                            continue
+                        if _holds_prop(fp.holds, pr.prop) or not _holds_prop(tp.holds, pr.prop):
+                            continue
+                        for k, entry_holds in enumerate(tr.holds):
+                            if entry_holds is None or not _holds_prop(entry_holds, pr.prop):
+                                continue
+                            findings.append(
+                                Finding(
+                                    "warn",
+                                    "handover.holds_before_take",
+                                    prel,
+                                    f"characters.{receiver}.transitions[{i}].holds[{k}]",
+                                    f"{receiver} {tr.from_} -> {tr.to}: the receiver takes at {tr.to}, but "
+                                    f"inbetween {k + 1} already holds '{pr.prop}' (two props on screen)",
+                                )
+                            )
 
     findings.sort(key=lambda f: (f.file, f.path, f.code))
     return findings

@@ -30,6 +30,7 @@ class Brief:
     workdir: Path
     max_steps: int = 40
     session_id: str | None = None
+    model: str | None = None
 
 
 @dataclass(frozen=True)
@@ -77,7 +78,7 @@ class MuseExecCarrier:
             "--json",
             "--api-key-stdin",
             "--model",
-            self.model,
+            brief.model or self.model,
             "--contributor-mode",
             "on",
             "--approval-mode",

@@ -16,8 +16,9 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field
 
-from karagoz.engine.sheet import Part, frame_strip, movement_parts, part_images, part_sheet
+from karagoz.engine.sheet import Part, contact_sheet, frame_strip, look, movement_parts, part_images, part_sheet
 from karagoz.spec import Poses, load
+from karagoz.studio.api_carrier import ApiCarrier
 from karagoz.studio.carriers import Brief, Carrier, MuseExecCarrier, OnEvent, RunResult
 from karagoz.studio.context import compile_context, load_sections, select_sections, shot_summary
 
@@ -25,7 +26,16 @@ CHECKER_MODEL = "muse-spark-1.2-contributor"
 SHORT_PROMPT = "Read BRIEF.md in the working directory and do exactly what it says."
 
 checker_carrier_factory: Callable[[], Carrier] | None = None
-"""Module-level factory for tests: code_work uses this when set, else MuseExecCarrier."""
+"""Module-level factory for tests: code_work uses this when set, else make_checker_factory from studio.yaml."""
+
+
+def make_checker_factory(name: str, model: str) -> Callable[[], Carrier]:
+    """A factory that builds one fresh checker carrier per call (checks run in parallel)."""
+    if name == "api":
+        return lambda: ApiCarrier(model=model)
+    if name == "muse-exec":
+        return lambda: MuseExecCarrier(model=model)
+    raise ValueError(f"unknown checker carrier: {name}")
 
 
 class Finding(BaseModel):
@@ -325,6 +335,8 @@ def _brief_text(
     *,
     guide_dir: Path,
     skills_dir: Path,
+    has_hands: bool = False,
+    has_strip: bool = False,
 ) -> str:
     sections = load_sections(guide_dir)
     selection = select_sections("checker", prod, episode, job.shot, sections)
@@ -372,8 +384,9 @@ def _brief_text(
             f"Check part {job.part.id} (copy {job.copy}).",
             "",
             "- sheet.png shows every drawing with its file name top-left.",
+            "- hands.png shows close-ups of every drawing's hands.",
             "- strip.png shows the rendered frames labelled f<n> (when present).",
-            "- To look closer:",
+            "- If you can run commands, to look closer:",
             f'  "{python}" -m karagoz look drawings/<char>/<file>',
             "    --region face|head|hands|feet|props|top|bottom|left|right",
             "",
@@ -401,7 +414,45 @@ def _brief_text(
             "",
         ]
     )
-    return context_text.rstrip("\n") + "\n\n" + task_part
+    inputs = ["INTENT.md", "sheet.png"]
+    if has_hands:
+        inputs.append("hands.png")
+    if has_strip:
+        inputs.append("strip.png")
+    lists = "## Inputs\n\n" + "".join(f"- {path}\n" for path in inputs) + "\n## Output\n\n- findings.yaml\n"
+    return context_text.rstrip("\n") + "\n\n" + task_part + "\n" + lists
+
+
+def _write_hands_png(prod: Path, episode: str, job: CheckJob, workdir: Path) -> bool:
+    """Close-ups of every drawing's hands for a checker that cannot call `karagoz look` itself."""
+    with_hands = False
+    for image in job.images:
+        try:
+            data = json.loads((image.parent / f"{image.stem}.landmarks.json").read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        hands = data.get("hands") if isinstance(data, dict) else None
+        if isinstance(hands, list) and hands:
+            with_hands = True
+            break
+    if not with_hands:
+        return False
+    assets = prod / episode / "assets" / job.shot
+    crops: list[Path] = []
+    for image in job.images:
+        try:
+            rel = image.relative_to(assets)
+        except ValueError:
+            rel = Path(image.parent.name) / image.name
+        char = rel.parts[0] if len(rel.parts) > 1 else job.part.character
+        try:
+            crops.append(look(image, workdir / "hands" / f"{char}-{Path(rel.name).stem}.png", region="hands"))
+        except Exception:
+            continue
+    if not crops:
+        return False
+    contact_sheet(crops, workdir / "hands.png", cell_height=384)
+    return True
 
 
 def prepare_check(prod: Path, episode: str, job: CheckJob, workdir: Path, *, guide_dir: Path, skills_dir: Path) -> None:
@@ -440,6 +491,7 @@ def prepare_check(prod: Path, episode: str, job: CheckJob, workdir: Path, *, gui
                 e = end + 2
                 if e > s:
                     frame_strip(video, s, e, workdir / "strip.png", step=step)
+    _write_hands_png(prod, episode, job, workdir)
     (workdir / "INTENT.md").write_text(_intent_text(prod, episode, job.shot, job.part), encoding="utf-8")
     sections_src = guide_dir / "sections"
     sections_dst = workdir / "sections"
@@ -448,7 +500,16 @@ def prepare_check(prod: Path, episode: str, job: CheckJob, workdir: Path, *, gui
         for src in sorted(sections_src.glob("*.md")):
             shutil.copy(src, sections_dst / src.name)
     (workdir / "BRIEF.md").write_text(
-        _brief_text(prod, episode, job, guide_dir=guide_dir, skills_dir=skills_dir), encoding="utf-8"
+        _brief_text(
+            prod,
+            episode,
+            job,
+            guide_dir=guide_dir,
+            skills_dir=skills_dir,
+            has_hands=(workdir / "hands.png").is_file(),
+            has_strip=(workdir / "strip.png").is_file(),
+        ),
+        encoding="utf-8",
     )
 
 
@@ -506,6 +567,8 @@ def _run_one(
             "error": prep_error,
             "cost_usd": 0.0,
             "seconds": 0.0,
+            "tokens_in": 0,
+            "tokens_out": 0,
             "session": None,
             "key": key,
             "reused": False,
@@ -526,6 +589,8 @@ def _run_one(
         load_error = str(exc) or type(exc).__name__
     total_cost = first.cost_usd
     total_seconds = first.seconds
+    tokens_in = first.usage.input_tokens
+    tokens_out = first.usage.output_tokens
     session = first.session_id
     if result is None:
         prompt = f"findings.yaml is missing or invalid: {load_error}. Write it again, following the schema in BRIEF.md."
@@ -537,6 +602,8 @@ def _run_one(
             second = RunResult(ok=False, error=f"{type(exc).__name__}: {exc}")
         total_cost += second.cost_usd
         total_seconds += second.seconds
+        tokens_in += second.usage.input_tokens
+        tokens_out += second.usage.output_tokens
         session = second.session_id if second.session_id is not None else session
         try:
             result = _load_result(workdir)
@@ -566,6 +633,8 @@ def _run_one(
         "error": load_error,
         "cost_usd": total_cost,
         "seconds": total_seconds,
+        "tokens_in": tokens_in,
+        "tokens_out": tokens_out,
         "session": session,
         "key": key,
         "reused": False,
@@ -588,7 +657,7 @@ def run_checks(
     """Run one checker per movement part, in parallel with staggered starts."""
     jobs = plan_checks(prod, episode, shot)
     factory: Callable[[], Carrier] = (
-        carrier_factory if carrier_factory is not None else lambda: MuseExecCarrier(model=CHECKER_MODEL)
+        carrier_factory if carrier_factory is not None else make_checker_factory("api", CHECKER_MODEL)
     )
     prev: dict[tuple[str, int], dict[str, Any]] = {}
     try:
