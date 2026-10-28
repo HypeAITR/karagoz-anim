@@ -1,4 +1,4 @@
-"""Acceptance tests for WP-19b (drawing prompts use support and held props). Written by the maintainer; do not edit.
+"""Acceptance tests for WP-19b (drawing prompts use support and held props), updated by WP-23. Do not edit.
 
 Uses the mini production of the WP-09a tests (`test_draw.py`). The fixture's ali: p1 and p2 sit, holding the glass
 in his right hand; transition p1 -> p2 with two inbetweens.
@@ -30,11 +30,11 @@ def edit(path: Path, old: str, new: str) -> None:
     path.write_text(text.replace(old, new, 1), encoding="utf-8")
 
 
-def test_templates_v3() -> None:
+def test_templates_v4() -> None:
     import karagoz.studio.draw as draw
 
     data = yaml.safe_load(draw.TEMPLATES_PATH.read_text(encoding="utf-8"))
-    assert data["version"] == 3
+    assert data["version"] == 4
     assert data["support_text"]["sit"] == SIT
     assert set(data["support_text"]) == {"sit", "stand", "crouch", "lie"}
     assert "what the hands hold" not in data["key_pose_next"]
@@ -46,8 +46,8 @@ def test_sitting_pose_gets_the_seat_geometry_and_hands(prod: Path) -> None:  # n
     assert f"CHANGE (new pose): {SIT} Oturuyor, sağ elinde bardak" in p1
     assert "HANDS: Right hand holds glass. Left hand is empty. Nothing else in the hands." in p1
     assert SIT in j["p2"].prompt and "HANDS: Right hand holds glass." in j["p2"].prompt
-    assert SIT not in j["p1-p2.1"].prompt  # inbetweens get no support text
-    assert "HANDS: Right hand holds glass." in j["p1-p2.1"].prompt  # k=1 of 2: pose A's hands
+    assert SIT in j["p1-p2.1"].prompt  # WP-23: same support in both keys -> inbetweens get it too
+    assert "HANDS: Right hand holds glass." in j["p1-p2.1"].prompt  # same hands in both keys
 
 
 def test_prop_description_and_empty_hands(prod: Path) -> None:  # noqa: F811
@@ -61,7 +61,8 @@ def test_prop_description_and_empty_hands(prod: Path) -> None:  # noqa: F811
     j = jobs_by_drawing(prod)
     assert "HANDS: Right hand holds a small tulip-shaped Turkish tea glass. Left hand is empty." in j["p1"].prompt
     assert "HANDS: Right hand is empty. Left hand is empty. Nothing else in the hands." in j["p2"].prompt
-    assert "HANDS: Right hand is empty." in j["p1-p2.2"].prompt  # k=2 of 2: pose B's hands
+    assert "HANDS" not in j["p1-p2.2"].prompt  # WP-23: hands change, Layout did not say -> no hands line
+    assert "PROPS: glass is a small tulip-shaped Turkish tea glass." in j["p1-p2.2"].prompt
 
 
 def test_no_holds_no_hands_section(prod: Path) -> None:  # noqa: F811

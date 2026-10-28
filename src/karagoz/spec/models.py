@@ -162,6 +162,7 @@ class PoseTransition(SpecModel):
     from_: PoseId = Field(alias="from")
     to: PoseId
     inbetweens: Annotated[list[Annotated[str, Field(min_length=10)]], Field(min_length=1, max_length=6)]
+    holds: list[dict[Hand, Name | None] | None] | None = None
     note: str | None = None
 
 

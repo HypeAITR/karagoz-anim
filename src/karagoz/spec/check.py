@@ -753,6 +753,58 @@ def check_episode(episode_dir: Path, style_path: Path | None = None) -> list[Fin
                                     prop_hint,
                                 )
                             )
+        for char, cposes in pm.characters.items():
+            poses_by_id = {p.id: p for p in cposes.poses}
+            for i, tr in enumerate(cposes.transitions or []):
+                tbase = f"characters.{char}.transitions[{i}].holds"
+                if tr.holds is not None and len(tr.holds) != len(tr.inbetweens):
+                    findings.append(
+                        Finding(
+                            "error",
+                            "holds.inbetween_count",
+                            prel,
+                            tbase,
+                            f"Transition '{tr.from_}' -> '{tr.to}' of '{char}' has "
+                            f"{len(tr.holds)} holds entries for {len(tr.inbetweens)} inbetweens.",
+                        )
+                    )
+                from_pose = poses_by_id.get(tr.from_)
+                to_pose = poses_by_id.get(tr.to)
+                if (
+                    from_pose is not None
+                    and to_pose is not None
+                    and from_pose.holds is not None
+                    and to_pose.holds is not None
+                    and from_pose.holds != to_pose.holds
+                    and (tr.holds is None or any(e is None for e in tr.holds))
+                ):
+                    findings.append(
+                        Finding(
+                            "warn",
+                            "holds.inbetween_missing",
+                            prel,
+                            tbase,
+                            f"{char} {tr.from_} -> {tr.to}: the hands change; write each "
+                            "inbetween's hands in the transition's holds "
+                            "(otherwise its drawings get no HANDS line)",
+                        )
+                    )
+                if tr.holds is not None and continuity is not None and continuity.prop_states is not None:
+                    for k_entry, hold_entry in enumerate(tr.holds):
+                        if hold_entry is None:
+                            continue
+                        for hand, held in hold_entry.items():
+                            if held is not None and held not in continuity.prop_states:
+                                findings.append(
+                                    Finding(
+                                        "warn",
+                                        "holds.unknown_prop",
+                                        prel,
+                                        f"{tbase}[{k_entry}].{hand}",
+                                        f"Unknown prop '{held}' held by '{char}'.",
+                                        prop_hint,
+                                    )
+                                )
         shot_location = shot_locations.get(pm.shot)
         regions = regions_by_location.get(shot_location) if shot_location is not None else None
         if regions is None:

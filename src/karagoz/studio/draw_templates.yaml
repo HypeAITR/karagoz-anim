@@ -2,8 +2,8 @@
 # draw-prompts skill (.claude/skills/draw-prompts/SKILL.md): REFERENCES, WHO, KEEP, CHANGE, NEVER, FACING.
 # The reasons for each rule (measured on Muse Image) are in that skill. Do not change a template without running the
 # prompt regression set and recording the result.
-# Placeholders: {style} {facing} {support} {acting} {description} {shape} {eyes} {props}; {never} is replaced at load time.
-version: 3
+# Placeholders: {style} {facing} {support} {acting} {description} {shape} {eyes} {props} {from_words} {to_words} {k} {n} {pct} {direction}; {never} is replaced at load time.
+version: 4
 
 style: >-
   Flat-colour 2D TV cartoon style: thick clean black outlines, flat fills with at most one simple flat shadow tone,
@@ -21,9 +21,26 @@ support_text:
   stand: >-
     BODY: standing upright, weight on both feet, both feet flat on the ground.
   crouch: >-
-    BODY: crouching, knees bent, hips lifted from the seat, both feet flat on the ground.
+    BODY: rising out of the seat, half-way up: the hips just lifted off the invisible seat and still at about knee
+    height, the upper body leaning forward over the knees, both feet flat on the ground and taking the weight; not
+    squatting, not crouching low.
   lie: >-
     BODY: lying on the back on an invisible flat surface.
+
+support_words:
+  sit: sitting
+  stand: standing
+  crouch: half-way up out of the seat
+  lie: lying
+
+support_between: >-
+  BODY: on the way from {from_words} (image 1) to {to_words} (image 2), drawing {k} of {n} between them: the hips
+  and the head are about {pct}% of the way from their height in image 1 to their height in image 2. {direction}
+
+support_direction:
+  up: "While rising the body never goes lower than in image 1."
+  down: "While going down the body never goes higher than in image 1."
+  level: ""
 
 background: >-
   {style} Background only, no people, no characters, no logos, no text: {description}
@@ -54,7 +71,7 @@ inbetween: >-
   between them.
   KEEP: the same character at the same scale and position as in both images; everything this text does not change
   stays as in image 1.
-  CHANGE: {description} Mouth closed.
+  CHANGE: {support}{description} Mouth closed.
   {props}
   {never}
   FACING: the character faces the {facing} side of the image.

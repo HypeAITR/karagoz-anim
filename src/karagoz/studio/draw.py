@@ -394,6 +394,15 @@ def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
     support_texts = templates.get("support_text")
     if not isinstance(support_texts, dict):
         raise ValueError(f"{TEMPLATES_PATH}: missing support_text")
+    support_words = templates.get("support_words")
+    if not isinstance(support_words, dict):
+        raise ValueError(f"{TEMPLATES_PATH}: missing support_words")
+    support_between = templates.get("support_between")
+    if not isinstance(support_between, str):
+        raise ValueError(f"{TEMPLATES_PATH}: missing support_between")
+    support_direction = templates.get("support_direction")
+    if not isinstance(support_direction, dict):
+        raise ValueError(f"{TEMPLATES_PATH}: missing support_direction")
     prop_descriptions = _load_prop_descriptions(prod / "props.yaml")
 
     shot_entry = next((s for s in shots.shots if s.id == shot), None)
@@ -509,28 +518,81 @@ def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
             a, b, k = parsed
             n = max_k.get((char, a, b), k)
             desc: str | None = None
+            trans_holds: list[dict[Hand, str | None] | None] | None = None
+            pose_a: Pose | None = None
+            pose_b: Pose | None = None
             if poses is not None and char in poses.characters:
                 transitions = poses.characters[char].transitions or []
                 for trans in transitions:
-                    if trans.from_ == a and trans.to == b and 1 <= k <= len(trans.inbetweens):
-                        desc = trans.inbetweens[k - 1]
+                    if trans.from_ == a and trans.to == b:
+                        trans_holds = trans.holds
+                        if 1 <= k <= len(trans.inbetweens):
+                            desc = trans.inbetweens[k - 1]
                         break
+                for pose_entry in poses.characters[char].poses:
+                    if pose_entry.id == a:
+                        pose_a = pose_entry
+                    elif pose_entry.id == b:
+                        pose_b = pose_entry
             if desc is None:
                 desc = f"the in-between drawing {k} of {n}: halfway between the two drawings"
-            if _will_mirror(shots, shot, char, info.natural_facing):
+            mirrored = _will_mirror(shots, shot, char, info.natural_facing)
+            if mirrored:
                 desc = swap_left_right(desc)
-            holds: dict[Hand, str | None] | None = None
-            wanted = a if k <= n / 2 else b
-            if poses is not None and char in poses.characters:
-                for pose_entry in poses.characters[char].poses:
-                    if pose_entry.id == wanted:
-                        holds = pose_entry.holds
-                        break
-            props_str = _hands_text(holds, prop_descriptions)
-            if _will_mirror(shots, shot, char, info.natural_facing):
-                props_str = swap_left_right(props_str)
+            entry: dict[Hand, str | None] | None = None
+            if trans_holds is not None and 0 <= k - 1 < len(trans_holds):
+                entry = trans_holds[k - 1]
+            if entry is not None:
+                props_str = _hands_text(entry, prop_descriptions)
+                if mirrored:
+                    props_str = swap_left_right(props_str)
+            elif (
+                pose_a is not None
+                and pose_b is not None
+                and pose_a.holds is not None
+                and pose_b.holds is not None
+                and pose_a.holds == pose_b.holds
+            ):
+                props_str = _hands_text(pose_a.holds, prop_descriptions)
+                if mirrored:
+                    props_str = swap_left_right(props_str)
+            else:
+                named: set[str] = set()
+                for key_pose in (pose_a, pose_b):
+                    if key_pose is not None and key_pose.holds is not None:
+                        for held in key_pose.holds.values():
+                            if held is not None:
+                                named.add(held)
+                described = sorted(p for p in named if p in prop_descriptions)
+                if described:
+                    props_str = "PROPS: " + " ".join(f"{p} is {prop_descriptions[p]}." for p in described)
+                else:
+                    props_str = ""
+            support_str = ""
+            if pose_a is not None and pose_b is not None and pose_a.support is not None and pose_b.support is not None:
+                if pose_a.support == pose_b.support:
+                    support_str = f"{support_texts[pose_a.support]} "
+                else:
+                    height_order = {"lie": 0, "sit": 1, "crouch": 2, "stand": 3}
+                    order_a = height_order.get(pose_a.support, 0)
+                    order_b = height_order.get(pose_b.support, 0)
+                    direction_key = "up" if order_b > order_a else "down" if order_b < order_a else "level"
+                    direction = support_direction.get(direction_key, "")
+                    formatted = support_between.format(
+                        from_words=support_words.get(pose_a.support, pose_a.support),
+                        to_words=support_words.get(pose_b.support, pose_b.support),
+                        k=k,
+                        n=n,
+                        pct=round(100 * k / (n + 1)),
+                        direction=direction if isinstance(direction, str) else "",
+                    )
+                    support_str = formatted.strip() + " "
             prompt = inbetween_tpl.format(
-                style=style_text, facing=info.natural_facing, props=props_str, description=desc
+                style=style_text,
+                facing=info.natural_facing,
+                support=support_str,
+                props=props_str,
+                description=desc,
             )
             jobs.append(
                 DrawJob(
