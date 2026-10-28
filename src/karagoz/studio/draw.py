@@ -17,8 +17,9 @@ from typing import Any, Literal, Protocol
 import yaml
 from PIL import Image
 
+from karagoz.engine.landmarks import SamLike, measure
 from karagoz.engine.mouth import mouth_track
-from karagoz.engine.patch import PatchError, make_patch, save_patch
+from karagoz.engine.patch import PatchError, clip_patch, make_patch, save_patch
 from karagoz.engine.timing import resolve_episode
 from karagoz.engine.xsheet import expand
 from karagoz.meta.client import MetaApiError
@@ -625,8 +626,13 @@ def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
         eyes_cells = exp.eyes.get(char, ["open"] * exp.length)
         for f in range(exp.length):
             body = body_cells[f] if f < len(body_cells) else None
-            if body is None or _parse_inbetween(body) is not None:
+            if body is None:
                 continue
+            parsed_ib = _parse_inbetween(body)
+            if parsed_ib is not None:
+                a, b, k = parsed_ib
+                n = max_k.get((char, a, b), k)
+                body = a if k <= n / 2 else b
             shape = shape_per_frame[f] if f < len(shape_per_frame) else "X"
             if shape != "X":
                 mouth_tuples.add((char, body, shape))
@@ -743,7 +749,69 @@ def _run_simple(job: DrawJob, image: MuseImageLike) -> tuple[int, float, str | N
     return (calls, time.monotonic() - start, None)
 
 
-def _run_patch_attempt(job: DrawJob, image: MuseImageLike, prompt: str, reasoning: Literal["low", "high"]) -> None:
+def _face_box_from_data(data: Any) -> tuple[float, float, float, float] | None:
+    """The `face.box` of a landmarks mapping as floats, or None when missing."""
+    if not isinstance(data, dict):
+        return None
+    face = data.get("face")
+    if not isinstance(face, dict):
+        return None
+    box = face.get("box")
+    if not isinstance(box, (list, tuple)) or len(box) != 4:
+        return None
+    coords: list[float] = []
+    for value in box:
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return None
+        coords.append(float(value))
+    return (coords[0], coords[1], coords[2], coords[3])
+
+
+def _face_box_from_landmarks(path: Path) -> tuple[float, float, float, float] | None:
+    """The `face.box` of a landmarks JSON file, or None when missing or unreadable."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        data: Any = json.loads(text)
+    except json.JSONDecodeError:
+        return None
+    return _face_box_from_data(data)
+
+
+def _face_for_pose(
+    pose_path: Path, face_of: Callable[[Path], tuple[float, float, float, float] | None] | None
+) -> tuple[float, float, float, float] | None:
+    """The face box of a base pose drawing, or None when unknown."""
+    if face_of is not None:
+        return face_of(pose_path)
+    landmarks = pose_path.parent / f"{pose_path.stem}.landmarks.json"
+    if not landmarks.is_file():
+        return None
+    return _face_box_from_landmarks(landmarks)
+
+
+def _face_region(face: tuple[float, float, float, float], size: tuple[int, int]) -> tuple[int, int, int, int]:
+    """The face box padded by 10 % of its height, clipped to the image."""
+    x0, y0, x1, y1 = face
+    pad = 0.1 * (y1 - y0)
+    w, h = size
+    return (
+        max(0, math.floor(x0 - pad)),
+        max(0, math.floor(y0 - pad)),
+        min(w, math.ceil(x1 + pad)),
+        min(h, math.ceil(y1 + pad)),
+    )
+
+
+def _run_patch_attempt(
+    job: DrawJob,
+    image: MuseImageLike,
+    prompt: str,
+    reasoning: Literal["low", "high"],
+    face_of: Callable[[Path], tuple[float, float, float, float] | None] | None = None,
+) -> None:
     blobs = image.edit(list(job.refs), prompt, n=1, reasoning=reasoning, size=job.size, tag="")
     variant_path = Path(str(job.out) + ".variant.png")
     variant_path.parent.mkdir(parents=True, exist_ok=True)
@@ -751,23 +819,32 @@ def _run_patch_attempt(job: DrawJob, image: MuseImageLike, prompt: str, reasonin
     variant_img.convert("RGB").save(variant_path, format="PNG")
     pose_path = job.refs[0] if job.refs else job.out
     base = Image.open(pose_path)
-    patch = make_patch(base, variant_img)
+    face = _face_for_pose(pose_path, face_of)
+    if face is None:
+        patch = make_patch(base, variant_img)
+    else:
+        region = _face_region(face, base.size)
+        patch = clip_patch(make_patch(base, variant_img, region=region), region)
     job.out.parent.mkdir(parents=True, exist_ok=True)
     save_patch(patch, job.out)
 
 
-def _run_patch(job: DrawJob, image: MuseImageLike) -> tuple[int, float, str | None]:
+def _run_patch(
+    job: DrawJob,
+    image: MuseImageLike,
+    face_of: Callable[[Path], tuple[float, float, float, float] | None] | None = None,
+) -> tuple[int, float, str | None]:
     start = time.monotonic()
     calls = 0
     try:
         calls += 1
         try:
-            _run_patch_attempt(job, image, job.prompt, job.reasoning)
+            _run_patch_attempt(job, image, job.prompt, job.reasoning, face_of)
         except MetaApiError as exc:
             if exc.status != 400:
                 raise
             calls += 1  # same prompt once more: the content filter is not deterministic
-            _run_patch_attempt(job, image, job.prompt, job.reasoning)
+            _run_patch_attempt(job, image, job.prompt, job.reasoning, face_of)
     except Exception as first_exc:  # noqa: BLE001 - retry refused/failed patches once
         retriable = isinstance(first_exc, PatchError) or (
             isinstance(first_exc, MetaApiError) and first_exc.status == 400
@@ -776,7 +853,7 @@ def _run_patch(job: DrawJob, image: MuseImageLike) -> tuple[int, float, str | No
             return (calls, time.monotonic() - start, str(first_exc))
         try:
             calls += 1
-            _run_patch_attempt(job, image, job.fallback, "high")
+            _run_patch_attempt(job, image, job.fallback, "high", face_of)
         except Exception as second_exc:  # noqa: BLE001 - second failure is reported
             return (calls, time.monotonic() - start, str(second_exc))
     return (calls, time.monotonic() - start, None)
@@ -827,6 +904,7 @@ def run_draw(
     *,
     workers: int = 8,
     on_event: Callable[[dict[str, Any]], None] | None = None,
+    face_of: Callable[[Path], tuple[float, float, float, float] | None] | None = None,
 ) -> DrawReport:
     done: list[Path] = []
     cached: list[Path] = []
@@ -883,7 +961,9 @@ def run_draw(
             pending_jobs = [wave_jobs[i] for i in pending_idx]
             with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
                 futures = [
-                    pool.submit(_run_patch if job.kind in ("mouth", "eyes") else _run_simple, job, image)
+                    pool.submit(_run_patch, job, image, face_of)
+                    if job.kind in ("mouth", "eyes")
+                    else pool.submit(_run_simple, job, image)
                     for job in pending_jobs
                 ]
                 for pos, fut in enumerate(futures):
@@ -915,3 +995,56 @@ def run_draw(
         manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     return DrawReport(done=done, cached=cached, failed=failed, calls=total_calls)
+
+
+def sam_face_of(sam: SamLike, prod: Path) -> Callable[[Path], tuple[float, float, float, float] | None]:
+    """Face boxes measured with SAM, cached in `prod/.cache/landmarks` (shared with `measure_shot`)."""
+    characters = _load_characters(prod / "characters.yaml")
+    cache_dir = prod / ".cache" / "landmarks"
+
+    def face_of(path: Path) -> tuple[float, float, float, float] | None:
+        info = characters.get(path.parent.name)
+        facing = info.natural_facing if info is not None else "right"
+        return _face_box_from_data(measure(path, sam, facing=facing, cache_dir=cache_dir))
+
+    return face_of
+
+
+def recut_patches(prod: Path, episode: str, shot: str) -> tuple[list[Path], list[str]]:
+    """Re-cut mouth/eye patches inside the face box; return (recut patch paths, skipped reasons). No image calls."""
+    shot_dir = prod / episode / "assets" / shot
+    done: list[Path] = []
+    skipped: list[str] = []
+    if not shot_dir.is_dir():
+        return (done, skipped)
+    entries = [p for p in shot_dir.iterdir() if p.is_dir() and p.name != "history"]
+    for char_dir in sorted(entries, key=lambda p: p.name):
+        variants = sorted(char_dir.glob("*.variant.png"), key=lambda p: p.name)
+        for variant_path in variants:
+            stem = variant_path.name[: -len(".variant.png")]
+            if "." not in stem:
+                continue
+            pose, _, kind = stem.rpartition(".")
+            if not kind.startswith("mouth-") and not kind.startswith("eyes-"):
+                continue
+            rel = variant_path.relative_to(shot_dir).as_posix()
+            base_path = char_dir / f"{pose}.png"
+            if not base_path.is_file():
+                skipped.append(f"{rel}: no base")
+                continue
+            face = _face_box_from_landmarks(char_dir / f"{pose}.landmarks.json")
+            if face is None:
+                skipped.append(f"{rel}: no landmarks/face box")
+                continue
+            try:
+                base = Image.open(base_path)
+                variant = Image.open(variant_path)
+                region = _face_region(face, base.size)
+                patch = clip_patch(make_patch(base, variant, region=region), region)
+            except PatchError as exc:
+                skipped.append(f"{rel}: {exc}")
+                continue
+            out = char_dir / f"{pose}.{kind}"
+            save_patch(patch, out)
+            done.append(out)
+    return (sorted(done), skipped)

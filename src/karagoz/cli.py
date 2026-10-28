@@ -195,7 +195,7 @@ def cmd_mouth(args: argparse.Namespace) -> int:
 
 def cmd_draw(args: argparse.Namespace) -> int:
     try:
-        from karagoz.studio.draw import plan_draw, run_draw
+        from karagoz.studio.draw import plan_draw, run_draw, sam_face_of
 
         jobs = plan_draw(Path(args.prod), args.episode, args.shot)
         if args.dry_run:
@@ -207,8 +207,9 @@ def cmd_draw(args: argparse.Namespace) -> int:
             return 0
         from karagoz.meta.client import MetaClient
         from karagoz.meta.image import MuseImage
+        from karagoz.meta.sam import Sam
 
-        report = run_draw(jobs, MuseImage(MetaClient()))
+        report = run_draw(jobs, MuseImage(MetaClient()), face_of=sam_face_of(Sam(MetaClient()), Path(args.prod)))
         print(
             f"done {len(report.done)}, cached {len(report.cached)}, "
             f"failed {len(report.failed)}, calls {report.calls}, ~${report.cost_usd:.2f}"
@@ -219,6 +220,21 @@ def cmd_draw(args: argparse.Namespace) -> int:
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+
+
+def cmd_recut(args: argparse.Namespace) -> int:
+    """Re-cut a shot's mouth/eye patches inside the face box (no image calls)."""
+    try:
+        from karagoz.studio.draw import recut_patches
+
+        done, skipped = recut_patches(Path(args.prod), args.episode, args.shot)
+        print(f"recut {len(done)}, skipped {len(skipped)}")
+        for item in skipped:
+            print(item)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def cmd_render(args: argparse.Namespace) -> int:
@@ -487,6 +503,12 @@ def build_parser() -> argparse.ArgumentParser:
     draw.add_argument("shot", help="shot id")
     draw.add_argument("--dry-run", dest="dry_run", action="store_true", help="list jobs without calling the model")
     draw.set_defaults(func=cmd_draw)
+
+    recut_p = sub.add_parser("recut", help="re-cut a shot's mouth/eye patches inside the face")
+    recut_p.add_argument("prod", help="production directory")
+    recut_p.add_argument("episode", help="episode id")
+    recut_p.add_argument("shot", help="shot id")
+    recut_p.set_defaults(func=cmd_recut)
 
     render_p = sub.add_parser("render", help="render a shot or episode to MP4")
     render_p.add_argument("prod", help="production directory")
