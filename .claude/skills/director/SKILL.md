@@ -37,7 +37,9 @@ fidelity to the script matters more than cleverness.
   (`front|three_quarter_left|three_quarter_right|profile_left|profile_right|back`). Two people talking to each
   other face each other: one `three_quarter_right`, the other `three_quarter_left`.
 - `lines`: the line ids heard in this shot. `in`/`out`: anchors (`start` or the previous shot's `.out` for `in`;
-  usually `<last line>.end + beat.react` for `out`).
+  usually `<last line>.end + beat.react` for `out`). **If the script has silent action after the last line**
+  (someone stands up, sits down, drinks, leaves), the shot must hold until that action has landed and been seen:
+  `<last line>.end + beat.gag_hold` at least. A shot that ends on `beat.react` cuts the action off.
 - **Facing comes from the characters list.** `characters.yaml` gives each character's `natural_facing` (the
   direction the image model draws them reliably) and `mirror_ok` (whether the engine may flip their drawings).
   A character with `mirror_ok: false` must face their `natural_facing` in every shot; stage the others around
