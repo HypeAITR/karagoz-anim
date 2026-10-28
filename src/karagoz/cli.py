@@ -110,7 +110,60 @@ def cmd_approve(args: argparse.Namespace) -> int:
 
 def cmd_retake(args: argparse.Namespace) -> int:
     try:
-        _open_studio(args.prod, args.episode).retake(args.task, args.note)
+        from karagoz.studio import loop
+
+        loop.retake(_open_studio(args.prod, args.episode), args.task, args.note)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_review(args: argparse.Namespace) -> int:
+    try:
+        from karagoz.studio import loop
+
+        _open_studio(args.prod, args.episode)
+        path = loop.write_review(Path(args.prod), args.episode, args.shot)
+        print(path.read_text(encoding="utf-8"), end="")
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_redraw(args: argparse.Namespace) -> int:
+    try:
+        from karagoz.studio import loop
+
+        moved = loop.redraw(_open_studio(args.prod, args.episode), args.shot, list(args.drawings), args.note)
+        for name in moved:
+            print(name)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_keep(args: argparse.Namespace) -> int:
+    try:
+        from karagoz.studio import loop
+
+        loop.keep(_open_studio(args.prod, args.episode), args.shot, args.item, args.note)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_context(args: argparse.Namespace) -> int:
+    try:
+        from karagoz.studio import loop
+
+        _open_studio(args.prod, args.episode)
+        loop.set_context(
+            Path(args.prod), args.episode, args.task, list(args.add or []), list(args.remove or []), args.reason
+        )
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -480,6 +533,37 @@ def build_parser() -> argparse.ArgumentParser:
     strip_p.add_argument("--step", type=int, default=1, help="take every Nth frame")
     strip_p.add_argument("--out", default=None, metavar="FILE", help="output PNG path")
     strip_p.set_defaults(func=cmd_strip)
+
+    review_p = sub.add_parser("review", help="write the shot's REVIEW.md again and print it")
+    review_p.add_argument("prod", help="production directory")
+    review_p.add_argument("episode", help="episode id")
+    review_p.add_argument("shot", help="shot id")
+    review_p.set_defaults(func=cmd_review)
+
+    redraw_p = sub.add_parser("redraw", help="move drawings to history so they are drawn again")
+    redraw_p.add_argument("prod", help="production directory")
+    redraw_p.add_argument("episode", help="episode id")
+    redraw_p.add_argument("shot", help="shot id")
+    redraw_p.add_argument("drawings", nargs="+", help="drawings as <char>/<name>")
+    redraw_p.add_argument("--note", required=True, help="why these drawings are redrawn")
+    redraw_p.set_defaults(func=cmd_redraw)
+
+    keep_p = sub.add_parser("keep", help="keep one gate flag or checker finding with a note")
+    keep_p.add_argument("prod", help="production directory")
+    keep_p.add_argument("episode", help="episode id")
+    keep_p.add_argument("shot", help="shot id")
+    keep_p.add_argument("item", help="gate flag id or finding:<part>#<copy>:<index>")
+    keep_p.add_argument("--note", required=True, help="why this item is kept")
+    keep_p.set_defaults(func=cmd_keep)
+
+    context_p = sub.add_parser("context", help="set one task's context override")
+    context_p.add_argument("prod", help="production directory")
+    context_p.add_argument("episode", help="episode id")
+    context_p.add_argument("task", help="task id")
+    context_p.add_argument("--add", action="extend", nargs="+", default=None, metavar="ID", help="section to add")
+    context_p.add_argument("--remove", action="extend", nargs="+", default=None, metavar="ID", help="section to remove")
+    context_p.add_argument("--reason", required=True, help="why the context changes")
+    context_p.set_defaults(func=cmd_context)
     return parser
 
 

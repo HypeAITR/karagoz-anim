@@ -126,9 +126,10 @@ def test_departments() -> None:
         "render",
         "gate",
         "check",
+        "review",
         "edit",
     ]
-    assert {"location", "voice", "draw", "render", "edit", "gate", "check"} == CODE_DEPARTMENTS
+    assert {"location", "voice", "draw", "render", "edit", "gate", "check", "review"} == CODE_DEPARTMENTS  # WP-F11
 
 
 def test_plan_with_locations(prod: Path) -> None:
