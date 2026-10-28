@@ -46,8 +46,20 @@ if TYPE_CHECKING:
     from karagoz.studio.draw import MuseImageLike
 
 SHORT_PROMPT = "Read BRIEF.md in the working directory and do exactly what it says."
-DEPARTMENTS = ["location", "director", "voice", "continuity", "layout", "timer", "draw", "render", "edit"]
-CODE_DEPARTMENTS = {"location", "voice", "draw", "render", "edit"}
+DEPARTMENTS = [
+    "location",
+    "director",
+    "voice",
+    "continuity",
+    "layout",
+    "timer",
+    "draw",
+    "render",
+    "gate",
+    "check",
+    "edit",
+]
+CODE_DEPARTMENTS = {"location", "voice", "draw", "render", "edit", "gate", "check"}
 
 DEFAULT_CARRIER = "muse-exec"
 DEFAULT_MAX_STEPS = 40
@@ -66,6 +78,32 @@ def _default_work_root() -> Path:
     if override:
         return Path(override)
     return Path.home() / ".karagoz-anim" / "work"
+
+
+def _default_guide_dir() -> Path:
+    return _default_skills_dir().parent.parent / "guide"
+
+
+def _review_on(prod: Path, episode: str) -> bool:
+    """True when <episode>/studio.yaml says review: on (default off; YAML 1.1 off -> False is off)."""
+    try:
+        text = (prod / episode / "studio.yaml").read_text(encoding="utf-8")
+    except OSError:
+        return False
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return False
+    if not isinstance(data, dict):
+        return False
+    value = data.get("review", "off")
+    if value is True:
+        return True
+    if value is False or value is None:
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() == "on"
+    return False
 
 
 def _default_checker(episode_dir: Path, outputs: list[str]) -> list[Finding]:
@@ -304,10 +342,34 @@ def plan_tasks(prod: Path, episode: str) -> list[Task]:
                 files_out=[f"{episode}/render/{shot.id}.mp4"],
             )
         )
+        if _review_on(prod, episode):
+            manifest = f"{episode}/assets/{shot.id}/manifest.json"
+            tasks.append(
+                Task(
+                    id=f"{shot.id}/gate",
+                    inputs=[f"{shot.id}/render"],
+                    files_in=[poses, xsheet, manifest, f"{episode}/continuity.yaml"],
+                    files_out=[f"{episode}/review/{shot.id}/gate.json"],
+                )
+            )
+            tasks.append(
+                Task(
+                    id=f"{shot.id}/check",
+                    inputs=[f"{shot.id}/render"],
+                    files_in=[poses, xsheet, manifest, f"{episode}/render/{shot.id}.mp4"],
+                    files_out=[f"{episode}/review/{shot.id}/checks.json"],
+                )
+            )
+    edit_inputs = [f"{s.id}/render" for s in shots.shots]
+    if _review_on(prod, episode):
+        for s in shots.shots:
+            edit_inputs.append(f"{s.id}/gate")
+        for s in shots.shots:
+            edit_inputs.append(f"{s.id}/check")
     tasks.append(
         Task(
             id="ep/edit",
-            inputs=[f"{s.id}/render" for s in shots.shots],
+            inputs=edit_inputs,
             files_in=[f"{episode}/render/{s.id}.mp4" for s in shots.shots],
             files_out=[f"{episode}/render/{episode}.mp4"],
             needs_approval=True,
@@ -336,6 +398,9 @@ def code_work(
     image: MuseImageLike | None = None,
     on_event: Callable[[dict[str, Any]], None] | None = None,
     sam: SamLike | None = None,
+    work_root: Path | None = None,
+    guide_dir: Path | None = None,
+    skills_dir: Path | None = None,
 ) -> RunResult:
     """Run a code department in the production directory (trusted code, no workdir, no brief)."""
     try:
@@ -407,6 +472,37 @@ def code_work(
 
             out_mp4 = render_episode(prod, episode)
             return RunResult(ok=True, final_text=str(out_mp4), cost_usd=0.0)
+        if department == "gate":
+            from karagoz.engine.gate import gate_shot
+
+            try:
+                out = gate_shot(prod, episode, task.unit)
+            except ValueError as exc:
+                note = f"{type(exc).__name__}: {exc}"
+                out = {"shot": task.unit, "flags": [], "silenced": [], "dropped": 0, "note": note}
+                gate_path = prod / episode / "review" / task.unit / "gate.json"
+                gate_path.parent.mkdir(parents=True, exist_ok=True)
+                gate_path.write_text(json.dumps(out, indent=1) + "\n", encoding="utf-8")
+                return RunResult(ok=True, final_text=note, cost_usd=0.0)
+            return RunResult(ok=True, final_text=f"{len(out['flags'])} flags", cost_usd=0.0)
+        if department == "check":
+            from karagoz.studio import review as review_module
+
+            effective_work = work_root if work_root is not None else _default_work_root()
+            effective_guide = guide_dir if guide_dir is not None else _default_guide_dir()
+            effective_skills = skills_dir if skills_dir is not None else _default_skills_dir()
+            out = review_module.run_checks(
+                prod,
+                episode,
+                task.unit,
+                carrier_factory=review_module.checker_carrier_factory,
+                work_root=effective_work,
+                guide_dir=effective_guide,
+                skills_dir=effective_skills,
+                on_event=on_event,
+            )
+            total = sum(float(p.get("cost_usd", 0.0)) for p in out.get("parts", []))
+            return RunResult(ok=True, final_text=f"{len(out.get('parts', []))} checks", cost_usd=total)
         raise ValueError(f"not a code department: {department!r}")
     except Exception as exc:  # noqa: BLE001 - a code failure fails the task, not the studio
         return RunResult(ok=False, error=f"{type(exc).__name__}: {exc}")
@@ -732,7 +828,15 @@ class Studio:
             dst = self.prod / rel
             previous[rel] = dst.read_bytes() if dst.is_file() else None
         try:
-            result = self.code(self.prod, self.episode, task, on_event=lambda obj: self._on_carrier_event(task.id, obj))
+            result = self.code(
+                self.prod,
+                self.episode,
+                task,
+                on_event=lambda obj: self._on_carrier_event(task.id, obj),
+                work_root=self.work_root,
+                guide_dir=self._effective_guide_dir(),
+                skills_dir=self.skills_dir,
+            )
         except Exception as exc:  # noqa: BLE001 - a code crash fails the task, not the studio
             result = RunResult(ok=False, error=f"{type(exc).__name__}: {exc}")
         self.log.append(task.id, "cost", usd=result.cost_usd, seconds=result.seconds, session=result.session_id)

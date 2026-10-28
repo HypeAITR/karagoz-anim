@@ -150,7 +150,15 @@ def part_sheet(prod: Path, episode: str, shot: str, part: Part, out: Path, *, ce
 
 
 def frame_strip(
-    video: Path, start: int, end: int, out: Path, *, step: int = 1, columns: int | None = None, cell_height: int = 360
+    video: Path,
+    start: int,
+    end: int,
+    out: Path,
+    *,
+    step: int = 1,
+    columns: int | None = None,
+    cell_height: int = 360,
+    crop: tuple[int, int, int, int] | None = None,
 ) -> Path:
     """Frames ``start, start+step, … < end`` of a video as a contact sheet labelled ``f<number>``."""
     if end <= start:
@@ -178,6 +186,18 @@ def frame_strip(
         files = sorted(tmpdir.glob("*.png"))
         if not files:
             raise ValueError(f"no frames extracted from {video} for frames {start}..{end - 1}")
+        if crop is not None:
+            x0, y0, x1, y1 = crop
+            for path in files:
+                with Image.open(path) as opened:
+                    img = opened.convert("RGB")
+                w, h = img.size
+                cx0 = max(0, min(w, x0))
+                cy0 = max(0, min(h, y0))
+                cx1 = max(0, min(w, x1))
+                cy1 = max(0, min(h, y1))
+                if cx1 > cx0 and cy1 > cy0:
+                    img.crop((cx0, cy0, cx1, cy1)).save(path, format="PNG")
         labels = [f"f{n}" for n in expected[: len(files)]]
         return contact_sheet(files, out, labels=labels, columns=columns, cell_height=cell_height)
 

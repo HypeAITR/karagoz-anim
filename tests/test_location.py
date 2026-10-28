@@ -115,8 +115,20 @@ def studio(prod: Path, skills: Path, tmp_path: Path, agent: FakeAgent, code: Fak
 
 
 def test_departments() -> None:
-    assert DEPARTMENTS == ["location", "director", "voice", "continuity", "layout", "timer", "draw", "render", "edit"]
-    assert {"location", "voice", "draw", "render", "edit"} == CODE_DEPARTMENTS
+    assert DEPARTMENTS == [
+        "location",
+        "director",
+        "voice",
+        "continuity",
+        "layout",
+        "timer",
+        "draw",
+        "render",
+        "gate",
+        "check",
+        "edit",
+    ]
+    assert {"location", "voice", "draw", "render", "edit", "gate", "check"} == CODE_DEPARTMENTS
 
 
 def test_plan_with_locations(prod: Path) -> None:
