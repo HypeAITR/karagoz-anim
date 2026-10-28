@@ -72,6 +72,18 @@ def _copy_key(entry: dict[str, Any]) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) else 0
 
 
+def _kept_note_applies(kept_content: dict[str, Any], fid: str, finding: dict[str, Any]) -> bool:
+    """True when the kept note for fid still belongs to this finding."""
+    entry = kept_content.get(fid)
+    if entry is None:
+        return True  # data from before kept-content.json existed
+    if not isinstance(entry, dict):
+        return False
+    drawing = finding.get("drawing")
+    drawing_norm = drawing if isinstance(drawing, str) else None
+    return entry.get("drawing") == drawing_norm and entry.get("problem") == finding.get("problem")
+
+
 def write_review(prod: Path, episode: str, shot: str) -> Path:
     """Write review/<shot>/REVIEW.md for a reader who decides; return its path."""
     review_dir = _review_dir(prod, episode, shot)
@@ -101,6 +113,7 @@ def write_review(prod: Path, episode: str, shot: str) -> Path:
     parts: list[dict[str, Any]] = [p for p in raw_parts if isinstance(p, dict)]
 
     kept_data = _read_json_dict(review_dir / "kept.json") or {}
+    kept_content = _read_json_dict(review_dir / "kept-content.json") or {}
     ack_data = _read_json_dict(review_dir / "gate-ack.json") or {}
 
     total_findings = 0
@@ -251,8 +264,10 @@ def write_review(prod: Path, episode: str, shot: str) -> Path:
                 reason = finding.get("reason", "")
                 text = f"- {fid} [{severity}] {look} {target}: {problem} — {reason}"
                 kept_note = kept_data.get(fid)
-                if isinstance(kept_note, str):
-                    text += f" (kept: {kept_note})"
+                _applies = isinstance(kept_note, str) and _kept_note_applies(kept_content, fid, finding)
+                _kept_text = f" (kept: {kept_note})" if _applies else ""
+                if _kept_text:
+                    text += _kept_text
                 lines.append(text)
 
     # --- commands ---
@@ -266,11 +281,17 @@ def write_review(prod: Path, episode: str, shot: str) -> Path:
 
     out = review_dir / "REVIEW.md"
     out.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (review_dir / "deciding.json").unlink(missing_ok=True)
     return out
 
 
 def _count_round_or_hold(studio: Studio, shot: str) -> int:
     """Return the round being decided; on RoundLimit hold the review and re-raise."""
+    deciding = _read_json_dict(_review_dir(studio.prod, studio.episode, shot) / "deciding.json")
+    if deciding is not None:
+        deciding_round = deciding.get("round")
+        if isinstance(deciding_round, int) and not isinstance(deciding_round, bool):
+            return deciding_round
     prod = studio.prod
     episode = studio.episode
     current = current_round(prod, episode, shot)
@@ -281,6 +302,9 @@ def _count_round_or_hold(studio: Studio, shot: str) -> int:
         if review_id in studio.board.tasks:
             studio.hold(review_id, ROUND_LIMIT_NOTE)
         raise
+    deciding_path = _review_dir(prod, episode, shot) / "deciding.json"
+    deciding_path.parent.mkdir(parents=True, exist_ok=True)
+    deciding_path.write_text(json.dumps({"round": current}) + "\n", encoding="utf-8")
     return current
 
 
@@ -298,10 +322,16 @@ def redraw(studio: Studio, shot: str, drawings: list[str], note: str) -> list[st
         char_dir = assets / char
         history = char_dir / "history"
         history.mkdir(parents=True, exist_ok=True)
-        (char_dir / f"{name}.png").rename(history / f"{name}.{current}.png")
+        stem = f"{name}.{current}"
+        if (history / f"{stem}.png").exists():
+            suffix = 2
+            while (history / f"{stem}.{suffix}.png").exists():
+                suffix += 1
+            stem = f"{stem}.{suffix}"
+        (char_dir / f"{name}.png").rename(history / f"{stem}.png")
         landmarks = char_dir / f"{name}.landmarks.json"
         if landmarks.is_file():
-            landmarks.rename(history / f"{name}.{current}.landmarks.json")
+            landmarks.rename(history / f"{stem}.landmarks.json")
     review_dir = _review_dir(prod, episode, shot)
     review_dir.mkdir(parents=True, exist_ok=True)
     redraw_path = review_dir / "redraw.json"
@@ -327,6 +357,7 @@ def keep(studio: Studio, shot: str, item_id: str, note: str) -> None:
     if item_id.startswith("finding:"):
         checks = _read_json_dict(review_dir / "checks.json")
         known: set[str] = set()
+        by_id: dict[str, dict[str, Any]] = {}
         if checks is not None:
             raw_parts = checks.get("parts")
             if isinstance(raw_parts, list):
@@ -343,6 +374,7 @@ def keep(studio: Studio, shot: str, item_id: str, note: str) -> None:
                     for index, finding in enumerate(findings, start=1):
                         if isinstance(finding, dict):
                             known.add(_finding_id(part_id, copy, index))
+                            by_id[_finding_id(part_id, copy, index)] = finding
         if item_id not in known:
             raise ValueError(f"unknown finding: {item_id}")
         kept_path = review_dir / "kept.json"
@@ -350,6 +382,15 @@ def keep(studio: Studio, shot: str, item_id: str, note: str) -> None:
         kept[item_id] = note
         review_dir.mkdir(parents=True, exist_ok=True)
         kept_path.write_text(json.dumps(kept, indent=1) + "\n", encoding="utf-8")
+        kept_finding = by_id[item_id]
+        kept_drawing = kept_finding.get("drawing")
+        content_path = review_dir / "kept-content.json"
+        content = _read_json_dict(content_path) or {}
+        content[item_id] = {
+            "drawing": kept_drawing if isinstance(kept_drawing, str) else None,
+            "problem": kept_finding.get("problem"),
+        }
+        content_path.write_text(json.dumps(content, indent=1) + "\n", encoding="utf-8")
     else:
         gate = _read_json_dict(review_dir / "gate.json")
         candidates: list[dict[str, Any]] = []
