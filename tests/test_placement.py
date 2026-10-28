@@ -119,7 +119,13 @@ def test_sitting_key_on_the_seat(result: Any) -> None:
 
 def test_standing_key_on_the_floor(result: Any) -> None:
     p = result[0]["naime"]["p2"]
-    assert (p.scale, p.x, p.y, p.anchor, p.depth) == (pytest.approx(0.25), 642, 411, "foot", 874)
+    assert (p.scale, p.x, p.y, p.anchor, p.depth) == (
+        pytest.approx(0.25),
+        702,
+        411,
+        "foot",
+        874,
+    )  # WP-11f: feet where the seated key had them
     assert p.occluders == ("coffee_table",)  # the armrest is behind someone standing in front of the sofa
 
 
@@ -127,13 +133,13 @@ def test_inbetween_anchored_on_the_least_moving_point(result: Any) -> None:
     p = result[0]["naime"]["p1-p2.1"]
     # sit -> stand (WP-11d): the feet stay planted, so the foot is lerped from (862, 714) to (802, 874) -> (832, 794)
     # (the hip would move least, 83 px, but a crouching inbetween anchored there floats: D41)
-    assert (p.scale, p.x, p.y, p.anchor) == (pytest.approx(0.236), 667, 360, "foot")
+    assert (p.scale, p.x, p.y, p.anchor) == (pytest.approx(0.236), 697, 360, "foot")
     assert (p.depth, p.occluders) == (874, ("coffee_table",))  # k = 1 > n / 2: key B's
 
 
 def test_inbetween_without_points_is_lerped(result: Any) -> None:
     p = result[0]["naime"]["p2-p1.1"]
-    assert (p.scale, p.x, p.y, p.anchor) == (pytest.approx(0.225), 672, 388, "fallback")
+    assert (p.scale, p.x, p.y, p.anchor) == (pytest.approx(0.225), 702, 388, "fallback")
     assert (p.depth, p.occluders) == (848, ("sofa_armrest_left", "coffee_table"))
 
 

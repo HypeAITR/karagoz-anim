@@ -41,17 +41,17 @@ def placed(c: CharacterInput) -> dict[str, DrawingPlacement]:
 
 def test_keys_are_as_before() -> None:
     p = placed(naime(PoseInfo(support="sit")))
-    assert (p["p1"].scale, p["p1"].x, p["p1"].y, p["p1"].anchor) == (pytest.approx(S1), 645, 419, "foot")
+    assert (p["p1"].scale, p["p1"].x, p["p1"].y, p["p1"].anchor) == (pytest.approx(S1), 704, 419, "foot")  # WP-11f
     assert (p["p2"].scale, p["p2"].x, p["p2"].y, p["p2"].anchor) == (pytest.approx(S2), 704, 370, "hip")
 
 
 def test_sitting_down_keeps_the_feet_on_the_floor_line() -> None:
     p = placed(naime(PoseInfo(support="sit")))["p1-p2.1"]
     assert p.anchor == "foot" and p.scale == pytest.approx(SI)
-    # key feet on screen: (802.3, 874.3) standing, (861.3, 714.2) seated; halfway: (831.8, 794.2)
-    assert p.x + 700 * p.scale == pytest.approx(831.8, abs=1)
+    # key feet on screen (WP-11f): (861.3, 874.3) standing, (861.3, 714.2) seated: the feet do not slide
+    assert p.x + 700 * p.scale == pytest.approx(861.3, abs=1)
     assert p.y + 1800 * p.scale == pytest.approx(794.2, abs=1)
-    assert (p.x, p.y) == (684, 415)
+    assert (p.x, p.y) == (714, 415)
 
 
 def test_getting_up_is_the_same_rule() -> None:
