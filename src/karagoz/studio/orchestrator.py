@@ -532,11 +532,27 @@ def code_work(
             effective_work = work_root if work_root is not None else _default_work_root()
             effective_guide = guide_dir if guide_dir is not None else _default_guide_dir()
             effective_skills = skills_dir if skills_dir is not None else _default_skills_dir()
+            factory = review_module.checker_carrier_factory
+            if factory is None:
+                checker_name = "api"
+                checker_model = review_module.CHECKER_MODEL
+                try:
+                    studio_cfg = yaml.safe_load((prod / episode / "studio.yaml").read_text(encoding="utf-8"))
+                except (OSError, yaml.YAMLError):
+                    studio_cfg = None
+                if isinstance(studio_cfg, dict):
+                    carriers_cfg = studio_cfg.get("carriers")
+                    if isinstance(carriers_cfg, dict) and carriers_cfg.get("checker") is not None:
+                        checker_name = str(carriers_cfg["checker"])
+                    models_cfg = studio_cfg.get("models")
+                    if isinstance(models_cfg, dict) and models_cfg.get("checker") is not None:
+                        checker_model = str(models_cfg["checker"])
+                factory = review_module.make_checker_factory(checker_name, checker_model)
             out = review_module.run_checks(
                 prod,
                 episode,
                 task.unit,
-                carrier_factory=review_module.checker_carrier_factory,
+                carrier_factory=factory,
                 work_root=effective_work,
                 guide_dir=effective_guide,
                 skills_dir=effective_skills,
@@ -599,6 +615,7 @@ class Studio:
     _questions: QuestionPolicy = field(init=False, default_factory=QuestionPolicy, repr=False)
     _carrier_map: dict[str, str] = field(init=False, default_factory=dict, repr=False)
     _max_steps_map: dict[str, int] = field(init=False, default_factory=dict, repr=False)
+    _models_map: dict[str, str] = field(init=False, default_factory=dict, repr=False)
     _until: str | None = field(init=False, default=None, repr=False)
     _only: str | None = field(init=False, default=None, repr=False)
     _stop: bool = field(init=False, default=False, repr=False)
@@ -639,6 +656,10 @@ class Studio:
         if not isinstance(steps_cfg, dict):
             raise ValueError("studio.yaml: max_steps must be a mapping")
         self._max_steps_map = {str(k): int(v) for k, v in steps_cfg.items()}
+        models_cfg = cfg.get("models", {})
+        if not isinstance(models_cfg, dict):
+            raise ValueError("studio.yaml: models must be a mapping")
+        self._models_map = {str(k): str(v) for k, v in models_cfg.items()}
         self._questions = QuestionPolicy.from_config(cfg.get("questions"))
         tasks_path = self._run_dir / "tasks.json"
         if tasks_path.exists():
@@ -853,6 +874,7 @@ class Studio:
             prompt=SHORT_PROMPT,
             workdir=workdir,
             max_steps=self._max_steps_map.get(task.department, DEFAULT_MAX_STEPS),
+            model=self._models_map.get(task.department),
         )
         try:
             result = carrier.run(brief, on_event=lambda obj: self._on_carrier_event(task.id, obj))
@@ -936,7 +958,14 @@ class Studio:
             return
         from karagoz.studio.loop import INTERVIEW_PROMPT
 
-        brief = Brief(task_id=task.id, prompt=INTERVIEW_PROMPT, workdir=workdir, max_steps=5, session_id=session_id)
+        brief = Brief(
+            task_id=task.id,
+            prompt=INTERVIEW_PROMPT,
+            workdir=workdir,
+            max_steps=5,
+            session_id=session_id,
+            model=self._models_map.get(task.department),
+        )
         try:
             answer = carrier.run(brief, on_event=lambda obj: self._on_carrier_event(task.id, obj))
         except Exception as exc:  # noqa: BLE001 - a failing interview never fails the task

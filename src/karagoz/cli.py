@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from karagoz import __version__, config
+from karagoz.studio.api_carrier import ApiCarrier
 from karagoz.studio.carriers import Carrier, HumanCarrier, MuseExecCarrier
 from karagoz.studio.orchestrator import Studio
 from karagoz.studio.tasks import Change
@@ -67,6 +68,7 @@ def cmd_voice(args: argparse.Namespace) -> int:
 def _open_studio(prod: str, episode: str) -> Studio:
     carriers: dict[str, Carrier] = {
         "muse-exec": MuseExecCarrier(),
+        "api": ApiCarrier(),
         "human": HumanCarrier(Path(prod) / episode / "run" / "human_briefs"),
     }
     studio = Studio(prod=Path(prod), episode=episode, carriers=carriers)
