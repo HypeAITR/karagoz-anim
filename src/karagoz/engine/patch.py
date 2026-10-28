@@ -123,21 +123,47 @@ def make_patch(
     return Patch(image=Image.fromarray(patch_arr), x=x0, y=y0)
 
 
+def paper_mask(img: Image.Image, *, tolerance: int = 40) -> np.ndarray:
+    """Return True for character pixels, False for paper connected to the border."""
+    arr = np.array(img.convert("RGB"))
+    thresh = 255 - tolerance
+    white = (arr[:, :, 0] >= thresh) & (arr[:, :, 1] >= thresh) & (arr[:, :, 2] >= thresh)
+    h, w = white.shape
+    num, labels = cv2.connectedComponents(white.astype(np.uint8), connectivity=4)
+    if num > 1:
+        border = np.concatenate([labels[0, :], labels[-1, :], labels[:, 0], labels[:, -1]])
+        bg_labels = {int(v) for v in np.unique(border) if int(v) != 0}
+        background = np.isin(labels, list(bg_labels)) if bg_labels else np.zeros((h, w), dtype=bool)
+    else:
+        background = np.zeros((h, w), dtype=bool)
+    return ~background
+
+
 def apply_patch(base: Image.Image, patch: Patch) -> Image.Image:
-    """Return a new RGBA image with ``patch`` blended onto ``base``; the base alpha is unchanged."""
+    """Return a new RGBA image with ``patch`` composited over ``base`` (Porter-Duff over)."""
     base_rgba = base.convert("RGBA")
     base_w, base_h = base_rgba.size
-    out = np.array(base_rgba).astype(np.float32)
-    src = np.array(patch.image.convert("RGBA")).astype(np.float32)
+    out = np.array(base_rgba).astype(np.float64)
+    src = np.array(patch.image.convert("RGBA")).astype(np.float64)
+    mask = paper_mask(patch.image)
     patch_h, patch_w = src.shape[0], src.shape[1]
     dx0, dy0 = max(patch.x, 0), max(patch.y, 0)
     dx1, dy1 = min(patch.x + patch_w, base_w), min(patch.y + patch_h, base_h)
     if dx1 > dx0 and dy1 > dy0:
-        tile = src[dy0 - patch.y : dy0 - patch.y + (dy1 - dy0), dx0 - patch.x : dx0 - patch.x + (dx1 - dx0)]
+        sy0, sx0 = dy0 - patch.y, dx0 - patch.x
+        h, w = dy1 - dy0, dx1 - dx0
+        tile = src[sy0 : sy0 + h, sx0 : sx0 + w]
         region = out[dy0:dy1, dx0:dx1]
-        weight = tile[:, :, 3:4] / 255.0 * region[:, :, 3:4] / 255.0
-        inv = 1.0 - weight
-        region[:, :, :3] = np.round(tile[:, :, :3] * weight + region[:, :, :3] * inv)
+        char = mask[sy0 : sy0 + h, sx0 : sx0 + w].astype(np.float64)
+        pa = tile[:, :, 3] / 255.0 * char
+        ba = region[:, :, 3] / 255.0
+        out_a = pa + ba * (1.0 - pa)
+        valid = out_a > 0
+        num = tile[:, :, :3] * pa[:, :, None] + region[:, :, :3] * ba[:, :, None] * (1.0 - pa[:, :, None])
+        rgb = np.empty_like(region[:, :, :3])
+        rgb[valid] = num[valid] / out_a[valid, None]
+        region[valid, :3] = np.round(rgb[valid])
+        region[valid, 3] = np.round(255.0 * out_a[valid])
     return Image.fromarray(out.astype(np.uint8))
 
 
