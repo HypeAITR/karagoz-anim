@@ -168,7 +168,16 @@ def test_json_and_determinism(result: Any) -> None:
     j = to_json(*result)
     assert j == json.loads(json.dumps(j))
     occ = ["sofa_armrest_left", "coffee_table"]
-    expected = {"scale": 0.2, "x": 702, "y": 364, "mirror": False, "anchor": "hip", "occluders": occ, "depth": 848}
+    expected = {
+        "scale": 0.2,
+        "x": 702,
+        "y": 364,
+        "mirror": False,
+        "anchor": "hip",
+        "occluders": occ,
+        "depth": 848,
+        "holes": [],
+    }
     assert j["characters"]["naime"]["p1"] == expected
     assert j["warnings"] == result[1]
     assert solve([NAIME, RECEP, DENIZ, VELI, ZEKI], REGIONS) == result

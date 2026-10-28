@@ -171,7 +171,17 @@ def _composite_layers_placement(
                     continue
                 if mask.shape != (th, tw):
                     continue
-                mask_bool = mask if mask.dtype == bool else (mask > 0)
+                mask_bool = mask.copy() if mask.dtype == bool else mask > 0
+                for h_obj, h_box in pl.holes:
+                    if h_obj != name:
+                        continue
+                    hx0, hy0, hx1, hy1 = h_box
+                    cx0 = max(0, hx0)
+                    cy0 = max(0, hy0)
+                    cx1 = min(tw, hx1)
+                    cy1 = min(th, hy1)
+                    if cx1 > cx0 and cy1 > cy0:
+                        mask_bool[cy0:cy1, cx0:cx1] = False
                 base_arr = np.array(base)
                 base_arr[mask_bool] = bg_arr[mask_bool]
                 base = Image.fromarray(base_arr)
