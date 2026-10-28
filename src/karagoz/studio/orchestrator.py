@@ -9,10 +9,13 @@ trusted Python straight in the production directory.
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
+import re
 import shutil
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -24,6 +27,16 @@ from karagoz.spec import Finding, Lines, Shots, SpecError, check_episode, kind_o
 from karagoz.studio.briefs import make_brief
 from karagoz.studio.budget import Budget, Verdict
 from karagoz.studio.carriers import Brief, Carrier, RunResult
+from karagoz.studio.context import (
+    Section,
+    apply_override,
+    compile_context,
+    load_sections,
+    read_lessons,
+    select_lessons,
+    select_sections,
+    shot_summary,
+)
 from karagoz.studio.events import Clock, EventLog
 from karagoz.studio.questions import QuestionPolicy, allowance, difficulty, parse_question
 from karagoz.studio.tasks import Board, Change, State, Task
@@ -405,6 +418,7 @@ class Studio:
     episode: str
     carriers: dict[str, Carrier]  # by carrier name; tests inject fakes
     skills_dir: Path = field(default_factory=_default_skills_dir)
+    guide_dir: Path | None = None
     work_root: Path = field(default_factory=_default_work_root)
     clock: Clock | None = None  # passed to EventLog
     checker: Checker | None = None
@@ -420,6 +434,8 @@ class Studio:
     _until: str | None = field(init=False, default=None, repr=False)
     _only: str | None = field(init=False, default=None, repr=False)
     _stop: bool = field(init=False, default=False, repr=False)
+    _sections: dict[str, Section] | None = field(init=False, default=None, repr=False)
+    _pulled: set[tuple[str, int, str]] = field(init=False, default_factory=set, repr=False)
 
     @property
     def _episode_dir(self) -> Path:
@@ -428,6 +444,11 @@ class Studio:
     @property
     def _run_dir(self) -> Path:
         return self._episode_dir / "run"
+
+    def _effective_guide_dir(self) -> Path:
+        if self.guide_dir is not None:
+            return self.guide_dir
+        return self.skills_dir.parent.parent / "guide"
 
     def load(self) -> None:
         """Read studio.yaml, the board, the budget and the event log."""
@@ -463,6 +484,11 @@ class Studio:
             data: dict[str, Any] = json.loads(budget_path.read_text(encoding="utf-8"))
             self.budget.spent = dict(Budget.from_json(data).spent)
         self.log = EventLog(self._run_dir / "events.jsonl", clock=self.clock)
+        guide = self._effective_guide_dir()
+        if (guide / "sections").is_dir():
+            self._sections = load_sections(guide)
+        else:
+            self._sections = None
 
     def step(self) -> list[Change]:
         """Add new tasks, refresh, run every READY task once, save board + budget."""
@@ -630,6 +656,7 @@ class Studio:
             result = RunResult(ok=False, error=f"{type(exc).__name__}: {exc}")
         self.log.append(task.id, "cost", usd=result.cost_usd, seconds=result.seconds, session=result.session_id)
         self.budget.charge(task.unit, result.cost_usd)
+        self._carry_notes_back(task, workdir)
         if result.pending:
             return changes
         decisions_path = workdir / "DECISIONS.md"
@@ -762,6 +789,66 @@ class Studio:
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 dst.write_bytes(src.read_bytes())
                 previous.append(rel)
+        context_text: str | None = None
+        if self._sections is not None:
+            guide = self._effective_guide_dir()
+            sections_dir = workdir / "sections"
+            sections_dir.mkdir(parents=True, exist_ok=True)
+            for src in sorted((guide / "sections").glob("*.md")):
+                shutil.copy(src, sections_dir / src.name)
+            dept = task.department
+            prod_notes = self.prod / "notes" / dept
+            work_notes = workdir / "notes" / dept
+            if prod_notes.is_dir():
+                shutil.copytree(prod_notes, work_notes, dirs_exist_ok=True)
+            else:
+                work_notes.mkdir(parents=True, exist_ok=True)
+            unit = task.id.rpartition("/")[0]
+            shot: str | None = unit if re.fullmatch(r"sh\d+", unit) else None
+            sel = select_sections(dept, self.prod, self.episode, shot, self._sections)
+            override_data: dict[str, Any] | None = None
+            try:
+                raw_override = yaml.safe_load((self._run_dir / "context.yaml").read_text(encoding="utf-8"))
+            except OSError:
+                raw_override = None
+            except yaml.YAMLError:
+                raw_override = None
+            if isinstance(raw_override, dict):
+                entry = raw_override.get(task.id)
+                if isinstance(entry, dict):
+                    override_data = {str(k): v for k, v in entry.items()}
+            sel = apply_override(sel, override_data, self._sections)
+            if dept in ("continuity", "layout", "timer", "director"):
+                check_cmd: str | None = f'"{sys.executable}" -m karagoz check {self.episode}'
+            else:
+                check_cmd = None
+            wanted: set[str] = set(sel.given)
+            for sid in sel.given:
+                sec = self._sections.get(sid)
+                if sec is not None:
+                    wanted.update(sec.tags)
+            lessons = select_lessons(read_lessons(work_notes / "LESSONS.md"), wanted)
+            summary = shot_summary(self.prod, self.episode, shot)
+            context_text = compile_context(
+                task_id=task.id,
+                department=dept,
+                guide_dir=guide,
+                skills_dir=self.skills_dir,
+                sections=self._sections,
+                selection=sel,
+                lessons=lessons,
+                summary=summary,
+                check_command=check_cmd,
+            )
+            self.log.append(
+                task.id,
+                "context",
+                sections=list(sel.given),
+                fallback=sel.fallback,
+                reasons=dict(sel.reasons),
+                words=len(context_text.split()),
+                lessons=[lesson.number for lesson in lessons],
+            )
         brief_text = make_brief(
             task,
             self.prod,
@@ -770,12 +857,69 @@ class Studio:
             self.skills_dir,
             questions_left=self._questions_left(task),
             previous=previous,
+            context=context_text,
         )
         (workdir / "BRIEF.md").write_text(brief_text, encoding="utf-8")
         target = self._run_dir / "briefs" / f"{task.id.replace('/', '__')}.md"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(brief_text, encoding="utf-8")
         return workdir
+
+    def _carry_notes_back(self, task: Task, workdir: Path) -> None:
+        """Copy the agent's notes back to the production; keep history when lessons vanish."""
+        if self._sections is None:
+            return
+        dept = task.department
+        work_notes = workdir / "notes" / dept
+        if not work_notes.is_dir():
+            return
+        prod_notes = self.prod / "notes" / dept
+        work_dec = work_notes / "DECISIONS.md"
+        if work_dec.is_file():
+            try:
+                new_text = work_dec.read_text(encoding="utf-8")
+            except OSError:
+                new_text = ""
+            try:
+                old_text = (prod_notes / "DECISIONS.md").read_text(encoding="utf-8")
+            except OSError:
+                old_text = ""
+            if new_text and new_text != old_text:
+                old_lines = old_text.splitlines()
+                new_lines = new_text.splitlines()
+                if len(new_lines) >= len(old_lines) and new_lines[: len(old_lines)] == old_lines:
+                    added = new_lines[len(old_lines) :]
+                else:
+                    old_set = set(old_lines)
+                    added = [line for line in new_lines if line not in old_set]
+                if "\n".join(added).strip():
+                    self.log.append(task.id, "decision", text="\n".join(added))
+        work_lessons = work_notes / "LESSONS.md"
+        prod_lessons = prod_notes / "LESSONS.md"
+        if work_lessons.is_file() and prod_lessons.is_file():
+            old_numbers = {lesson.number for lesson in read_lessons(prod_lessons)}
+            new_numbers = {lesson.number for lesson in read_lessons(work_lessons)}
+            missing = sorted(old_numbers - new_numbers)
+            if missing:
+                history_dir = prod_notes / "history"
+                history_dir.mkdir(parents=True, exist_ok=True)
+                history_path = history_dir / f"LESSONS.{task.id.replace('/', '__')}.{task.attempts}.md"
+                try:
+                    history_path.write_bytes(prod_lessons.read_bytes())
+                except OSError:
+                    pass
+                else:
+                    numbers = ", ".join(str(n) for n in missing)
+                    self.log.append(
+                        task.id,
+                        "note",
+                        text=f"notes: lessons {numbers} removed or renumbered (previous file kept in history/)",
+                    )
+        prod_notes.mkdir(parents=True, exist_ok=True)
+        for src in work_notes.glob("*.md"):
+            if src.is_file():
+                with contextlib.suppress(OSError):
+                    (prod_notes / src.name).write_bytes(src.read_bytes())
 
     def _shots_for_questions(self) -> Shots | None:
         try:
@@ -803,11 +947,16 @@ class Studio:
 
     def _report_outside_writes(self, task: Task, workdir: Path) -> None:
         placed = set(task.files_in) | {"style.yaml", "BRIEF.md", "QUESTION.md", "DECISIONS.md"} | set(task.files_out)
-        outside = sorted(
-            path.relative_to(workdir).as_posix()
-            for path in workdir.rglob("*")
-            if path.is_file() and path.relative_to(workdir).as_posix() not in placed
-        )
+        notes_prefix = f"notes/{task.department}/"
+        outside: list[str] = []
+        for path in workdir.rglob("*"):
+            if not path.is_file():
+                continue
+            rel = path.relative_to(workdir).as_posix()
+            if rel in placed or rel.startswith("sections/") or rel.startswith(notes_prefix):
+                continue
+            outside.append(rel)
+        outside.sort()
         if outside:
             self.log.append(task.id, "note", text=f"wrote outside its files: {', '.join(outside)}")
 
@@ -862,6 +1011,16 @@ class Studio:
             if path is not None:
                 fields["path"] = path
             self.log.append(task_id, "agent", **fields)
+            text_value = payload.get("text")
+            if isinstance(text_value, str) and text_value:
+                first_line = text_value.split("\n", 1)[0]
+                for section_id in re.findall(r"sections[\\/]+([a-z0-9-]+)\.md", first_line):
+                    current = self.board.tasks.get(task_id)
+                    attempt = current.attempts if current is not None else 0
+                    pull_key = (task_id, attempt, section_id)
+                    if pull_key not in self._pulled:
+                        self._pulled.add(pull_key)
+                        self.log.append(task_id, "pull", section=section_id)
         elif isinstance(payload_type, str) and payload_type.startswith("run.terminal."):
             text = payload.get("text", "")
             text = text[:500] if isinstance(text, str) else ""
