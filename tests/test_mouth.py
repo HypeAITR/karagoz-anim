@@ -101,10 +101,11 @@ def test_same_shape_merges_and_consonants_make_no_shape() -> None:
     assert track("ata", [0.0, 0.1, 0.2], [0.1, 0.2, 0.3])[1] == (20, 35, "D", "auto")
 
 
-def test_short_cue_dropped() -> None:
-    # a@0 -> D 20; e@0.05 -> C at 24+1-2=23; a@0.1 -> D at 24+2-2=24 -> C is 1 frame: dropped, D continues
+def test_short_cue_takes_a_frame_from_the_next() -> None:
+    # a@0 -> D 20; e@0.05 -> C at 24+1-2=23; a@0.1 -> D at 24+2-2=24 -> C is 1 frame; the next D (24..31) can give
+    # one frame and keep min_hold (WP-29): C 23..25, D 25..31 (end: 24 + 3 + 4)
     cues = track("aea", [0.0, 0.05, 0.1], [0.05, 0.1, 0.15])
-    assert cues[1][:3] == (20, 31, "D")  # end: 24 + 3 + 4
+    assert [c[:3] for c in cues[1:4]] == [(20, 23, "D"), (23, 25, "C"), (25, 31, "D")]
 
 
 def test_turkish_capital_i() -> None:

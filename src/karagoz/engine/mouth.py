@@ -40,6 +40,9 @@ class _Cue:
     src: Literal["auto", "edit"] = "auto"
 
 
+OPENNESS: dict[MouthShape, int] = {"X": 0, "A": 0, "B": 1, "F": 1, "G": 1, "C": 2, "E": 2, "H": 2, "D": 3}
+
+
 def _mouth_int(mouth: MouthLive, name: str) -> int:
     extra = mouth.model_extra or {}
     raw = extra.get(name)
@@ -108,18 +111,58 @@ def _apply_min_hold(cues: list[_Cue], min_hold: int) -> list[_Cue]:
                     cues[i].end = new_end
                     nxt.start = new_end
                     i += 1
-        elif i == 0:
-            cues.pop(0)
         else:
-            prev = cues[i - 1]
-            prev.end = cues[i].end
-            cues.pop(i)
-            if i < len(cues) and cues[i - 1].shape == cues[i].shape and cues[i - 1].src == cues[i].src:
-                first = cues[i - 1].letters or ""
-                second = cues[i].letters or ""
-                cues[i - 1].end = cues[i].end
-                cues[i - 1].letters = (first + second) or None
+            deficit = min_hold - length
+            if (
+                cues[i].src == "auto"
+                and i + 1 < len(cues)
+                and cues[i + 1].src == "auto"
+                and cues[i + 1].end - cues[i + 1].start - deficit >= min_hold
+            ):
+                cues[i].end += deficit
+                cues[i + 1].start += deficit
+                i += 1
+            elif (
+                i > 0
+                and cues[i].src == "auto"
+                and cues[i - 1].src == "auto"
+                and OPENNESS[cues[i].shape] > OPENNESS[cues[i - 1].shape]
+                and cues[i - 1].end - cues[i - 1].start - deficit >= min_hold
+            ):
+                cues[i].start -= deficit
+                cues[i - 1].end -= deficit
+                i += 1
+            elif (
+                i > 0
+                and cues[i].src == "auto"
+                and cues[i - 1].src == "auto"
+                and cues[i - 1].shape not in ("A", "X")
+                and OPENNESS[cues[i].shape] > OPENNESS[cues[i - 1].shape]
+            ):
+                prev_start = cues[i - 1].start
+                cues.pop(i - 1)
+                i -= 1
+                cues[i].start = prev_start
+                if i > 0 and cues[i - 1].shape == cues[i].shape and cues[i - 1].src == cues[i].src:
+                    first = cues[i - 1].letters or ""
+                    second = cues[i].letters or ""
+                    cues[i - 1].end = cues[i].end
+                    cues[i - 1].letters = (first + second) or None
+                    cues.pop(i)
+                else:
+                    i += 1
+            elif i == 0:
+                cues.pop(0)
+            else:
+                prev = cues[i - 1]
+                prev.end = cues[i].end
                 cues.pop(i)
+                if i < len(cues) and cues[i - 1].shape == cues[i].shape and cues[i - 1].src == cues[i].src:
+                    first = cues[i - 1].letters or ""
+                    second = cues[i].letters or ""
+                    cues[i - 1].end = cues[i].end
+                    cues[i - 1].letters = (first + second) or None
+                    cues.pop(i)
     return cues
 
 
