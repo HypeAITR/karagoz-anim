@@ -10,7 +10,7 @@ import urllib.request
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import ValidationError
@@ -21,8 +21,10 @@ from karagoz.spec import Align, Lines, load
 BASE_URL = "https://api.elevenlabs.io"
 TIMEOUT_SECONDS = 300.0
 OUTPUT_FORMAT = "mp3_44100_128"
+SFX_MODEL = "eleven_text_to_sound_v2"
 
 Transport = Callable[[str, dict[str, Any], dict[str, str]], tuple[int, dict[str, Any]]]
+BytesTransport = Callable[[str, dict[str, Any], dict[str, str]], tuple[int, bytes]]
 
 
 @dataclass(frozen=True)
@@ -44,6 +46,13 @@ class LineAudio:
     cached: bool
 
 
+@dataclass(frozen=True)
+class SoundAudio:
+    sound: str
+    path: Path
+    status: Literal["new", "cached", "provided"]
+
+
 def urllib_transport(url: str, body: dict[str, Any], headers: dict[str, str]) -> tuple[int, dict[str, Any]]:
     """POST JSON with urllib; returns (status, parsed JSON body)."""
     request = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
@@ -60,6 +69,16 @@ def urllib_transport(url: str, body: dict[str, Any], headers: dict[str, str]) ->
         if isinstance(data, dict):
             return err.code, data
         return err.code, {"error": {"message": json.dumps(data)[:300]}}
+
+
+def urllib_bytes_transport(url: str, body: dict[str, Any], headers: dict[str, str]) -> tuple[int, bytes]:
+    """POST JSON with urllib; returns (status, raw response bytes)."""
+    request = urllib.request.Request(url, data=json.dumps(body).encode("utf-8"), headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=TIMEOUT_SECONDS) as response:
+            return response.status, response.read()
+    except urllib.error.HTTPError as err:
+        return err.code, err.read()
 
 
 _VOICE_FIELDS = ("voice_id", "model", "language", "stability", "similarity", "speed", "seed")
@@ -156,6 +175,7 @@ def _without_key(message: str, key: str) -> str:
 @dataclass
 class ElevenLabs:
     transport: Transport = urllib_transport
+    bytes_transport: BytesTransport = urllib_bytes_transport
     api_key: Callable[[], str] = lambda: config.secret("ELEVENLABS_API_KEY")
     base_url: str = BASE_URL
 
@@ -196,10 +216,36 @@ class ElevenLabs:
             raise RuntimeError(f"ElevenLabs: malformed response: {exc}") from exc
         return audio, align
 
+    def sound(self, text: str) -> bytes:
+        """Generate one sound effect; returns the raw MP3 bytes."""
+        key = self.api_key()
+        url = f"{self.base_url}/v1/sound-generation?output_format={OUTPUT_FORMAT}"
+        body: dict[str, Any] = {"text": text, "model_id": SFX_MODEL}
+        headers = {"xi-api-key": key, "Content-Type": "application/json"}
+        status, data = self.bytes_transport(url, body, headers)
+        if status != 200:
+            text_body = data.decode("utf-8", errors="replace")
+            try:
+                parsed: Any = json.loads(text_body)
+            except json.JSONDecodeError:
+                message = text_body
+            else:
+                message = _error_message(parsed) if isinstance(parsed, dict) else text_body
+            raise RuntimeError(f"ElevenLabs HTTP {status}: {_without_key(message, key)[:300]}")
+        if not data:
+            raise RuntimeError("ElevenLabs: empty audio response")
+        return data
+
 
 def cache_key(text: str, voice: VoiceConfig) -> str:
     """sha256 hex of a canonical JSON of the text plus all voice fields."""
     canonical = json.dumps({"text": text, **asdict(voice)}, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def sound_cache_key(description: str) -> str:
+    """sha256 hex of a canonical JSON of the SFX model plus the description."""
+    canonical = json.dumps({"model": SFX_MODEL, "text": description}, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -235,4 +281,41 @@ def synthesize_episode(prod: Path, episode: str, client: ElevenLabs | None = Non
         align_path.write_text(align.model_copy(update={"line": entry.id}).model_dump_json(), encoding="utf-8")
         key_path.write_text(key, encoding="utf-8")
         out.append(LineAudio(line=entry.id, mp3=mp3_path, align=align_path, cached=False))
+    return out
+
+
+def synthesize_sounds(prod: Path, episode: str, client: ElevenLabs | None = None) -> list[SoundAudio]:
+    """Generate every effect (kind sfx) of the episode; cached and provided files are skipped.
+
+    Music is never generated. A file the production put there itself (mp3/wav without a key
+    file) is reported as provided and never touched.
+    """
+    lines = load(prod / episode / "lines.yaml")
+    if not isinstance(lines, Lines):
+        raise ValueError(f"{prod / episode / 'lines.yaml'}: expected a lines file")
+    effects = [entry for entry in (lines.sounds or []) if entry.kind == "sfx"]
+    if not effects:
+        return []
+    audio_dir = prod / episode / "audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    active = client
+    out: list[SoundAudio] = []
+    for entry in effects:
+        key = sound_cache_key(entry.description)
+        mp3_path = audio_dir / f"{entry.id}.mp3"
+        wav_path = audio_dir / f"{entry.id}.wav"
+        key_path = audio_dir / f"{entry.id}.key"
+        if key_path.is_file() and key_path.read_text(encoding="utf-8").strip() == key and mp3_path.is_file():
+            out.append(SoundAudio(sound=entry.id, path=mp3_path, status="cached"))
+            continue
+        if not key_path.is_file() and (mp3_path.is_file() or wav_path.is_file()):
+            provided = mp3_path if mp3_path.is_file() else wav_path
+            out.append(SoundAudio(sound=entry.id, path=provided, status="provided"))
+            continue
+        if active is None:
+            active = ElevenLabs()
+        audio = active.sound(entry.description)
+        mp3_path.write_bytes(audio)
+        key_path.write_text(key, encoding="utf-8")
+        out.append(SoundAudio(sound=entry.id, path=mp3_path, status="new"))
     return out
