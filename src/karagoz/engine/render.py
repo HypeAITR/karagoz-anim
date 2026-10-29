@@ -20,6 +20,9 @@ FPS: int = 24
 TARGET_LUFS: float = -14.0
 PEAK_DBFS: float = -1.0
 
+MUSIC_DUCK_DB: float = -12.0
+DUCK_RAMP_FRAMES: int = 6
+
 _SAMPLE_RATE = 48000
 _CHANNELS = 2
 _SAMPLE_WIDTH = 2  # 16-bit
@@ -29,6 +32,7 @@ _SAMPLE_WIDTH = 2  # 16-bit
 class Clip:
     path: Path
     frame: int
+    gain_db: float = 0.0
 
 
 class RenderError(RuntimeError):
@@ -77,6 +81,17 @@ def _write_silence(out_wav: Path, samples: int) -> Path:
     return out_wav
 
 
+def sound_file(audio_dir: Path, sound_id: str) -> Path | None:
+    """Return ``<id>.mp3`` (preferred) or ``<id>.wav`` in ``audio_dir``, else None."""
+    mp3 = audio_dir / f"{sound_id}.mp3"
+    if mp3.is_file():
+        return mp3
+    wav = audio_dir / f"{sound_id}.wav"
+    if wav.is_file():
+        return wav
+    return None
+
+
 def mix(clips: list[Clip], length: int, out_wav: Path) -> Path:
     """Mix clips into one 48 kHz stereo 16-bit WAV exactly ``length`` frames long."""
     if length < 0:
@@ -91,19 +106,20 @@ def mix(clips: list[Clip], length: int, out_wav: Path) -> Path:
         cmd += ["-i", str(clip.path)]
     parts: list[str] = []
     for i, clip in enumerate(clips):
+        gain = f",volume={clip.gain_db}dB" if clip.gain_db != 0 else ""
         if clip.frame >= 0:
             ms = clip.frame * 1000 / FPS
             parts.append(
                 f"[{i}:a]aresample={_SAMPLE_RATE},"
                 f"aformat=sample_fmts=s16:channel_layouts=stereo,"
-                f"adelay={ms:.15g}:all=1[a{i}]"
+                f"adelay={ms:.15g}:all=1{gain}[a{i}]"
             )
         else:
             skip = -clip.frame * _SAMPLE_RATE // FPS
             parts.append(
                 f"[{i}:a]aresample={_SAMPLE_RATE},"
                 f"aformat=sample_fmts=s16:channel_layouts=stereo,"
-                f"atrim=start_sample={skip},asetpts=N-SR-TB[a{i}]"
+                f"atrim=start_sample={skip},asetpts=N-SR-TB{gain}[a{i}]"
             )
     ins = "".join(f"[a{i}]" for i in range(len(clips)))
     parts.append(f"{ins}amix=inputs={len(clips)}:normalize=0:duration=longest[mix0]")
@@ -286,6 +302,86 @@ def normalize(wav: Path, target_lufs: float = TARGET_LUFS, peak_dbfs: float = PE
         writer.setframerate(rate)
         writer.writeframes(scaled.astype("<i2").tobytes())
     return gain
+
+
+def duck(
+    wav: Path,
+    spans: list[tuple[int, int]],
+    duck_db: float = MUSIC_DUCK_DB,
+    ramp: int = DUCK_RAMP_FRAMES,
+) -> None:
+    """Lower ``wav`` by ``duck_db`` inside ``spans`` (frames, [start, end)) with linear ramps."""
+    if not spans:
+        return
+    spf = _SAMPLE_RATE // FPS
+    with wave.open(str(wav), "rb") as reader:
+        channels = reader.getnchannels()
+        width = reader.getsampwidth()
+        rate = reader.getframerate()
+        nframes = reader.getnframes()
+        raw = reader.readframes(nframes)
+    if nframes == 0:
+        return
+    gains = np.full(nframes, np.inf, dtype=np.float64)
+    for start, end in spans:
+        if end <= start:
+            continue
+        lo = max(start * spf, 0)
+        hi = min(end * spf, nframes)
+        if lo < hi:
+            gains[lo:hi] = np.minimum(gains[lo:hi], duck_db)
+        if ramp > 0:
+            length = ramp * spf
+            blo = max((start - ramp) * spf, 0)
+            bhi = min(start * spf, nframes)
+            if blo < bhi and length > 0:
+                j = np.arange(blo, bhi, dtype=np.float64) - float((start - ramp) * spf)
+                gains[blo:bhi] = np.minimum(gains[blo:bhi], duck_db * (j / float(length)))
+            alo = max(end * spf, 0)
+            ahi = min((end + ramp) * spf, nframes)
+            if alo < ahi and length > 0:
+                k = np.arange(alo, ahi, dtype=np.float64) - float(end * spf)
+                gains[alo:ahi] = np.minimum(gains[alo:ahi], duck_db * (1.0 - k / float(length)))
+    gains[np.isinf(gains)] = 0.0
+    linear = np.power(10.0, gains / 20.0)
+    samples = np.frombuffer(raw, dtype="<i2").reshape(-1, channels).astype(np.float64)
+    scaled = np.rint(samples * linear[:, None])
+    np.clip(scaled, -32768, 32767, out=scaled)
+    with wave.open(str(wav), "wb") as writer:
+        writer.setnchannels(channels)
+        writer.setsampwidth(width)
+        writer.setframerate(rate)
+        writer.writeframes(scaled.astype("<i2").tobytes())
+
+
+def add_into(dst: Path, src: Path, gain_db: float = 0.0) -> None:
+    """Add ``src`` into ``dst`` (both 16-bit WAVs) with a static gain on ``src``."""
+    with wave.open(str(dst), "rb") as reader:
+        dst_channels = reader.getnchannels()
+        dst_width = reader.getsampwidth()
+        dst_rate = reader.getframerate()
+        dst_nframes = reader.getnframes()
+        dst_raw = reader.readframes(dst_nframes)
+    with wave.open(str(src), "rb") as reader:
+        src_channels = reader.getnchannels()
+        src_nframes = reader.getnframes()
+        src_raw = reader.readframes(src_nframes)
+    if dst_nframes != src_nframes or dst_channels != src_channels:
+        raise ValueError(
+            f"cannot add {src} ({src_nframes} frames, {src_channels} ch)"
+            f" into {dst} ({dst_nframes} frames, {dst_channels} ch)"
+        )
+    factor = 10.0 ** (gain_db / 20.0)
+    mixed = np.rint(
+        np.frombuffer(dst_raw, dtype="<i2").astype(np.float64)
+        + np.frombuffer(src_raw, dtype="<i2").astype(np.float64) * factor
+    )
+    np.clip(mixed, -32768, 32767, out=mixed)
+    with wave.open(str(dst), "wb") as writer:
+        writer.setnchannels(dst_channels)
+        writer.setsampwidth(dst_width)
+        writer.setframerate(dst_rate)
+        writer.writeframes(mixed.astype("<i2").tobytes())
 
 
 def _parse_rate(rate: str) -> float | None:

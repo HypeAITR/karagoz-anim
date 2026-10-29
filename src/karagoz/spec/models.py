@@ -67,6 +67,8 @@ class SoundEntry(SpecModel):
     id: SoundId
     description: str
     at: AnchorStr
+    kind: Literal["sfx", "music"] = "sfx"
+    gain_db: Annotated[float, Field(ge=-60, le=12)] = 0.0
     note: str | None = None
 
 
