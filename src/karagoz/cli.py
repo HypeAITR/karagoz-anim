@@ -54,11 +54,14 @@ def cmd_voice(args: argparse.Namespace) -> int:
     from karagoz.spec import Align
 
     try:
-        items = el.synthesize_episode(Path(args.prod), args.episode, el.ElevenLabs())
+        client = el.ElevenLabs()
+        items = el.synthesize_episode(Path(args.prod), args.episode, client)
         for item in items:
             align = Align.model_validate_json(item.align.read_text(encoding="utf-8"))
             duration = align.ends[-1] if align.ends else 0.0
             print(f"{item.line} {'cached' if item.cached else 'new'} {duration:.2f} s")
+        for sound in el.synthesize_sounds(Path(args.prod), args.episode, client):
+            print(f"{sound.sound} {sound.status}")
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
