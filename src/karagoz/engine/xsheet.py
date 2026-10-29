@@ -309,6 +309,125 @@ def lint(exp: Exposure, style: Style) -> list[Finding]:
     return findings
 
 
+def style_lint(
+    exp: Exposure,
+    style: Style,
+    speaking: dict[str, list[tuple[str, int, int]]],
+    mouth: dict[str, list[str | None]],
+) -> list[Finding]:
+    lint_group = style.lint
+    if lint_group is None:
+        return []
+    pose_entry = lint_group.get("pose_per_line_max")
+    hand_entry = lint_group.get("hand_static_max")
+    twos_entry = lint_group.get("twos_share_warn")
+    pose_max = round(pose_entry.value) if pose_entry is not None else None
+    hand_max = round(hand_entry.value) if hand_entry is not None else None
+    twos_warn = float(twos_entry.value) if twos_entry is not None else None
+    if pose_max is None and hand_max is None and twos_warn is None:
+        return []
+    file = f"shots/{exp.shot}/xsheet.yaml"
+    findings: list[Finding] = []
+    for char in sorted(exp.body):
+        path = f"tracks.{char}.body"
+        body_track = exp.body[char]
+        if pose_max is not None:
+            for line_id, start, end in speaking.get(char, []):
+                count = sum(
+                    1
+                    for w in exp.windows
+                    if w.track == f"{char}.body" and w.kind == "transition" and start <= w.hit < end
+                )
+                if count > pose_max:
+                    findings.append(
+                        Finding(
+                            "warn",
+                            "pose.too_many",
+                            file,
+                            path,
+                            f"{char} has {count} moves in line {line_id} "
+                            f"(frames {start}..{end - 1}); at most {pose_max}",
+                            "keep one movement pattern per phrase; drop the smallest moves",
+                        )
+                    )
+        if hand_max is not None:
+            n = len(body_track)
+            i = 0
+            while i < n:
+                drawing = body_track[i]
+                if drawing is None:
+                    i += 1
+                    continue
+                j = i + 1
+                while j < n and body_track[j] == drawing:
+                    j += 1
+                run_len = j - i
+                if run_len > hand_max:
+                    findings.append(
+                        Finding(
+                            "warn",
+                            "hand.static",
+                            file,
+                            path,
+                            f"{char} holds '{drawing}' for {run_len} frames (frames {i}..{j - 1}); at most {hand_max}",
+                            "add a gesture or a settle inside the hold",
+                        )
+                    )
+                i = j
+        if twos_warn is not None:
+            spans = speaking.get(char, [])
+            if spans:
+                eyes_track = exp.eyes.get(char)
+                mouth_track_cells = mouth.get(char)
+                kept: list[int] = []
+                for _line_id, start, end in spans:
+                    cs = max(start, 0)
+                    ce = min(end, exp.length)
+                    if cs >= ce:
+                        continue
+                    run_lengths: list[int] = []
+                    prev: tuple[str | None, str, str | None] | None = None
+                    run_len = 0
+                    for fr in range(cs, ce):
+                        b = body_track[fr] if 0 <= fr < len(body_track) else None
+                        e = eyes_track[fr] if eyes_track is not None and 0 <= fr < len(eyes_track) else "open"
+                        m = (
+                            mouth_track_cells[fr]
+                            if mouth_track_cells is not None and 0 <= fr < len(mouth_track_cells)
+                            else None
+                        )
+                        state = (b, e, m)
+                        if prev is None:
+                            prev = state
+                            run_len = 1
+                        elif state == prev:
+                            run_len += 1
+                        else:
+                            run_lengths.append(run_len)
+                            prev = state
+                            run_len = 1
+                    if prev is not None:
+                        run_lengths.append(run_len)
+                    if len(run_lengths) >= 3:
+                        kept.extend(run_lengths[1:-1])
+                if len(kept) >= 8:
+                    twos = sum(1 for length in kept if length == 2)
+                    share = twos / len(kept)
+                    if share > twos_warn:
+                        findings.append(
+                            Finding(
+                                "warn",
+                                "cadence.mostly_twos",
+                                file,
+                                path,
+                                f"{char} moves mostly on twos: {twos}/{len(kept)} intervals "
+                                f"are 2 frames (share {share:.2f} > {twos_warn})",
+                                "break the twos grid: let small moves (settle, mouth) land on ones",
+                            )
+                        )
+    return findings
+
+
 def check_timing(episode_dir: Path, style_path: Path | None = None) -> list[Finding]:
     if style_path is None:
         style_path = episode_dir.parent / "style.yaml"
@@ -397,5 +516,35 @@ def check_timing(episode_dir: Path, style_path: Path | None = None) -> list[Find
             findings.append(Finding("error", exc.code, f"shots/{xobj.shot}/xsheet.yaml", "", _error_text(exc), None))
             continue
         findings.extend(lint(exp, style))
+        lines_by_id = {entry.id: entry for entry in lines.lines}
+        shot_entry = next((s for s in shots.shots if s.id == xobj.shot), None)
+        speaking: dict[str, list[tuple[str, int, int]]] = {}
+        if shot_entry is not None and shot_entry.lines:
+            shot_start = timing.shot(xobj.shot).start
+            for line_id in shot_entry.lines:
+                line_entry = lines_by_id.get(line_id)
+                if line_entry is None:
+                    continue
+                if line_entry.speaker not in exp.body:
+                    continue
+                span = timing.line(line_id)
+                speaking.setdefault(line_entry.speaker, []).append(
+                    (line_id, span.start - shot_start, span.end - shot_start)
+                )
+        from karagoz.engine.mouth import mouth_track
+
+        mouth: dict[str, list[str | None]] = {}
+        for char in exp.body:
+            try:
+                track = mouth_track(xobj.shot, char, lines, shots, xobj, timing, style)
+            except (ValueError, TimingError):
+                continue
+            cells: list[str | None] = [None] * exp.length
+            for cue in track.cues:
+                for fr in range(cue.start, cue.end):
+                    if 0 <= fr < exp.length:
+                        cells[fr] = cue.shape
+            mouth[char] = cells
+        findings.extend(style_lint(exp, style, speaking, mouth))
     findings.sort(key=lambda f: (f.file, f.path, f.code))
     return findings
