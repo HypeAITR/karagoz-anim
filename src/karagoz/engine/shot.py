@@ -29,7 +29,7 @@ from karagoz.engine.placement import (
     to_json,
 )
 from karagoz.engine.register import refine
-from karagoz.engine.render import FPS, Clip, RenderError, encode, loudness, mix
+from karagoz.engine.render import FPS, TARGET_LUFS, Clip, RenderError, encode, loudness, mix, normalize
 from karagoz.engine.timing import resolve_episode
 from karagoz.engine.xsheet import expand
 from karagoz.spec import Align, Lines, Mouth, MouthCue, Poses, Regions, Shot, Shots, SpecError, Style, Xsheet, load
@@ -509,9 +509,13 @@ def render_shot(prod: Path, episode: str, shot: str) -> ShotRender:
         clips.append(Clip(episode_dir / "audio" / f"{lid}.mp3", line_span.start - shot_span.start))
     mix_wav = episode_dir / "render" / shot / "mix.wav"
     mix(clips, length=exp.length, out_wav=mix_wav)
+    if clips:
+        normalize(mix_wav)
     mp4_path = episode_dir / "render" / f"{shot}.mp4"
     encode(frames_dir, mix_wav, mp4_path)
     lufs = loudness(mp4_path) if clips else None
+    if lufs is not None and abs(lufs - TARGET_LUFS) > 1.0:
+        warnings.append(f"audio: {lufs:.1f} LUFS, target -14 (peak limit)")
     return ShotRender(
         shot=shot,
         mp4=mp4_path,

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import shutil
@@ -12,7 +13,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+
 FPS: int = 24
+
+TARGET_LUFS: float = -14.0
+PEAK_DBFS: float = -1.0
 
 _SAMPLE_RATE = 48000
 _CHANNELS = 2
@@ -252,6 +258,34 @@ def loudness(path: Path) -> float:
     if raw.startswith("-inf"):
         return float("-inf")
     return float(raw)
+
+
+def normalize(wav: Path, target_lufs: float = TARGET_LUFS, peak_dbfs: float = PEAK_DBFS) -> float:
+    """Bring ``wav`` to ``target_lufs`` with one static peak-limited gain; return the gain in dB."""
+    measured = loudness(wav)
+    if math.isinf(measured):
+        return 0.0
+    with wave.open(str(wav), "rb") as reader:
+        channels = reader.getnchannels()
+        width = reader.getsampwidth()
+        rate = reader.getframerate()
+        raw = reader.readframes(reader.getnframes())
+    samples = np.frombuffer(raw, dtype="<i2")
+    if samples.size == 0:
+        return 0.0
+    peak = int(np.abs(samples.astype(np.int32)).max())
+    if peak == 0:
+        return 0.0
+    gain = target_lufs - measured
+    gain = min(gain, peak_dbfs - 20.0 * math.log10(peak / 32767.0))
+    scaled = np.rint(samples.astype(np.float64) * (10.0 ** (gain / 20.0)))
+    np.clip(scaled, -32768, 32767, out=scaled)
+    with wave.open(str(wav), "wb") as writer:
+        writer.setnchannels(channels)
+        writer.setsampwidth(width)
+        writer.setframerate(rate)
+        writer.writeframes(scaled.astype("<i2").tobytes())
+    return gain
 
 
 def _parse_rate(rate: str) -> float | None:
