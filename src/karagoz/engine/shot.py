@@ -29,7 +29,19 @@ from karagoz.engine.placement import (
     to_json,
 )
 from karagoz.engine.register import refine
-from karagoz.engine.render import FPS, TARGET_LUFS, Clip, RenderError, encode, loudness, mix, normalize
+from karagoz.engine.render import (
+    FPS,
+    TARGET_LUFS,
+    Clip,
+    RenderError,
+    add_into,
+    duck,
+    encode,
+    loudness,
+    mix,
+    normalize,
+    sound_file,
+)
 from karagoz.engine.timing import resolve_episode
 from karagoz.engine.xsheet import expand
 from karagoz.spec import Align, Lines, Mouth, MouthCue, Poses, Regions, Shot, Shots, SpecError, Style, Xsheet, load
@@ -504,16 +516,42 @@ def render_shot(prod: Path, episode: str, shot: str) -> ShotRender:
     warnings.extend(render_warnings)
     shot_span = timing.shot(shot)
     clips: list[Clip] = []
+    speech: list[tuple[int, int]] = []
     for lid in shot_line_ids:
         line_span = timing.line(lid)
         clips.append(Clip(episode_dir / "audio" / f"{lid}.mp3", line_span.start - shot_span.start))
+        speech.append((line_span.start - shot_span.start, line_span.end - shot_span.start))
+    sounds_by_id = {sound.id: sound for sound in (lines.sounds or [])}
+    for sid in shot_entry.sounds or []:
+        sentry = sounds_by_id.get(sid)
+        if sentry is None or sentry.kind != "sfx":
+            continue
+        sfx_path = sound_file(audio_dir, sid)
+        if sfx_path is None:
+            warnings.append(f"sound {sid}: no audio file in audio/")
+            continue
+        clips.append(Clip(sfx_path, timing.frame(sentry.at, shot) - shot_span.start, gain_db=sentry.gain_db))
+    music_clips: list[Clip] = []
+    for sound in lines.sounds or []:
+        if sound.kind != "music":
+            continue
+        music_path = sound_file(audio_dir, sound.id)
+        if music_path is None:
+            warnings.append(f"sound {sound.id}: no audio file in audio/")
+            continue
+        music_clips.append(Clip(music_path, timing.frame(sound.at, shot) - shot_span.start, gain_db=sound.gain_db))
     mix_wav = episode_dir / "render" / shot / "mix.wav"
     mix(clips, length=exp.length, out_wav=mix_wav)
-    if clips:
+    if music_clips:
+        music_wav = episode_dir / "render" / shot / "music.wav"
+        mix(music_clips, length=exp.length, out_wav=music_wav)
+        duck(music_wav, speech)
+        add_into(mix_wav, music_wav)
+    if clips or music_clips:
         normalize(mix_wav)
     mp4_path = episode_dir / "render" / f"{shot}.mp4"
     encode(frames_dir, mix_wav, mp4_path)
-    lufs = loudness(mp4_path) if clips else None
+    lufs = loudness(mp4_path) if (clips or music_clips) else None
     if lufs is not None and abs(lufs - TARGET_LUFS) > 1.0:
         warnings.append(f"audio: {lufs:.1f} LUFS, target -14 (peak limit)")
     return ShotRender(
