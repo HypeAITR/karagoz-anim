@@ -1,0 +1,36 @@
+# karagoz-anim
+
+> Script + voice → 2D limited animation, produced by a team of AI agents on Meta's models.
+
+karagoz-anim turns a script and voice lines into a 2D limited-animation scene (flat colour, black outline,
+1920×1080, 24 fps). Studio agents write small YAML/JSON files with names, never x/y coordinates; a coordinate
+engine turns names into positions, scale, frames and face patches; drawings come from Muse Image, masks from
+SAM 3.1, vision checks from Muse Spark, voices from ElevenLabs.
+
+## Start here
+
+- [README](README.md): what this is, quick start, how it works, commands, models and keys
+- [Agent guide](AGENTS.md): setup, checks and rules for coding agents
+- [Architecture](ARCHITECTURE.md): the four layers and the code map of every module
+
+## Studio guide
+
+- [Studio guide](guide/README.md): how an agent's context is compiled per task
+- [Studio core](guide/core/studio.md): shared knowledge every studio agent gets
+- [Notes core](guide/core/notes.md): how agents keep their own notes
+
+## Department guides
+
+- [Director](.claude/skills/director/SKILL.md): script to voice lines and shot list
+- [Continuity](.claude/skills/continuity/SKILL.md): character and prop state per shot
+- [Layout](.claude/skills/layout/SKILL.md): key poses and inbetween descriptions per shot
+- [Timer](.claude/skills/timer/SKILL.md): when each pose lands, anchored to words
+- [Checker](.claude/skills/checker/SKILL.md): movement review on contact sheets
+- [Draw prompts](.claude/skills/draw-prompts/SKILL.md): how drawing prompts are built and why
+
+## Code
+
+- [Spec models](src/karagoz/spec/models.py): typed models for every spec file kind
+- [CLI](src/karagoz/cli.py): the karagoz command line entry point and subcommands
+- [Config](src/karagoz/config.py): secrets from outside the repo, never printed
+- [Environment template](.env.example): key names for the out-of-repo env file
