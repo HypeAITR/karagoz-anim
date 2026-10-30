@@ -23,6 +23,8 @@ from meta_sam_parser._types import SegmentationMask
 from karagoz.meta.client import MetaClient, data_url
 
 MODEL = "sam-3.1"
+# estimate from D24 (36 calls ≈ 0.09 $), not a price list.
+USD_PER_CALL = 0.0025
 RECORD = re.compile(
     r"<\|box;x1=(\d+);y1=(\d+);x2=(\d+);y2=(\d+);w=(\d+);h=(\d+)(?:;c=([\d.]+))?\|>"
     r"<\|mask;x=0;y=0(?:;c=[\d.]+)?;data=(\d+),(\d+),([~!])([^|]*)\|>"

@@ -43,6 +43,7 @@ from karagoz.studio.tasks import Board, Change, State, Task
 
 if TYPE_CHECKING:
     from karagoz.engine.regions import SamLike
+    from karagoz.meta.sam import Segment
     from karagoz.studio.draw import MuseImageLike
 
 SHORT_PROMPT = "Read BRIEF.md in the working directory and do exactly what it says."
@@ -453,6 +454,18 @@ def _shot_has_regions(prod: Path, episode: str, shot: str) -> bool:
     return entry is not None and (prod / "locations" / entry.location / "regions.yaml").is_file()
 
 
+@dataclass
+class _CountingSam:
+    """Wrap a SamLike and count segment calls so the task can book them."""
+
+    inner: SamLike
+    calls: int = 0
+
+    def segment(self, image: Path | bytes, concept: str, *, tag: str = "") -> list[Segment]:
+        self.calls += 1
+        return self.inner.segment(image, concept, tag=tag)
+
+
 def code_work(
     prod: Path,
     episode: str,
@@ -472,7 +485,7 @@ def code_work(
             from karagoz.engine.regions import build_regions
             from karagoz.meta.client import MetaClient
             from karagoz.meta.image import MuseImage
-            from karagoz.meta.sam import Sam
+            from karagoz.meta.sam import USD_PER_CALL, Sam
             from karagoz.studio.draw import location_objects, plan_location_draw, run_draw
 
             active = image if image is not None else MuseImage(MetaClient())
@@ -481,12 +494,21 @@ def code_work(
                 error = ", ".join(f"{path}: {message}" for path, message in report.failed)
                 return RunResult(ok=False, error=error, cost_usd=report.cost_usd)
             active_sam: SamLike = sam if sam is not None else Sam(MetaClient())
+            counting = _CountingSam(active_sam)
             out_dir = prod / "locations" / task.unit
             regions = build_regions(
-                out_dir / "background.png", task.unit, location_objects(prod, task.unit), active_sam, out_dir
+                out_dir / "background.png", task.unit, location_objects(prod, task.unit), counting, out_dir
             )
+            sam_cost = counting.calls * USD_PER_CALL
+            if counting.calls > 0 and on_event is not None:
+                on_event(
+                    {
+                        "payload_type": "code.note",
+                        "payload": {"text": f"sam: {counting.calls} calls, ~{sam_cost:.4f} $"},
+                    }
+                )
             final = f"{len(regions['objects'])} objects, {len(regions['places'])} places"
-            return RunResult(ok=True, final_text=final, cost_usd=report.cost_usd)
+            return RunResult(ok=True, final_text=final, cost_usd=report.cost_usd + sam_cost)
         if department == "voice":
             from karagoz.voice.elevenlabs import synthesize_episode
 
@@ -567,12 +589,21 @@ def code_work(
             # image hash, so only new drawings cost SAM calls).
             if _shot_has_regions(prod, episode, task.unit):
                 from karagoz.engine.landmarks import measure_shot
-                from karagoz.meta.sam import Sam
+                from karagoz.meta.sam import USD_PER_CALL, Sam
 
-                measured = measure_shot(prod, episode, task.unit, sam if sam is not None else Sam(MetaClient()))
+                counting = _CountingSam(sam if sam is not None else Sam(MetaClient()))
+                measured = measure_shot(prod, episode, task.unit, counting)
+                sam_cost = counting.calls * USD_PER_CALL
+                if counting.calls > 0 and on_event is not None:
+                    on_event(
+                        {
+                            "payload_type": "code.note",
+                            "payload": {"text": f"sam: {counting.calls} calls, ~{sam_cost:.4f} $"},
+                        }
+                    )
                 final = f"{len(report.done)} drawn, {len(report.cached)} cached, {len(measured)} landmarks"
                 _join_claims()
-                return RunResult(ok=True, final_text=final, cost_usd=report.cost_usd)
+                return RunResult(ok=True, final_text=final, cost_usd=report.cost_usd + sam_cost)
             _join_claims()
             return RunResult(ok=True, cost_usd=report.cost_usd)
         if department == "render":
@@ -808,22 +839,46 @@ class Studio:
             if changed:
                 self.log.append(existing.id, "note", text=f"definition updated: {', '.join(changed)}")
         ran: set[str] = set()
-        while True:
-            changes.extend(self._refresh())
-            changes.extend(self._auto_approve())
-            batch = [
-                t for t in self.board.tasks.values() if t.state is State.READY and t.id not in ran and self._runnable(t)
-            ]
-            if not batch:
-                break
-            for task in batch:
+        try:
+            while True:
+                changes.extend(self._refresh())
+                changes.extend(self._auto_approve())
+                batch = [
+                    t
+                    for t in self.board.tasks.values()
+                    if t.state is State.READY and t.id not in ran and self._runnable(t)
+                ]
+                if not batch:
+                    break
+                for index, task in enumerate(batch):
+                    if self._stop:
+                        break
+                    if index > 0:
+                        # An earlier task in this batch may have changed the inputs: re-check
+                        # before running, and skip tasks that are no longer runnable.
+                        changes.extend(self._refresh())
+                        changes.extend(self._auto_approve())
+                        current = self.board.tasks.get(task.id)
+                        if current is None:
+                            continue
+                        task = current
+                        if task.state is not State.READY or not self._runnable(task):
+                            continue
+                        deps_done = True
+                        for dep_id in task.inputs:
+                            dep = self.board.tasks.get(dep_id)
+                            if dep is None or dep.state is not State.DONE:
+                                deps_done = False
+                                break
+                        if not deps_done:
+                            continue
+                    ran.add(task.id)
+                    changes.extend(self._run_task(task))
+                    self._save()
                 if self._stop:
                     break
-                ran.add(task.id)
-                changes.extend(self._run_task(task))
-            if self._stop:
-                break
-        self._save()
+        finally:
+            self._save()
         return changes
 
     def run(self, until: str | None = None, only: str | None = None) -> None:
