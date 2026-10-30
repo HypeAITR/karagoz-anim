@@ -5,6 +5,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import math
+import subprocess
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -16,6 +18,7 @@ import yaml
 from pydantic import ValidationError
 
 from karagoz import config
+from karagoz.engine.render import _ffprobe_bin
 from karagoz.spec import Align, Lines, load
 
 BASE_URL = "https://api.elevenlabs.io"
@@ -249,8 +252,53 @@ def sound_cache_key(description: str) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def synthesize_episode(prod: Path, episode: str, client: ElevenLabs | None = None) -> list[LineAudio]:
-    """Synthesize every line of the episode; cached lines (mp3 + align + matching key) are skipped."""
+def audio_duration(path: Path) -> float | None:
+    """Audio duration in seconds via ffprobe; None when unknown (no ffprobe, failure, not audio)."""
+    try:
+        ffprobe = _ffprobe_bin()
+    except RuntimeError:
+        return None
+    try:
+        proc = subprocess.run(
+            [ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
+            capture_output=True,
+            text=True,
+            errors="replace",
+        )
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+    try:
+        value = float(proc.stdout.strip())
+    except ValueError:
+        return None
+    if not math.isfinite(value) or value <= 0:
+        return None
+    return value
+
+
+def clamp_align(align: Align, duration_s: float) -> Align:
+    """Copy of align with every start and end capped at duration_s; nothing else changes."""
+    return align.model_copy(
+        update={
+            "starts": [min(s, duration_s) for s in align.starts],
+            "ends": [min(e, duration_s) for e in align.ends],
+        }
+    )
+
+
+def synthesize_episode(
+    prod: Path,
+    episode: str,
+    client: ElevenLabs | None = None,
+    duration: Callable[[Path], float | None] = audio_duration,
+) -> list[LineAudio]:
+    """Synthesize every line of the episode; cached lines (mp3 + align + matching key) are skipped.
+
+    Alignments are clamped to the audio's own duration, both for new lines and for
+    cached lines whose align file on disk still runs past the audio.
+    """
     voices = load_voices(prod / "voices.yaml")
     lines = load(prod / episode / "lines.yaml")
     if not isinstance(lines, Lines):
@@ -274,10 +322,20 @@ def synthesize_episode(prod: Path, episode: str, client: ElevenLabs | None = Non
             and key_path.is_file()
             and key_path.read_text(encoding="utf-8").strip() == key
         ):
+            d = duration(mp3_path)
+            if d is not None:
+                existing = load(align_path)
+                if isinstance(existing, Align):
+                    clamped = clamp_align(existing, d)
+                    if clamped != existing:
+                        align_path.write_text(clamped.model_dump_json(), encoding="utf-8")
             out.append(LineAudio(line=entry.id, mp3=mp3_path, align=align_path, cached=True))
             continue
         audio, align = active.speak(entry.text, voice)
         mp3_path.write_bytes(audio)
+        d = duration(mp3_path)
+        if d is not None:
+            align = clamp_align(align, d)
         align_path.write_text(align.model_copy(update={"line": entry.id}).model_dump_json(), encoding="utf-8")
         key_path.write_text(key, encoding="utf-8")
         out.append(LineAudio(line=entry.id, mp3=mp3_path, align=align_path, cached=False))
