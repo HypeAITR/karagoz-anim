@@ -618,6 +618,12 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: list[str] | None = None) -> int:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is not None:
+            encoding = getattr(stream, "encoding", "") or ""
+            if encoding.lower().replace("-", "") != "utf8":
+                reconfigure(encoding="utf-8", errors="replace")
     args = build_parser().parse_args(argv)
     result: int = args.func(args)
     return result
