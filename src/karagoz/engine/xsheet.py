@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal
@@ -16,6 +17,7 @@ from karagoz.spec.models import (
     Lines,
     LoopEvent,
     Poses,
+    PoseSequence,
     SequenceEvent,
     Shots,
     Style,
@@ -23,6 +25,13 @@ from karagoz.spec.models import (
     Transition,
     Xsheet,
 )
+
+LOOP_STEP_DEFAULT = 8
+"""Frames per loop step when the loop names no beat."""
+
+_CADENCE_FRAMES = {"ones": 1, "twos": 2, "threes": 3}
+
+_SEQUENCE_DRAWING_RE = re.compile(r"^s[0-9]{1,2}\.[0-9]+$")
 
 
 @dataclass(frozen=True)
@@ -43,6 +52,10 @@ class Exposure:
     eyes: dict[str, list[str]]  # character -> "open" | "half" | "closed" per frame
     windows: list[Window]
     unsupported: list[tuple[str, int]] = field(default_factory=list)
+    sequence_unknown: list[tuple[str, int]] = field(default_factory=list)
+    sequence_from: list[tuple[str, int]] = field(default_factory=list)
+    loop_empty: list[tuple[str, int]] = field(default_factory=list)
+    loop_unknown: list[tuple[str, int]] = field(default_factory=list)
 
 
 def _styled_int(group: StyleGroup, key: str, default: int = 0) -> int:
@@ -56,6 +69,28 @@ def _error_text(exc: TimingError) -> str:
     return text[len(prefix) :] if text.startswith(prefix) else text
 
 
+def _sequences_by_id(poses: Poses | None, char: str) -> dict[str, PoseSequence]:
+    if poses is None or char not in poses.characters:
+        return {}
+    return {s.id: s for s in (poses.characters[char].sequences or [])}
+
+
+def _pose_ids(poses: Poses | None, char: str) -> set[str]:
+    if poses is None or char not in poses.characters:
+        return set()
+    return {p.id for p in poses.characters[char].poses}
+
+
+def _transition_inbetweens(poses: Poses | None, char: str, a: str, b: str) -> int | None:
+    """The inbetween count of transition a -> b, or None when poses.yaml has none."""
+    if poses is None or char not in poses.characters:
+        return None
+    for t in poses.characters[char].transitions or []:
+        if t.from_ == a and t.to == b:
+            return len(t.inbetweens)
+    return None
+
+
 def expand(xs: Xsheet, poses: Poses | None, timing: EpisodeTiming, style: Style) -> Exposure:
     span = timing.shot(xs.shot)
     shot_start = span.start
@@ -65,6 +100,10 @@ def expand(xs: Xsheet, poses: Poses | None, timing: EpisodeTiming, style: Style)
     eyes: dict[str, list[str]] = {c: ["open"] * length for c in chars}
     windows: list[Window] = []
     unsupported: list[tuple[str, int]] = []
+    sequence_unknown: list[tuple[str, int]] = []
+    sequence_from: list[tuple[str, int]] = []
+    loop_empty: list[tuple[str, int]] = []
+    loop_unknown: list[tuple[str, int]] = []
 
     anticipate_frames = _styled_int(style.live.transition, "anticipate", 0)
     settle_frames = _styled_int(style.live.transition, "settle", 0)
@@ -91,6 +130,9 @@ def expand(xs: Xsheet, poses: Poses | None, timing: EpisodeTiming, style: Style)
                     target = item.to
                     prev = current
                     if item.via == "snap" or prev is None:
+                        n = 0
+                    elif _SEQUENCE_DRAWING_RE.match(prev) is not None:
+                        # No transition is defined from a sequence drawing: snap to the target.
                         n = 0
                     else:
                         n = fallback_n
@@ -120,11 +162,80 @@ def expand(xs: Xsheet, poses: Poses | None, timing: EpisodeTiming, style: Style)
                     wend = h + (settle_frames if item.settle else 0)
                     windows.append(Window(track_name, i, "transition", wstart, h, wend))
                     current = target
-                elif isinstance(item, SequenceEvent | LoopEvent):
-                    timing.frame(item.at, xs.shot)
-                    if isinstance(item, LoopEvent):
-                        timing.frame(item.until, xs.shot)
-                    unsupported.append((track_name, i))
+                elif isinstance(item, SequenceEvent):
+                    f0 = timing.frame(item.at, xs.shot) - shot_start
+                    seq = _sequences_by_id(poses, char).get(item.sequence)
+                    if seq is None:
+                        sequence_unknown.append((track_name, i))
+                    else:
+                        if current != seq.from_:
+                            sequence_from.append((track_name, i))
+                        c = _CADENCE_FRAMES[item.cadence or "twos"]
+                        total = len(seq.drawings)
+                        cells = body[char]
+                        for k in range(1, total + 1):
+                            drawing = f"{seq.id}.{k}"
+                            base = f0 + (k - 1) * c
+                            for off in range(c):
+                                fr = base + off
+                                if 0 <= fr < length:
+                                    cells[fr] = drawing
+                        hold_drawing = seq.to if seq.to is not None else f"{seq.id}.{total}"
+                        lo = max(f0 + total * c, 0)
+                        if lo < length:
+                            for fr in range(lo, length):
+                                cells[fr] = hold_drawing
+                        hit = f0 + total * c
+                        windows.append(Window(track_name, i, "transition", f0, hit, hit))
+                        current = hold_drawing
+                elif isinstance(item, LoopEvent):
+                    f0 = timing.frame(item.at, xs.shot) - shot_start
+                    f1 = timing.frame(item.until, xs.shot) - shot_start
+                    if f1 <= f0:
+                        loop_empty.append((track_name, i))
+                    else:
+                        c = _CADENCE_FRAMES[item.cadence or "twos"]
+                        if item.step is not None:
+                            beat = item.step.removeprefix("beat.")
+                            step = _styled_int(style.live.beats, beat, LOOP_STEP_DEFAULT)
+                        else:
+                            step = LOOP_STEP_DEFAULT
+                        step = max(step, 1)
+                        seqs = _sequences_by_id(poses, char)
+                        known_poses = _pose_ids(poses, char)
+                        if any(p not in known_poses and p not in seqs for p in item.loop):
+                            loop_unknown.append((track_name, i))
+                        else:
+                            cycle: list[str] = []
+                            loop_items = item.loop
+                            for pos, first in enumerate(loop_items):
+                                second = loop_items[(pos + 1) % len(loop_items)]
+                                seq = seqs.get(first)
+                                if seq is not None:
+                                    for k in range(1, len(seq.drawings) + 1):
+                                        cycle.extend([f"{seq.id}.{k}"] * c)
+                                else:
+                                    ib = (
+                                        _transition_inbetweens(poses, char, first, second)
+                                        if second in known_poses
+                                        else None
+                                    )
+                                    if ib is not None and ib * c < step:
+                                        cycle.extend([first] * (step - ib * c))
+                                        for k in range(1, ib + 1):
+                                            cycle.extend([f"{first}-{second}.{k}"] * c)
+                                    else:
+                                        cycle.extend([first] * step)
+                            cells = body[char]
+                            for fr in range(max(f0, 0), min(f1, length)):
+                                cells[fr] = cycle[(fr - f0) % len(cycle)]
+                            last = cycle[(f1 - 1 - f0) % len(cycle)]
+                            lo = max(f1, 0)
+                            if lo < length:
+                                for fr in range(lo, length):
+                                    cells[fr] = last
+                            windows.append(Window(track_name, i, "transition", f0, f1, f1))
+                            current = last
                 elif isinstance(item, EyeEvent):
                     timing.frame(item.at, xs.shot)
                 else:
@@ -167,21 +278,88 @@ def expand(xs: Xsheet, poses: Poses | None, timing: EpisodeTiming, style: Style)
                     timing.frame(item.at, xs.shot)
         else:
             continue
-    return Exposure(shot=xs.shot, length=length, body=body, eyes=eyes, windows=windows, unsupported=unsupported)
+    return Exposure(
+        shot=xs.shot,
+        length=length,
+        body=body,
+        eyes=eyes,
+        windows=windows,
+        unsupported=unsupported,
+        sequence_unknown=sequence_unknown,
+        sequence_from=sequence_from,
+        loop_empty=loop_empty,
+        loop_unknown=loop_unknown,
+    )
 
 
 def lint(exp: Exposure, style: Style) -> list[Finding]:
     file = f"shots/{exp.shot}/xsheet.yaml"
     findings: list[Finding] = []
     for track, idx in exp.unsupported:
+        if track.endswith(".eyes"):
+            message = (
+                f"sequence/loop event in track '{track}' at index {idx} is not supported: "
+                "eyes tracks do not support sequences or loops; skipping it"
+            )
+            fix = "replace it with blink events"
+        else:
+            message = f"sequence/loop event in track '{track}' at index {idx} is not supported yet; skipping it"
+            fix = "replace it with hold/transition/blink events"
         findings.append(
             Finding(
                 "warn",
                 "timing.unsupported",
                 file,
                 f"tracks.{track}[{idx}]",
-                f"sequence/loop event in track '{track}' at index {idx} is not supported yet; skipping it",
-                "replace it with hold/transition/blink events",
+                message,
+                fix,
+            )
+        )
+    for track, idx in exp.sequence_unknown:
+        findings.append(
+            Finding(
+                "warn",
+                "timing.sequence_unknown",
+                file,
+                f"tracks.{track}[{idx}]",
+                f"sequence event in track '{track}' at index {idx} names a sequence "
+                "that is not defined for this character; skipping it",
+                "use a sequence id from the shot's poses.yaml",
+            )
+        )
+    for track, idx in exp.sequence_from:
+        findings.append(
+            Finding(
+                "warn",
+                "timing.sequence_from",
+                file,
+                f"tracks.{track}[{idx}]",
+                f"sequence in track '{track}' at index {idx} starts from a pose "
+                "that is not the current pose; still playing it",
+                "hold the sequence's 'from' pose before the event",
+            )
+        )
+    for track, idx in exp.loop_empty:
+        findings.append(
+            Finding(
+                "error",
+                "timing.loop_empty",
+                file,
+                f"tracks.{track}[{idx}]",
+                f"loop in track '{track}' at index {idx} ends at or before it starts; skipping it",
+                "move 'until' to a later frame",
+            )
+        )
+    for track, idx in exp.loop_unknown:
+        findings.append(
+            Finding(
+                "warn",
+                "timing.loop_unknown",
+                file,
+                f"tracks.{track}[{idx}]",
+                f"loop in track '{track}' at index {idx} names a pose or sequence "
+                "that is not defined for this character; skipping it",
+                "use pose and sequence ids from the shot's poses.yaml",
             )
         )
     by_track: dict[str, list[Window]] = {}
