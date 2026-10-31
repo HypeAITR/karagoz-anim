@@ -41,19 +41,47 @@ judgment must be independent.
 
 ## What you write
 
-One line per problem, nothing for drawings that are fine:
+Write `findings.yaml` (a `CheckResult`): one entry per problem, nothing else. Drawings that are fine are listed
+under `ok:`.
 
+- `part:` the part id from your brief (e.g. `naime:p3-p4`).
+- `findings:` a list, one entry per problem:
+  - `drawing:` `<char>/<file name>` exactly as printed on the sheet, or null for a movement finding.
+  - `frames:` `[<first>, <last>]` for a movement finding, or null for a single drawing.
+  - `look:` `drawing` for one drawing against its sentence, `movement` for the flip-book read across drawings.
+  - `problem:` what is wrong, at least 5 characters, one sentence.
+  - `reason:` what in the picture shows it, at least 5 characters.
+  - `severity:` `high` (breaks the movement or the story), `medium`, or `low` (small or doubtful).
+- `ok:` drawings you looked at that have no problem, named exactly as printed on the sheet.
+
+What to look for: `hands` (holding / empty), `prop` (state, twice on screen), `body` (sitting, rising, standing),
+`path` (jump, wrong way, back, frozen), `identity` (face, clothes, colours, extra or missing limbs), `facing`
+(mirrored), `extra` (furniture, floor shadow, background, text). These are not output fields; they tell you where
+to look.
+
+If you are unsure, still write the finding with `severity: low` and `unsure:` at the start of `reason`; an honest
+"unsure" is better than a guess.
+
+Example:
+
+```yaml
+part: naime:p3-p4
+findings:
+  - drawing: naime/p3-p4.2.png
+    look: drawing
+    problem: holds the glass already
+    reason: glass visible in the right hand though the sentence says it is still open
+    severity: high
+  - drawing: null
+    frames: [112, 113]
+    look: movement
+    problem: two glasses on screen before contact
+    reason: "unsure: both characters seem to hold a glass before contact"
+    severity: low
+ok:
+  - naime/p3.png
+  - naime/p4.png
 ```
-p2-p3.2.png | hands | holds the glass; sentence says right hand still open and empty
-p4-p5.1.png | path  | already fully standing; sentence says legs straightening, should be lower than p4-p5.2
-frames 112-113 | prop | two glasses on screen (in both characters' hands) before contact
-```
-
-Categories: `hands`, `prop`, `body`, `path` (jump, wrong way, back, frozen), `identity` (face, clothes, colours,
-extra or missing limbs), `facing` (mirrored), `extra` (furniture, floor shadow, background, text), `other`.
-
-End with one line: `checked: <number of drawings>, problems: <number>`. If you are unsure, say `unsure` and why;
-an honest "unsure" is better than a guess.
 
 ## Do not
 

@@ -18,7 +18,7 @@ and the eyes change. That alone looks like a slideshow. It reads as animation be
 2. **Spacing.** Drawings bunch up near the start and the end of a move and spread out in the middle (slow in, slow
    out). With even spacing every move looks mechanical.
 3. **Holds are not dead.** A held drawing still blinks, and a pose arrives with a small settle. A hold where nothing
-   changes for a long time (`hold.dead_max`) reads as a frozen frame.
+   changes for a long time reads as a frozen frame.
 4. **Parts do not stop together.** The body lands, the head arrives a frame or two later, the arms after that. The
    eyes lead: eyes → head → body.
 
