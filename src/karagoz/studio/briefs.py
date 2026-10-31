@@ -47,6 +47,8 @@ def make_brief(
     else:
         lines = [context.rstrip("\n"), "", "## Inputs", ""]
     lines.extend(f"- {rel}" for rel in task.files_in)
+    if (prod / "style.yaml").is_file() and "style.yaml" not in task.files_in:
+        lines.append("- style.yaml")
     lines += [
         "",
         "## Output",

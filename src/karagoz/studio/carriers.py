@@ -217,7 +217,15 @@ class HumanCarrier:
     def run(self, brief: Brief, on_event: OnEvent | None = None) -> RunResult:
         path = self.briefs_dir / f"{brief.task_id.replace('/', '__')}.md"
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(brief.prompt, encoding="utf-8")
+        brief_md = brief.workdir / "BRIEF.md"
+        if brief_md.is_file():
+            try:
+                body = brief_md.read_text(encoding="utf-8")
+            except OSError:
+                body = ""
+            path.write_text(f"{brief.workdir}\n\n{body}", encoding="utf-8")
+        else:
+            path.write_text(brief.prompt, encoding="utf-8")
         if on_event is not None:
             on_event({"payload_type": "human.brief.written", "payload": {"path": str(path)}})
         return RunResult(ok=True, pending=True)

@@ -11,7 +11,7 @@ from karagoz import __version__, config
 from karagoz.studio.api_carrier import ApiCarrier
 from karagoz.studio.carriers import Carrier, HumanCarrier, MuseExecCarrier
 from karagoz.studio.orchestrator import Studio
-from karagoz.studio.tasks import Change
+from karagoz.studio.tasks import Change, TransitionError
 
 REQUIRED_SECRETS = ("META_API_KEY", "ELEVENLABS_API_KEY")
 
@@ -178,6 +178,24 @@ def cmd_context(args: argparse.Namespace) -> int:
 def cmd_answer(args: argparse.Namespace) -> int:
     try:
         _open_studio(args.prod, args.episode).answer(args.task, args.note)
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_done(args: argparse.Namespace) -> int:
+    try:
+        studio = _open_studio(args.prod, args.episode)
+        task = studio.board.tasks.get(args.task)
+        old = task.state if task is not None else None
+        studio.human_done(args.task)
+        new = studio.board.tasks[args.task].state
+        if old is not None:
+            _print_change(Change(args.task, old, new))
+    except TransitionError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -495,6 +513,12 @@ def build_parser() -> argparse.ArgumentParser:
     answer.add_argument("task", help="task id")
     answer.add_argument("note", help="the answer")
     answer.set_defaults(func=cmd_answer)
+
+    done = sub.add_parser("done", help="finish a human task")
+    done.add_argument("prod", help="production directory")
+    done.add_argument("episode", help="episode id")
+    done.add_argument("task", help="task id")
+    done.set_defaults(func=cmd_done)
 
     mouth = sub.add_parser("mouth", help="write mouth tracks from letter timings")
     mouth.add_argument("episode_dir", help="episode directory")
