@@ -9,10 +9,9 @@ tags: [timing]
 
 # Timing
 
-- Hold at least `hold.min` frames; an expression `hold.expressive`, a strong one `hold.strong`.
+- Hold at least `hold.min` frames; longer for an expressive hold, longer still for a strong one.
 - **The hit lands on the stressed word or just before it** (`beat.gesture_lead`), never after.
-- `twos` for ordinary moves, `ones` for a fast gesture; snap only with holds on both sides
-  (`transition.snap_hold_min`).
+- `twos` for ordinary moves, `ones` for a fast gesture; snap only with a hold on both sides.
 - **Never blink during a pose change** — the character would flash back to the old pose. Blink before a line, after
   a reaction, when the head turns.
 - At most two moves at the same moment.

@@ -6,6 +6,7 @@ import os
 import re
 from pathlib import Path
 
+import yaml
 from pydantic import BaseModel
 
 from karagoz.spec.anchor import parse_anchor
@@ -134,6 +135,206 @@ def _check_support_change(
             "give the transition 6 inbetweens on twos (Layout) instead of stretching the hold",
         )
     )
+
+
+def _check_characters_file(episode_dir: Path, shots: Shots | None, findings: list[Finding]) -> None:
+    """Validate the production-root characters.yaml, when it exists (agent workdirs have none)."""
+    prod = episode_dir.parent
+    path = prod / "characters.yaml"
+    if not path.is_file():
+        return
+    rel = _rel(path, episode_dir)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        findings.append(Finding("error", "production.characters_invalid", rel, "", "Cannot read 'characters.yaml'."))
+        return
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        findings.append(Finding("error", "production.characters_invalid", rel, "", "Cannot parse 'characters.yaml'."))
+        return
+    if not isinstance(data, dict) or not isinstance(data.get("characters"), dict):
+        findings.append(
+            Finding(
+                "error",
+                "production.characters_invalid",
+                rel,
+                "characters",
+                "'characters.yaml' must contain 'characters: {name: {...}}'.",
+            )
+        )
+        return
+    chars = data["characters"]
+    for name in sorted(chars.keys(), key=str):
+        entry = chars[name]
+        base = f"characters.{name}"
+        if not isinstance(entry, dict):
+            findings.append(
+                Finding("error", "production.characters_invalid", rel, base, f"Character '{name}' must be a mapping.")
+            )
+            continue
+        ref = entry.get("ref")
+        ref_ok = isinstance(ref, str) and ref and (prod / ref).is_file()
+        if not ref_ok:
+            message = (
+                f"Character '{name}' has no ref."
+                if not isinstance(ref, str) or not ref
+                else f"Character '{name}' ref '{ref}' does not exist."
+            )
+            findings.append(Finding("error", "production.characters_invalid", rel, f"{base}.ref", message))
+        if entry.get("natural_facing") not in ("left", "right"):
+            findings.append(
+                Finding(
+                    "error",
+                    "production.characters_invalid",
+                    rel,
+                    f"{base}.natural_facing",
+                    f"Character '{name}' natural_facing must be 'left' or 'right'.",
+                )
+            )
+        if "mirror_ok" in entry and not isinstance(entry["mirror_ok"], bool):
+            findings.append(
+                Finding(
+                    "error",
+                    "production.characters_invalid",
+                    rel,
+                    f"{base}.mirror_ok",
+                    f"Character '{name}' mirror_ok must be a bool.",
+                )
+            )
+        if "height_cm" in entry:
+            height = entry["height_cm"]
+            if isinstance(height, bool) or not isinstance(height, (int, float)) or height <= 0:
+                findings.append(
+                    Finding(
+                        "error",
+                        "production.characters_invalid",
+                        rel,
+                        f"{base}.height_cm",
+                        f"Character '{name}' height_cm must be a positive number.",
+                    )
+                )
+    if shots is not None:
+        known = set(chars.keys())
+        seen: set[str] = set()
+        for shot in shots.shots:
+            for char in shot.characters or []:
+                if char.name not in known and char.name not in seen:
+                    seen.add(char.name)
+                    findings.append(
+                        Finding(
+                            "error",
+                            "production.character_unknown",
+                            rel,
+                            f"characters.{char.name}",
+                            f"Character '{char.name}' is in shots.yaml but not in 'characters.yaml'.",
+                        )
+                    )
+
+
+def _check_locations_file(episode_dir: Path, shots: Shots | None, findings: list[Finding]) -> None:
+    """Validate the production-root locations.yaml, when it exists."""
+    prod = episode_dir.parent
+    path = prod / "locations.yaml"
+    if not path.is_file():
+        return
+    rel = _rel(path, episode_dir)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        findings.append(Finding("error", "production.locations_invalid", rel, "", "Cannot read 'locations.yaml'."))
+        return
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        findings.append(Finding("error", "production.locations_invalid", rel, "", "Cannot parse 'locations.yaml'."))
+        return
+    if not isinstance(data, dict) or not isinstance(data.get("locations"), dict):
+        findings.append(
+            Finding(
+                "error",
+                "production.locations_invalid",
+                rel,
+                "locations",
+                "'locations.yaml' must contain 'locations: {name: {description: str}}'.",
+            )
+        )
+        return
+    locations = data["locations"]
+    for name in sorted(locations.keys(), key=str):
+        entry = locations[name]
+        if not isinstance(entry, dict) or not isinstance(entry.get("description"), str):
+            findings.append(
+                Finding(
+                    "error",
+                    "production.locations_invalid",
+                    rel,
+                    f"locations.{name}",
+                    f"Location '{name}' must be a mapping with a 'description' string.",
+                )
+            )
+    if shots is not None:
+        known = set(locations.keys())
+        seen: set[str] = set()
+        for shot in shots.shots:
+            if shot.location in known or shot.location in seen:
+                continue
+            if (prod / "locations" / shot.location / "background.png").is_file():
+                continue
+            seen.add(shot.location)
+            findings.append(
+                Finding(
+                    "warn",
+                    "production.location_unknown",
+                    rel,
+                    f"locations.{shot.location}",
+                    f"Location '{shot.location}' is in shots.yaml but not in 'locations.yaml' "
+                    "and has no background.png.",
+                )
+            )
+
+
+def _check_props_file(episode_dir: Path, findings: list[Finding]) -> None:
+    """Validate the production-root props.yaml, when it exists."""
+    path = episode_dir.parent / "props.yaml"
+    if not path.is_file():
+        return
+    rel = _rel(path, episode_dir)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        findings.append(Finding("error", "production.props_invalid", rel, "", "Cannot read 'props.yaml'."))
+        return
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        findings.append(Finding("error", "production.props_invalid", rel, "", "Cannot parse 'props.yaml'."))
+        return
+    if not isinstance(data, dict) or not isinstance(data.get("props"), dict):
+        findings.append(
+            Finding(
+                "error",
+                "production.props_invalid",
+                rel,
+                "props",
+                "'props.yaml' must contain 'props: {name: {description: str}}'.",
+            )
+        )
+        return
+    props = data["props"]
+    for name in sorted(props.keys(), key=str):
+        entry = props[name]
+        if not isinstance(entry, dict) or not isinstance(entry.get("description"), str):
+            findings.append(
+                Finding(
+                    "error",
+                    "production.props_invalid",
+                    rel,
+                    f"props.{name}",
+                    f"Prop '{name}' must be a mapping with a 'description' string.",
+                )
+            )
 
 
 def check_episode(episode_dir: Path, style_path: Path | None = None) -> list[Finding]:
@@ -1187,6 +1388,10 @@ def check_episode(episode_dir: Path, style_path: Path | None = None) -> list[Fin
                                     f" but {_side_word(vb2)} in {s2.id} (crossing the 180° line)",
                                 )
                             )
+
+    _check_characters_file(episode_dir, shots, findings)
+    _check_locations_file(episode_dir, shots, findings)
+    _check_props_file(episode_dir, findings)
 
     findings.sort(key=lambda f: (f.file, f.path, f.code))
     return findings
