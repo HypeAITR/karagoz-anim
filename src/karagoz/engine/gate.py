@@ -14,9 +14,27 @@ import yaml
 
 from karagoz.engine.timing import resolve_episode
 from karagoz.engine.xsheet import expand
-from karagoz.spec import Align, Lines, Poses, Shots, Style, Xsheet, load
+from karagoz.spec import Align, Lines, Poses, Regions, Shots, SpecError, Style, Xsheet, load
 
-KINDS = ("prop_count", "reverse", "jump", "scale_jump", "placement")
+KINDS = ("prop_count", "reverse", "jump", "scale_jump", "placement", "world")
+
+# First guesses for typical object heights, to be calibrated on real locations (WP-38).
+WORLD_SIZES: dict[str, tuple[int, int]] = {
+    "door": (180, 230),
+    "tv": (30, 120),
+    "television": (30, 120),
+    "coffee table": (30, 60),
+    "table": (65, 85),
+    "sofa": (70, 110),
+    "couch": (70, 110),
+    "armchair": (70, 110),
+    "chair": (75, 110),
+    "bed": (40, 120),
+    "fridge": (140, 200),
+    "refrigerator": (140, 200),
+    "wardrobe": (170, 240),
+}
+WORLD_TOL = 1.5
 
 JUMP_HEADS = 0.6
 REVERSE_MIN_MOVE = 0.25
@@ -468,6 +486,123 @@ def select_flags(flags: list[Flag], limit: int = 5) -> tuple[list[Flag], list[Fl
     return (shown, silenced, len(others) - len(taken))
 
 
+_WORD_RE = re.compile(r"[a-z0-9]+")
+
+
+def _world_key(kind: str) -> str | None:
+    """Longest WORLD_SIZES key matching the lowercased kind as whole word(s), or None."""
+    words = _WORD_RE.findall(kind.lower())
+    best: str | None = None
+    for key in WORLD_SIZES:
+        parts = key.split()
+        if len(parts) > len(words):
+            continue
+        for start in range(len(words) - len(parts) + 1):
+            if words[start : start + len(parts)] == parts:
+                if best is None or len(key) > len(best):
+                    best = key
+                break
+    return best
+
+
+def world_flags(regions: Regions | None, heights: dict[str, float]) -> list[Flag]:
+    """Flag objects and characters whose measured sizes do not fit the world. Never rejects."""
+    if regions is None or regions.scale is None:
+        return []
+    px_per_cm = regions.scale.px_per_cm
+    sized: list[tuple[str, str, float]] = []  # (name, kind key, height_cm) in region-map order
+    for obj in regions.objects:
+        key = _world_key(obj.kind)
+        if key is None:
+            continue
+        sized.append((obj.name, key, (obj.box[3] - obj.box[1]) / px_per_cm))
+    flags: list[Flag] = []
+    for name, key, height_cm in sized:
+        if name == regions.scale.source:
+            continue
+        lo, hi = WORLD_SIZES[key]
+        if height_cm > hi * WORLD_TOL or height_cm < lo / WORLD_TOL:
+            size = max(height_cm / hi, lo / height_cm)
+            flags.append(
+                Flag(
+                    "world",
+                    None,
+                    (name,),
+                    size,
+                    f"{name} ({key}): {round(height_cm)} cm tall, expected {lo}–{hi} cm",
+                    (),
+                )
+            )
+    for name, key, door_cm in sized:
+        if key != "door":
+            continue
+        for character in sorted(heights):
+            height = heights[character]
+            if height > door_cm:
+                flags.append(
+                    Flag(
+                        "world",
+                        character,
+                        (name,),
+                        height / door_cm,
+                        f"{character} is {round(height)} cm tall, taller than door {name} ({round(door_cm)} cm)",
+                        (),
+                    )
+                )
+    return flags
+
+
+def _shot_regions(prod: Path, episode: str, shot: str) -> Regions | None:
+    """The shot location's region map, or None when there is none to measure against."""
+    shots_path = prod / episode / "shots.yaml"
+    if not shots_path.is_file():
+        return None
+    shots_obj = load(shots_path)
+    if not isinstance(shots_obj, Shots):
+        return None
+    location: str | None = None
+    for entry in shots_obj.shots:
+        if entry.id == shot:
+            location = entry.location
+            break
+    if location is None:
+        return None
+    regions_path = prod / "locations" / location / "regions.yaml"
+    if not regions_path.is_file():
+        return None
+    try:
+        regions_obj = load(regions_path)
+    except SpecError:
+        return None
+    return regions_obj if isinstance(regions_obj, Regions) else None
+
+
+def _shot_heights(prod: Path, cells: dict[str, list[str | None]]) -> dict[str, float]:
+    """Known heights in cm for the characters that have body cells in the shot."""
+    present = {char for char, row in cells.items() if any(cell is not None for cell in row)}
+    if not present:
+        return {}
+    chars_path = prod / "characters.yaml"
+    if not chars_path.is_file():
+        return {}
+    data = yaml.safe_load(chars_path.read_text(encoding="utf-8"))
+    if not isinstance(data, dict):
+        return {}
+    chars = data.get("characters")
+    if not isinstance(chars, dict):
+        return {}
+    heights: dict[str, float] = {}
+    for char in present:
+        info = chars.get(char)
+        if not isinstance(info, dict):
+            continue
+        value = info.get("height_cm")
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            continue
+        heights[char] = float(value)
+    return heights
+
+
 def exposure(prod: Path, episode: str, shot: str) -> dict[str, list[str | None]]:
     """Body cells per character per frame, built the way plan_draw builds them."""
     episode_dir = prod / episode
@@ -593,7 +728,9 @@ def gate_shot(prod: Path, episode: str, shot: str, *, limit: int = 5) -> dict[st
         poses = poses_obj
 
     expected = _expected_props(prod / episode / "continuity.yaml", shot)
-    flags = gate_flags(exposure(prod, episode, shot), placement_data, landmarks_data, poses, expected)
+    cells = exposure(prod, episode, shot)
+    flags = gate_flags(cells, placement_data, landmarks_data, poses, expected)
+    flags = [*flags, *world_flags(_shot_regions(prod, episode, shot), _shot_heights(prod, cells))]
 
     ack = _read_json_object(prod / episode / "review" / shot / "gate-ack.json")
     marked: list[Flag] = []

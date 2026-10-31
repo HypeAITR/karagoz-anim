@@ -66,7 +66,7 @@ def test_sequence_and_ids() -> None:
     f = Flag("jump", "ali", ("p1", "p1-p2.1"), 1.0, "m", ("a", "b"))
     assert f.id == "jump:ali:p1+p1-p2.1" and f.frames is None and not f.silenced
     assert Flag("prop_count", None, ("ali/p1",), 1, "m", ("a",), (0, 2)).id == "prop_count:-:ali/p1"
-    assert KINDS == ("prop_count", "reverse", "jump", "scale_jump", "placement")
+    assert KINDS == ("prop_count", "reverse", "jump", "scale_jump", "placement", "world")  # WP-38
 
 
 def test_smooth_rise_is_not_flagged() -> None:
