@@ -110,6 +110,12 @@ never describe furniture as something to draw, no anatomical close-ups. Your wor
 - One character per drawing; never describe two people in one pose.
 - Run `karagoz check <file>` if available; fix every `error`.
 
+## Sequences
+
+An action that is not one pose change (pouring, a gag, a fall) is a **sequence**, not a transition: see
+section `sequences-loops`. You write its `sequences` entries in `poses.yaml` — one concrete sentence per
+drawing, each saying what changed from the previous one — and Timer plays them.
+
 ## Before you finish
 
 Read your poses as a flip book, drawing by drawing, for each character: does every drawing follow from the one

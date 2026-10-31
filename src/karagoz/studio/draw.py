@@ -23,12 +23,12 @@ from karagoz.engine.patch import PatchError, clip_patch, make_patch, save_patch
 from karagoz.engine.timing import resolve_episode
 from karagoz.engine.xsheet import expand
 from karagoz.meta.client import MetaApiError
-from karagoz.spec import Align, Lines, Pose, Poses, Shots, SpecError, Style, Xsheet, load
+from karagoz.spec import Align, Lines, Pose, Poses, PoseSequence, Shots, SpecError, Style, Xsheet, load
 from karagoz.spec.models import Hand
 
 USD_PER_IMAGE = 0.01
 
-Kind = Literal["background", "pose", "inbetween", "mouth", "eyes"]
+Kind = Literal["background", "pose", "inbetween", "sequence", "mouth", "eyes"]
 Reasoning = Literal["low", "high"]
 
 TEMPLATES_PATH = Path(__file__).with_name("draw_templates.yaml")
@@ -130,6 +130,25 @@ def _parse_inbetween(drawing: str) -> tuple[str, str, int] | None:
     if k < 1:
         return None
     return (a, b, k)
+
+
+_SEQUENCE_RE = re.compile(r"^(s[0-9]{1,2})\.([0-9]+)$")
+
+
+def _parse_sequence(drawing: str) -> tuple[str, int] | None:
+    """The (sequence id, 1-based drawing number) of a sequence cell like "s1.3", else None."""
+    m = _SEQUENCE_RE.match(drawing)
+    if m is None:
+        return None
+    k = int(m.group(2))
+    if k < 1:
+        return None
+    return (m.group(1), k)
+
+
+def _sequence_sort_key(drawing: str) -> tuple[str, int]:
+    parsed = _parse_sequence(drawing)
+    return (parsed[0], parsed[1]) if parsed is not None else (drawing, 0)
 
 
 def _load_characters(path: Path) -> dict[str, _CharacterInfo]:
@@ -434,18 +453,35 @@ def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
 
     pose_ids: dict[str, set[str]] = {}
     inbetween_drawings: dict[str, set[str]] = {}
+    sequence_drawings: dict[str, set[str]] = {}
+    used_sequences: dict[str, set[str]] = {}
     for char, cells in exp.body.items():
         for cell in cells:
             if cell is None:
                 continue
             parsed = _parse_inbetween(cell)
-            if parsed is None:
-                pose_ids.setdefault(char, set()).add(cell)
-            else:
+            if parsed is not None:
                 a, b, _ = parsed
                 pose_ids.setdefault(char, set()).add(a)
                 pose_ids.setdefault(char, set()).add(b)
                 inbetween_drawings.setdefault(char, set()).add(cell)
+                continue
+            parsed_seq = _parse_sequence(cell)
+            if parsed_seq is not None:
+                sequence_drawings.setdefault(char, set()).add(cell)
+                used_sequences.setdefault(char, set()).add(parsed_seq[0])
+                continue
+            pose_ids.setdefault(char, set()).add(cell)
+    # A used sequence's `from` and `to` poses are key poses, planned like any other key pose.
+    if poses is not None:
+        for char, seq_ids in used_sequences.items():
+            if char not in poses.characters:
+                continue
+            for seq in poses.characters[char].sequences or []:
+                if seq.id in seq_ids:
+                    pose_ids.setdefault(char, set()).add(seq.from_)
+                    if seq.to is not None:
+                        pose_ids.setdefault(char, set()).add(seq.to)
 
     for char in sorted(pose_ids):
         info = characters.get(char)
@@ -611,6 +647,69 @@ def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
                 )
             )
 
+    seq_by_char: dict[str, dict[str, PoseSequence]] = {}
+    if poses is not None:
+        for cname, cposes in poses.characters.items():
+            seq_by_char[cname] = {s.id: s for s in (cposes.sequences or [])}
+
+    # Sequence cells are drawn in order, each from the previous drawing (like key poses):
+    # sN.1 from the `from` pose, sN.k from sN.(k-1).
+    for char in sorted(sequence_drawings):
+        info = characters.get(char)
+        if info is None:
+            continue
+        ref_path = prod / info.ref
+        char_seqs = seq_by_char.get(char, {})
+        from_pose: dict[str, Pose | None] = {}
+        if poses is not None and char in poses.characters:
+            by_id = {p.id: p for p in poses.characters[char].poses}
+            for sid, seq_entry in char_seqs.items():
+                from_pose[sid] = by_id.get(seq_entry.from_)
+        mirrored = _will_mirror(shots, shot, char, info.natural_facing)
+        for drawing in sorted(sequence_drawings[char], key=_sequence_sort_key):
+            parsed_sq = _parse_sequence(drawing)
+            if parsed_sq is None:
+                continue
+            sid, k = parsed_sq
+            seq_def = char_seqs.get(sid)
+            if seq_def is None or not 1 <= k <= len(seq_def.drawings):
+                continue
+            acting = seq_def.drawings[k - 1]
+            if mirrored:
+                acting = swap_left_right(acting)
+            matched = from_pose.get(sid)
+            support_str = (
+                f"{support_texts[matched.support]} " if matched is not None and matched.support is not None else ""
+            )
+            props_str = _hands_text(matched.holds if matched is not None else None, prop_descriptions)
+            if mirrored:
+                props_str = swap_left_right(props_str)
+            prompt = key_pose_next_tpl.format(
+                style=style_text,
+                facing=info.natural_facing,
+                support=support_str,
+                props=props_str,
+                acting=acting,
+            )
+            prev: Path = (
+                assets_dir / char / f"{seq_def.from_}.png" if k == 1 else assets_dir / char / f"{sid}.{k - 1}.png"
+            )
+            jobs.append(
+                DrawJob(
+                    kind="sequence",
+                    character=char,
+                    drawing=drawing,
+                    variant=None,
+                    refs=(ref_path, prev),
+                    prompt=prompt,
+                    fallback=None,
+                    reasoning="high",
+                    size="1024x1536",
+                    out=assets_dir / char / f"{drawing}.png",
+                    wave=after_poses + k - 1,
+                )
+            )
+
     mouth_tuples: set[tuple[str, str, str]] = set()
     eyes_tuples: set[tuple[str, str, str]] = set()
     for char, body_cells in exp.body.items():
@@ -633,6 +732,15 @@ def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
                 a, b, k = parsed_ib
                 n = max_k.get((char, a, b), k)
                 body = a if k <= n / 2 else b
+            else:
+                parsed_sq = _parse_sequence(body)
+                if parsed_sq is not None:
+                    sid, k = parsed_sq
+                    sq = seq_by_char.get(char, {}).get(sid)
+                    if sq is not None:
+                        total = len(sq.drawings)
+                        target = sq.to if sq.to is not None else sq.from_
+                        body = sq.from_ if k <= total / 2 else target
             shape = shape_per_frame[f] if f < len(shape_per_frame) else "X"
             if shape != "X":
                 mouth_tuples.add((char, body, shape))
@@ -685,7 +793,7 @@ def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
             )
         )
 
-    order: dict[str, int] = {"background": 0, "pose": 1, "inbetween": 2, "mouth": 3, "eyes": 4}
+    order: dict[str, int] = {"background": 0, "pose": 1, "inbetween": 2, "sequence": 3, "mouth": 4, "eyes": 5}
     jobs.sort(key=lambda j: (order[j.kind], j.character or "", j.drawing, j.variant or ""))
     return jobs
 

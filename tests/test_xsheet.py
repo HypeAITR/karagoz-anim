@@ -152,9 +152,9 @@ def test_too_many_moves() -> None:
     assert [c for c, _ in codes(f, "warn")].count("timing.too_many_moves") == 1
 
 
-def test_loop_is_unsupported_not_crash() -> None:
-    _, f = run(xsheet([{"at": "L02.end", "loop": ["p1", "p2"], "until": "shot.out"}]))
-    assert ("timing.unsupported", "tracks.ali.body[2]") in codes(f, "warn")
+def test_loop_is_unsupported_not_crash() -> None:  # WP-37: body-track loops expand now (eyes tracks stay unsupported)
+    exp, f = run(xsheet([{"at": "L02.end", "loop": ["p1", "p2"], "until": "shot.out"}]))
+    assert ("timing.unsupported", "tracks.ali.body[2]") not in codes(f, "warn") and exp.unsupported == []
 
 
 @pytest.fixture

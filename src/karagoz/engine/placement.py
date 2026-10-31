@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from statistics import median
 from typing import Any
 
@@ -12,6 +12,7 @@ from karagoz.spec import Regions
 
 INBETWEEN_RE = re.compile(r"^(p[0-9]{1,2})-(p[0-9]{1,2})\.([0-9]+)$")
 KEY_RE = re.compile(r"^p[0-9]{1,2}$")
+SEQUENCE_RE = re.compile(r"^(s[0-9]{1,2})\.([0-9]+)$")
 FEET_GAP_HEADS = 0.25
 OCCLUDE_MARGIN = 10
 REST_LIFT_HEADS = 0.5
@@ -110,6 +111,7 @@ class CharacterInput:
     poses: dict[str, PoseInfo]
     landmarks: dict[str, dict[str, Any]]
     head_per_face: float | None = None
+    sequences: dict[str, tuple[str, str | None]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -255,8 +257,29 @@ def solve(
                 direct[name] = character.target_head_px / d.head_h
         key_names = sorted((n for n in character.landmarks if KEY_RE.match(n) is not None), key=_key_sort_key)
         inbetween_names = sorted(n for n in character.landmarks if INBETWEEN_RE.match(n) is not None)
+        # A drawing sN.k of a known sequence is placed like an inbetween of its keys (from, to),
+        # or of (from, from) when the sequence has no `to`. Drawings of unknown sequences keep
+        # the "unknown drawing name" warning.
+        seq_parsed: dict[str, tuple[str, str, int, str]] = {}
+        seq_max: dict[str, int] = {}
+        for landmark_name in character.landmarks:
+            m = SEQUENCE_RE.match(landmark_name)
+            if m is None:
+                continue
+            sid = m.group(1)
+            if sid not in character.sequences:
+                continue
+            k = int(m.group(2))
+            if k < 1:
+                continue
+            a, b = character.sequences[sid]
+            seq_parsed[landmark_name] = (a, b if b is not None else a, k, sid)
+            seq_max[sid] = max(seq_max.get(sid, 0), k)
+        sequence_names = sorted(seq_parsed)
         other_names = sorted(
-            n for n in character.landmarks if KEY_RE.match(n) is None and INBETWEEN_RE.match(n) is None
+            n
+            for n in character.landmarks
+            if KEY_RE.match(n) is None and INBETWEEN_RE.match(n) is None and n not in seq_parsed
         )
         setups: dict[str, _KeySetup] = {}
         for name in key_names:
@@ -458,11 +481,15 @@ def solve(
                             f"while sitting on {place_name}",
                         )
                     )
-        for name in inbetween_names:
-            if name not in parsed:
+        for name in inbetween_names + sequence_names:
+            if name in parsed:
+                a, b, k = parsed[name]
+                n = prefix_max[(a, b)]
+            elif name in seq_parsed:
+                a, b, k, sid = seq_parsed[name]
+                n = seq_max[sid]
+            else:
                 continue
-            a, b, k = parsed[name]
-            n = prefix_max[(a, b)]
             t = k / (n + 1)
             d = data[name]
             pa = char_placements.get(a)

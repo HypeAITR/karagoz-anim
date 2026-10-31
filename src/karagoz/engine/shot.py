@@ -257,12 +257,14 @@ def _placement_mode(
         for entry in shot_entry.characters:
             place_by_char[entry.name] = entry.place
     poses_by_char: dict[str, dict[str, PoseInfo]] = {}
+    seqs_by_char: dict[str, dict[str, tuple[str, str | None]]] = {}
     if poses is not None:
         for char_name, char_poses in poses.characters.items():
             mapping: dict[str, PoseInfo] = {}
             for pose in char_poses.poses:
                 mapping[pose.id] = PoseInfo(support=pose.support, on=pose.on, rests_on=tuple(pose.rests_on or []))
             poses_by_char[char_name] = mapping
+            seqs_by_char[char_name] = {seq.id: (seq.from_, seq.to) for seq in (char_poses.sequences or [])}
     inputs: list[CharacterInput] = []
     for character in chars:
         info = characters.get(character)
@@ -329,6 +331,7 @@ def _placement_mode(
                 poses=poses_by_char.get(character, {}),
                 landmarks=landmarks,
                 head_per_face=head_per_face,
+                sequences=seqs_by_char.get(character, {}),
             )
         )
     placements, solver_warnings = solve(inputs, regions)

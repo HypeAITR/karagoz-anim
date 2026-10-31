@@ -78,6 +78,12 @@ mouth:
 - Spacing is even inside a transition (every inbetween is shown for its cadence). If a move needs to slow in or out,
   that is more inbetweens near the end, which is Layout's work: say so in your notes.
 
+## Sequences and loops
+
+A sequence plays its drawings and then holds its target; a loop repeats poses (and sequences) until `until`:
+see section `sequences-loops` for the rules. You write `sequence` / `loop` events on body tracks (never on
+eyes tracks); Layout writes the `sequences` they name.
+
 ## Before you finish
 
 Read your xsheet against the poses like a flip book: where is every character at every line? Is any body move
