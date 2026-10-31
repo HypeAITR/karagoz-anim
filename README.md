@@ -43,6 +43,7 @@ Four layers: studio agents, the coordinate engine, model adapters, and render. T
 - `karagoz approve` — approve a task in review
 - `karagoz retake` — send a task back for another take
 - `karagoz answer` — answer a task's question
+- `karagoz done` — finish a human task
 - `karagoz mouth` — write mouth tracks from letter timings
 - `karagoz draw` — draw every asset a shot needs
 - `karagoz recut` — re-cut a shot's mouth/eye patches inside the face

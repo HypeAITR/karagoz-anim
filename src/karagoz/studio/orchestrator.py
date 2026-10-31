@@ -39,7 +39,7 @@ from karagoz.studio.context import (
 )
 from karagoz.studio.events import Clock, EventLog
 from karagoz.studio.questions import QuestionPolicy, allowance, difficulty, parse_question
-from karagoz.studio.tasks import Board, Change, State, Task
+from karagoz.studio.tasks import Board, Change, State, Task, TransitionError
 
 if TYPE_CHECKING:
     from karagoz.engine.regions import SamLike
@@ -346,6 +346,7 @@ def plan_tasks(prod: Path, episode: str) -> list[Task]:
                 files_out=[f"{episode}/continuity.yaml"],
             )
         )
+    prev_timer_by_scene: dict[int, str] = {}
     for shot in shots.shots:
         poses = f"{episode}/shots/{shot.id}/poses.yaml"
         xsheet = f"{episode}/shots/{shot.id}/xsheet.yaml"
@@ -364,14 +365,21 @@ def plan_tasks(prod: Path, episode: str) -> list[Task]:
                 files_out=[poses],
             )
         )
+        prev_timer = prev_timer_by_scene.get(shot.scene)
+        timer_inputs = [f"{shot.id}/layout", "ep/voice"]
+        timer_files_in = [*base_in, f"{episode}/continuity.yaml", poses, *shot_aligns]
+        if prev_timer is not None:
+            timer_inputs.append(f"{prev_timer}/timer")
+            timer_files_in.append(f"{episode}/shots/{prev_timer}/xsheet.yaml")
         tasks.append(
             Task(
                 id=f"{shot.id}/timer",
-                inputs=[f"{shot.id}/layout", "ep/voice"],
-                files_in=[*base_in, f"{episode}/continuity.yaml", poses, *shot_aligns],
+                inputs=timer_inputs,
+                files_in=timer_files_in,
                 files_out=[f"{episode}/shots/{shot.id}/xsheet.yaml"],
             )
         )
+        prev_timer_by_scene[shot.scene] = shot.id
         redraw_json = f"{episode}/review/{shot.id}/redraw.json"
         review_mode = _review_on(prod, episode)
         draw_in = ["characters.yaml", "locations.yaml", poses, xsheet, *shot_aligns, *loc_files]
@@ -510,9 +518,10 @@ def code_work(
             final = f"{len(regions['objects'])} objects, {len(regions['places'])} places"
             return RunResult(ok=True, final_text=final, cost_usd=report.cost_usd + sam_cost)
         if department == "voice":
-            from karagoz.voice.elevenlabs import synthesize_episode
+            from karagoz.voice.elevenlabs import synthesize_episode, synthesize_sounds
 
             synthesize_episode(prod, episode)
+            synthesize_sounds(prod, episode)
             return RunResult(ok=True, cost_usd=0.0)
         if department == "draw":
             import threading
@@ -930,6 +939,34 @@ class Studio:
         self._record(Change(task_id, old, State.QUESTION, note))
         self._save_board()
 
+    def human_workdir(self, task_id: str) -> Path:
+        """The working directory of the task's current attempt (as _prepare_workdir made it)."""
+        task = self.board.tasks.get(task_id)
+        if task is None:
+            raise TransitionError(f"unknown task: {task_id}")
+        return self.work_root / self.episode / task.id.replace("/", "__") / str(task.attempts)
+
+    def human_done(self, task_id: str) -> None:
+        """Finish a RUNNING human task from its working directory (as RunResult(ok=True))."""
+        task = self.board.tasks.get(task_id)
+        if task is None:
+            raise TransitionError(f"unknown task: {task_id}")
+        if task.state is not State.RUNNING:
+            raise TransitionError(f"cannot finish {task_id} from {task.state.value}")
+        workdir = self.human_workdir(task_id)
+        missing = [rel for rel in task.files_out if not (workdir / rel).is_file()]
+        if missing:
+            raise TransitionError(f"missing output: {', '.join(missing)}")
+        changes: list[Change] = []
+        self._complete_agent_run(task, workdir, RunResult(ok=True), changes)
+        finished = self.board.tasks[task_id]
+        if self._human == "off" and finished.state is State.REVIEW:
+            change = self.board.approve(finished.id, task_digest=self._task_digest)
+            finished.input_files = file_digests(self.prod, finished)
+            self._record(change)
+            self.log.append(finished.id, "note", text="human review off: auto-approved")
+        self._save()
+
     def status(self) -> str:
         return "\n".join(
             f"{t.state.value}  {t.id}  attempts={t.attempts} retakes={t.retakes}" for t in self.board.tasks.values()
@@ -1040,6 +1077,17 @@ class Studio:
             result = carrier.run(brief, on_event=lambda obj: self._on_carrier_event(task.id, obj))
         except Exception as exc:  # noqa: BLE001 - a carrier crash fails the task, not the studio
             result = RunResult(ok=False, error=f"{type(exc).__name__}: {exc}")
+        return self._complete_agent_run(task, workdir, result, changes, carrier)
+
+    def _complete_agent_run(
+        self,
+        task: Task,
+        workdir: Path,
+        result: RunResult,
+        changes: list[Change],
+        carrier: Carrier | None = None,
+    ) -> list[Change]:
+        """Finish a task after its carrier returned (shared by _run_task and human_done)."""
         self.log.append(task.id, "cost", usd=result.cost_usd, seconds=result.seconds, session=result.session_id)
         self.budget.charge(task.unit, result.cost_usd)
         self._carry_notes_back(task, workdir)
@@ -1107,7 +1155,8 @@ class Studio:
             return changes
         changes.append(self.board.finish(task.id, ok=True))
         self._record(changes[-1])
-        self._maybe_interview(task, carrier, workdir, result.session_id)
+        if carrier is not None:
+            self._maybe_interview(task, carrier, workdir, result.session_id)
         return changes
 
     def _maybe_interview(self, task: Task, carrier: Carrier, workdir: Path, session_id: str | None) -> None:
@@ -1376,7 +1425,11 @@ class Studio:
         return allowance(self._questions, self._human, level, asked, pool_used)
 
     def _report_outside_writes(self, task: Task, workdir: Path) -> None:
-        placed = set(task.files_in) | {"style.yaml", "BRIEF.md", "QUESTION.md", "DECISIONS.md"} | set(task.files_out)
+        placed = (
+            set(task.files_in)
+            | {"style.yaml", "BRIEF.md", "QUESTION.md", "DECISIONS.md", "API_TRACE.json"}
+            | set(task.files_out)
+        )
         notes_prefix = f"notes/{task.department}/"
         outside: list[str] = []
         for path in workdir.rglob("*"):
