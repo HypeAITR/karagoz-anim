@@ -25,7 +25,7 @@ EP = "ep-test"
 
 OUTPUTS = {  # department -> {production-relative output path: fixture file}
     "director": {f"{EP}/lines.yaml": "lines.yaml", f"{EP}/shots.yaml": "shots.yaml"},
-    "continuity": {f"{EP}/continuity.yaml": "continuity.yaml"},
+    "continuity": {f"{EP}/continuity/scene1.yaml": "continuity.yaml"},
     "layout": {f"{EP}/shots/sh01/poses.yaml": "poses.yaml"},
     "timer": {f"{EP}/shots/sh01/xsheet.yaml": "xsheet.yaml"},
 }

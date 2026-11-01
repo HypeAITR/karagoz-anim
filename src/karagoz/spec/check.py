@@ -10,6 +10,7 @@ import yaml
 from pydantic import BaseModel
 
 from karagoz.spec.anchor import parse_anchor
+from karagoz.spec.continuity import continuity_paths, merge_continuities
 from karagoz.spec.findings import Finding, SpecError
 from karagoz.spec.io import load
 from karagoz.spec.models import (
@@ -356,13 +357,31 @@ def check_episode(episode_dir: Path, style_path: Path | None = None) -> list[Fin
 
     lines_path = episode_dir / "lines.yaml"
     shots_path = episode_dir / "shots.yaml"
-    continuity_path = episode_dir / "continuity.yaml"
     lines_obj = _load(lines_path)
     lines = lines_obj if isinstance(lines_obj, Lines) else None
     shots_obj = _load(shots_path)
     shots = shots_obj if isinstance(shots_obj, Shots) else None
-    continuity_obj = _load(continuity_path)
-    continuity = continuity_obj if isinstance(continuity_obj, Continuity) else None
+    continuity_parts: list[tuple[Path, Continuity]] = []
+    continuity_broken = False
+    for continuity_path in continuity_paths(episode_dir):
+        continuity_obj = _load(continuity_path)
+        if isinstance(continuity_obj, Continuity):
+            continuity_parts.append((continuity_path, continuity_obj))
+        else:
+            continuity_broken = True
+    continuity: Continuity | None = None
+    state_files: list[tuple[str, int]] = []
+    prop_files: list[tuple[str, int]] = []
+    if continuity_parts and not continuity_broken:
+        try:
+            continuity = merge_continuities(continuity_parts, episode_dir)
+        except SpecError as exc:
+            findings.extend(exc.findings)
+        else:
+            for part_path, part in continuity_parts:
+                part_rel = _rel(part_path, episode_dir)
+                state_files.extend((part_rel, local) for local in range(len(part.states)))
+                prop_files.extend((part_rel, local) for local in range(len(part.props or [])))
     style_obj = _load(style_path)
     style = style_obj if isinstance(style_obj, Style) else None
 
@@ -407,7 +426,6 @@ def check_episode(episode_dir: Path, style_path: Path | None = None) -> list[Fin
 
     lines_rel = _rel(lines_path, episode_dir)
     shots_rel = _rel(shots_path, episode_dir)
-    continuity_rel = _rel(continuity_path, episode_dir)
 
     lines_by_id: dict[str, tuple[int, str, str]] = {}
     sounds_by_id: set[str] = set()
@@ -849,45 +867,50 @@ def check_episode(episode_dir: Path, style_path: Path | None = None) -> list[Fin
                             )
                         )
 
-    # Continuity and props.
+    # Continuity and props, read as one view over the scene files (state_files and
+    # prop_files map each merged entry to its scene file and its index in that file).
     if continuity is not None:
         if shots is not None:
             for i, st in enumerate(continuity.states):
+                srel, si = state_files[i]
                 if st.shot not in shots_by_id:
                     findings.append(
                         Finding(
                             "error",
                             "continuity.unknown_shot",
-                            continuity_rel,
-                            f"states[{i}].shot",
+                            srel,
+                            f"states[{si}].shot",
                             f"Unknown shot '{st.shot}' in continuity.",
                         )
                     )
             if continuity.props is not None:
                 for j, pr in enumerate(continuity.props):
+                    prel, pj = prop_files[j]
                     if pr.shot not in shots_by_id:
                         findings.append(
                             Finding(
                                 "error",
                                 "continuity.unknown_shot",
-                                continuity_rel,
-                                f"props[{j}].shot",
+                                prel,
+                                f"props[{pj}].shot",
                                 f"Unknown shot '{pr.shot}' in continuity.",
                             )
                         )
             for i, st in enumerate(continuity.states):
+                srel, si = state_files[i]
                 if st.shot in shots_by_id and st.character not in shots_by_id[st.shot][1]:
                     findings.append(
                         Finding(
                             "error",
                             "continuity.unknown_character",
-                            continuity_rel,
-                            f"states[{i}].character",
+                            srel,
+                            f"states[{si}].character",
                             f"Unknown character '{st.character}' for shot '{st.shot}' in continuity.",
                         )
                     )
             if continuity.props is not None:
                 for j, pr in enumerate(continuity.props):
+                    prel, pj = prop_files[j]
                     if pr.shot not in shots_by_id:
                         continue
                     chars = shots_by_id[pr.shot][1]
@@ -896,8 +919,8 @@ def check_episode(episode_dir: Path, style_path: Path | None = None) -> list[Fin
                             Finding(
                                 "error",
                                 "continuity.unknown_character",
-                                continuity_rel,
-                                f"props[{j}].in.holder",
+                                prel,
+                                f"props[{pj}].in.holder",
                                 f"Unknown holder '{pr.in_.holder}' for shot '{pr.shot}' in continuity.",
                             )
                         )
@@ -906,26 +929,28 @@ def check_episode(episode_dir: Path, style_path: Path | None = None) -> list[Fin
                             Finding(
                                 "error",
                                 "continuity.unknown_character",
-                                continuity_rel,
-                                f"props[{j}].out.holder",
+                                prel,
+                                f"props[{pj}].out.holder",
                                 f"Unknown holder '{pr.out.holder}' for shot '{pr.shot}' in continuity.",
                             )
                         )
         prop_states = continuity.prop_states
         if continuity.props is not None:
             for j, pr in enumerate(continuity.props):
+                prel, pj = prop_files[j]
                 if prop_states is None or pr.prop not in prop_states:
                     findings.append(
                         Finding(
                             "error",
                             "prop.unknown_kind",
-                            continuity_rel,
-                            f"props[{j}].prop",
+                            prel,
+                            f"props[{pj}].prop",
                             f"Unknown prop '{pr.prop}'.",
                         )
                     )
             if prop_states is not None:
                 for j, pr in enumerate(continuity.props):
+                    prel, pj = prop_files[j]
                     if pr.prop not in prop_states:
                         continue
                     allowed = prop_states[pr.prop]
@@ -934,8 +959,8 @@ def check_episode(episode_dir: Path, style_path: Path | None = None) -> list[Fin
                             Finding(
                                 "error",
                                 "prop.unknown_state",
-                                continuity_rel,
-                                f"props[{j}].in.state",
+                                prel,
+                                f"props[{pj}].in.state",
                                 f"Unknown state '{pr.in_.state}' for prop '{pr.prop}'.",
                             )
                         )
@@ -944,12 +969,13 @@ def check_episode(episode_dir: Path, style_path: Path | None = None) -> list[Fin
                             Finding(
                                 "error",
                                 "prop.unknown_state",
-                                continuity_rel,
-                                f"props[{j}].out.state",
+                                prel,
+                                f"props[{pj}].out.state",
                                 f"Unknown state '{pr.out.state}' for prop '{pr.prop}'.",
                             )
                         )
                 for j, pr in enumerate(continuity.props):
+                    prel, pj = prop_files[j]
                     if pr.prop not in prop_states:
                         continue
                     allowed = prop_states[pr.prop]
@@ -962,8 +988,8 @@ def check_episode(episode_dir: Path, style_path: Path | None = None) -> list[Fin
                             Finding(
                                 "error",
                                 "prop.backwards",
-                                continuity_rel,
-                                f"props[{j}].out.state",
+                                prel,
+                                f"props[{pj}].out.state",
                                 f"Prop '{pr.prop}' moves backwards from '{pr.in_.state}' to '{pr.out.state}'.",
                             )
                         )
@@ -982,6 +1008,7 @@ def check_episode(episode_dir: Path, style_path: Path | None = None) -> list[Fin
                         cur_pr = continuity.props[cur_j]
                         if prev_pr.shot == cur_pr.shot:
                             continue
+                        crel, cj = prop_files[cur_j]
                         oh = prev_pr.out.holder
                         ih = cur_pr.in_.holder
                         os_ = prev_pr.out.state
@@ -993,8 +1020,8 @@ def check_episode(episode_dir: Path, style_path: Path | None = None) -> list[Fin
                                 Finding(
                                     "error",
                                     "prop.discontinuity",
-                                    continuity_rel,
-                                    f"props[{cur_j}].in",
+                                    crel,
+                                    f"props[{cj}].in",
                                     f"Prop '{prop}' jumps from holder '{oh_s}' state '{os_}' "
                                     f"to holder '{ih_s}' state '{is_}'.",
                                 )
@@ -1006,8 +1033,8 @@ def check_episode(episode_dir: Path, style_path: Path | None = None) -> list[Fin
                                     Finding(
                                         "error",
                                         "prop.backwards",
-                                        continuity_rel,
-                                        f"props[{cur_j}].in.state",
+                                        crel,
+                                        f"props[{cj}].in.state",
                                         f"Prop '{prop}' moves backwards from '{os_}' to '{is_}'.",
                                     )
                                 )

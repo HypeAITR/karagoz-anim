@@ -11,7 +11,7 @@ words, so every description must be something a person could draw without asking
 
 ## Inputs
 
-`shots.yaml` (your shot), `continuity.yaml` (start/end state of each character and prop), `lines.yaml`, the
+`shots.yaml` (your shot), `continuity/scene<N>.yaml` (start/end state of each character and prop), `lines.yaml`, the
 character list, and the location's `locations/<location>/regions.yaml` (engine-made: the **place** names such as
 `sofa_left` and the **object** names such as `coffee_table`; ignore its numbers). Your pose `p1` must match the
 character's `in` state; the last pose must match `out`.
@@ -64,7 +64,7 @@ inbetween sentences need not repeat it (the template adds it).
   leave it out.
 - `rests_on`: objects (names from `regions.yaml`) the body touches besides its seat, e.g. feet on the
   `coffee_table`. The engine then draws that object behind the character instead of in front.
-- `holds`: what each hand holds in this pose, with the prop names of `continuity.yaml`: `{right: cup, left: null}`.
+- `holds`: what each hand holds in this pose, with the prop names of `continuity/scene<N>.yaml`: `{right: cup, left: null}`.
   Write it for every pose of a character who ever holds a prop in the shot. **When a prop leaves a hand, that hand
   becomes `null` in the next pose**; the prompt then says "right hand is empty" explicitly (the first slice drew a
   second glass because nothing said the hand had let go).

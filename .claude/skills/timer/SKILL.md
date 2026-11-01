@@ -11,7 +11,7 @@ inbetweens before each pose and fills holds. You write `shots/<shot>/xsheet.yaml
 
 ## Inputs
 
-`shots.yaml`, `lines.yaml`, `continuity.yaml`, your shot's `poses.yaml`, `style.yaml` (named beats), and the
+`shots.yaml`, `lines.yaml`, `continuity/scene<N>.yaml`, your shot's `poses.yaml`, `style.yaml` (named beats), and the
 letter timings of the lines if present (`audio/Lxx.align.json`).
 
 ## xsheet.yaml

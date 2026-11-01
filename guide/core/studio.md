@@ -19,7 +19,7 @@ drawing is made by an image model from words, so **the words are the animation**
 |---|---|---|
 | Director | agent | `lines.yaml` (what is said, by whom), `shots.yaml` (shots, who is where, facing). **A human approves it.** |
 | Voice | code | audio per line + per-letter timings |
-| Continuity | agent | `continuity.yaml`: each character's state at the start and end of each shot; every prop's holder and state |
+| Continuity | agent | `continuity/scene<N>.yaml` (one file per scene): each character's state at the start and end of each shot; every prop's holder and state |
 | Layout | agent | `shots/<shot>/poses.yaml`: key poses and inbetween descriptions — the words the drawings are made from |
 | Timer | agent | `shots/<shot>/xsheet.yaml`: when each pose lands, blinks, camera — anchored to words |
 | Draw | code | every drawing, by the image model, from Layout's words through fixed prompt templates |

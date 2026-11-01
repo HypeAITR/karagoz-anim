@@ -2,6 +2,7 @@
 
 from karagoz.spec.anchor import ANCHOR_RE, Anchor, Offset, parse_anchor
 from karagoz.spec.check import check_episode, check_paths, norm_word, words
+from karagoz.spec.continuity import load_continuity
 from karagoz.spec.findings import Finding, Level, SpecError
 from karagoz.spec.io import KINDS, findings_from_validation, kind_of, load
 from karagoz.spec.models import (
@@ -98,6 +99,7 @@ __all__ = [
     "findings_from_validation",
     "kind_of",
     "load",
+    "load_continuity",
     "norm_word",
     "parse_anchor",
     "words",
