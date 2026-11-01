@@ -43,6 +43,7 @@ from karagoz.studio.tasks import Board, Change, State, Task, TransitionError
 
 if TYPE_CHECKING:
     from karagoz.engine.regions import SamLike
+    from karagoz.meta.client import CallRecord, MetaClient
     from karagoz.meta.sam import Segment
     from karagoz.studio.draw import MuseImageLike
 
@@ -464,7 +465,11 @@ def _shot_has_regions(prod: Path, episode: str, shot: str) -> bool:
 
 @dataclass
 class _CountingSam:
-    """Wrap a SamLike and count segment calls so the task can book them."""
+    """Wrap a SamLike and count segment calls so the task can book them.
+
+    Used only when no cost hook is installed (injected fakes, or code_work called
+    without a budget/log): hooked MetaClients count through their own records.
+    """
 
     inner: SamLike
     calls: int = 0
@@ -472,6 +477,32 @@ class _CountingSam:
     def segment(self, image: Path | bytes, concept: str, *, tag: str = "") -> list[Segment]:
         self.calls += 1
         return self.inner.segment(image, concept, tag=tag)
+
+
+def install_cost_hook(client: MetaClient, budget: Budget, log: EventLog, task_id: str) -> None:
+    """Route every Meta call on client to the budget and event log (one counter).
+
+    Overwrites client.on_call. Each call charges the task's unit and appends a
+    kind="cost" event with task id, model, units and USD.
+    """
+
+    unit = task_id.rpartition("/")[0]
+
+    def _on_call(record: CallRecord) -> None:
+        budget.charge_record(unit, record)
+        log.append(
+            task_id,
+            "cost",
+            model=record.model,
+            units=record.units,
+            usd=record.cost_usd,
+            endpoint=record.endpoint,
+            status=record.status,
+            tag=record.tag,
+            seconds=record.seconds,
+        )
+
+    client.on_call = _on_call
 
 
 def code_work(
@@ -485,8 +516,15 @@ def code_work(
     work_root: Path | None = None,
     guide_dir: Path | None = None,
     skills_dir: Path | None = None,
+    budget: Budget | None = None,
+    event_log: EventLog | None = None,
 ) -> RunResult:
-    """Run a code department in the production directory (trusted code, no workdir, no brief)."""
+    """Run a code department in the production directory (trusted code, no workdir, no brief).
+
+    When budget and event_log are given, real MetaClients are hooked so every call
+    charges the budget and the log directly; the returned cost then carries only the
+    part the hook did not already count (injected fakes, Jev, checkers).
+    """
     try:
         department = task.department
         if department == "location":
@@ -496,27 +534,88 @@ def code_work(
             from karagoz.meta.sam import USD_PER_CALL, Sam
             from karagoz.studio.draw import location_objects, plan_location_draw, run_draw
 
-            active = image if image is not None else MuseImage(MetaClient())
+            hooked_image = False
+            active: MuseImageLike
+            if image is None:
+                if budget is not None and event_log is not None:
+                    image_client = MetaClient()
+                    install_cost_hook(image_client, budget, event_log, task.id)
+                    active = MuseImage(image_client)
+                    hooked_image = True
+                else:
+                    active = MuseImage(MetaClient())
+            else:
+                active = image
+                if (
+                    budget is not None
+                    and event_log is not None
+                    and isinstance(image, MuseImage)
+                    and isinstance(image.client, MetaClient)
+                ):
+                    install_cost_hook(image.client, budget, event_log, task.id)
+                    hooked_image = True
             report = run_draw(plan_location_draw(prod, task.unit), active, on_event=on_event)
+            image_cost = 0.0 if hooked_image else report.cost_usd
             if report.failed:
                 error = ", ".join(f"{path}: {message}" for path, message in report.failed)
-                return RunResult(ok=False, error=error, cost_usd=report.cost_usd)
-            active_sam: SamLike = sam if sam is not None else Sam(MetaClient())
-            counting = _CountingSam(active_sam)
+                return RunResult(ok=False, error=error, cost_usd=image_cost)
+            hooked_sam = False
+            sam_client: MetaClient | None = None
+            active_sam: SamLike
+            if sam is None:
+                if budget is not None and event_log is not None:
+                    sam_client = MetaClient()
+                    install_cost_hook(sam_client, budget, event_log, task.id)
+                    active_sam = Sam(sam_client)
+                    hooked_sam = True
+                else:
+                    active_sam = Sam(MetaClient())
+            elif (
+                budget is not None
+                and event_log is not None
+                and isinstance(sam, Sam)
+                and isinstance(sam.client, MetaClient)
+            ):
+                install_cost_hook(sam.client, budget, event_log, task.id)
+                sam_client = sam.client
+                active_sam = sam
+                hooked_sam = True
+            else:
+                active_sam = sam
             out_dir = prod / "locations" / task.unit
-            regions = build_regions(
-                out_dir / "background.png", task.unit, location_objects(prod, task.unit), counting, out_dir
-            )
-            sam_cost = counting.calls * USD_PER_CALL
-            if counting.calls > 0 and on_event is not None:
-                on_event(
-                    {
-                        "payload_type": "code.note",
-                        "payload": {"text": f"sam: {counting.calls} calls, ~{sam_cost:.4f} $"},
-                    }
+            if hooked_sam:
+                assert sam_client is not None
+                before = len(sam_client.records)
+                regions = build_regions(
+                    out_dir / "background.png", task.unit, location_objects(prod, task.unit), active_sam, out_dir
                 )
+                new_records = sam_client.records[before:]
+                calls = len(new_records)
+                sam_cost = round(sum(r.cost_usd for r in new_records), 6)
+                if calls > 0 and on_event is not None:
+                    on_event(
+                        {
+                            "payload_type": "code.note",
+                            "payload": {"text": f"sam: {calls} calls, ~{sam_cost:.4f} $"},
+                        }
+                    )
+                sam_for_return = 0.0
+            else:
+                counting = _CountingSam(active_sam)
+                regions = build_regions(
+                    out_dir / "background.png", task.unit, location_objects(prod, task.unit), counting, out_dir
+                )
+                sam_cost = counting.calls * USD_PER_CALL
+                if counting.calls > 0 and on_event is not None:
+                    on_event(
+                        {
+                            "payload_type": "code.note",
+                            "payload": {"text": f"sam: {counting.calls} calls, ~{sam_cost:.4f} $"},
+                        }
+                    )
+                sam_for_return = sam_cost
             final = f"{len(regions['objects'])} objects, {len(regions['places'])} places"
-            return RunResult(ok=True, final_text=final, cost_usd=report.cost_usd + sam_cost)
+            return RunResult(ok=True, final_text=final, cost_usd=image_cost + sam_for_return)
         if department == "voice":
             from karagoz.voice.elevenlabs import synthesize_episode, synthesize_sounds
 
@@ -572,7 +671,26 @@ def code_work(
                             )
 
             link_location_background(prod, episode, task.unit)
-            active = image if image is not None else MuseImage(MetaClient())
+            hooked_image = False
+            draw_active: MuseImageLike
+            if image is None:
+                if budget is not None and event_log is not None:
+                    draw_client = MetaClient()
+                    install_cost_hook(draw_client, budget, event_log, task.id)
+                    draw_active = MuseImage(draw_client)
+                    hooked_image = True
+                else:
+                    draw_active = MuseImage(MetaClient())
+            else:
+                draw_active = image
+                if (
+                    budget is not None
+                    and event_log is not None
+                    and isinstance(image, MuseImage)
+                    and isinstance(image.client, MetaClient)
+                ):
+                    install_cost_hook(image.client, budget, event_log, task.id)
+                    hooked_image = True
             jobs = plan_draw(prod, episode, task.unit)
             retired = retire_stale(jobs, prod / episode / "assets" / task.unit)
             if retired and on_event is not None:
@@ -589,32 +707,73 @@ def code_work(
                         },
                     }
                 )
-            report = run_draw(jobs, active, on_event=on_event)
+            report = run_draw(jobs, draw_active, on_event=on_event)
+            draw_image_cost = 0.0 if hooked_image else report.cost_usd
             if report.failed:
                 error = ", ".join(f"{path}: {message}" for path, message in report.failed)
                 _join_claims()
-                return RunResult(ok=False, error=error, cost_usd=report.cost_usd)
+                return RunResult(ok=False, error=error, cost_usd=draw_image_cost)
             # With a region map the render places drawings by their landmarks (WP-11): measure them now (cached by
             # image hash, so only new drawings cost SAM calls).
             if _shot_has_regions(prod, episode, task.unit):
                 from karagoz.engine.landmarks import measure_shot
                 from karagoz.meta.sam import USD_PER_CALL, Sam
 
-                counting = _CountingSam(sam if sam is not None else Sam(MetaClient()))
-                measured = measure_shot(prod, episode, task.unit, counting)
-                sam_cost = counting.calls * USD_PER_CALL
-                if counting.calls > 0 and on_event is not None:
-                    on_event(
-                        {
-                            "payload_type": "code.note",
-                            "payload": {"text": f"sam: {counting.calls} calls, ~{sam_cost:.4f} $"},
-                        }
-                    )
+                hooked_sam = False
+                landmark_client: MetaClient | None = None
+                landmark_sam: SamLike
+                if sam is None:
+                    if budget is not None and event_log is not None:
+                        landmark_client = MetaClient()
+                        install_cost_hook(landmark_client, budget, event_log, task.id)
+                        landmark_sam = Sam(landmark_client)
+                        hooked_sam = True
+                    else:
+                        landmark_sam = Sam(MetaClient())
+                elif (
+                    budget is not None
+                    and event_log is not None
+                    and isinstance(sam, Sam)
+                    and isinstance(sam.client, MetaClient)
+                ):
+                    install_cost_hook(sam.client, budget, event_log, task.id)
+                    landmark_client = sam.client
+                    landmark_sam = sam
+                    hooked_sam = True
+                else:
+                    landmark_sam = sam
+                if hooked_sam:
+                    assert landmark_client is not None
+                    before = len(landmark_client.records)
+                    measured = measure_shot(prod, episode, task.unit, landmark_sam)
+                    new_records = landmark_client.records[before:]
+                    calls = len(new_records)
+                    sam_cost = round(sum(r.cost_usd for r in new_records), 6)
+                    if calls > 0 and on_event is not None:
+                        on_event(
+                            {
+                                "payload_type": "code.note",
+                                "payload": {"text": f"sam: {calls} calls, ~{sam_cost:.4f} $"},
+                            }
+                        )
+                    sam_for_return = 0.0
+                else:
+                    counting = _CountingSam(landmark_sam)
+                    measured = measure_shot(prod, episode, task.unit, counting)
+                    sam_cost = counting.calls * USD_PER_CALL
+                    if counting.calls > 0 and on_event is not None:
+                        on_event(
+                            {
+                                "payload_type": "code.note",
+                                "payload": {"text": f"sam: {counting.calls} calls, ~{sam_cost:.4f} $"},
+                            }
+                        )
+                    sam_for_return = sam_cost
                 final = f"{len(report.done)} drawn, {len(report.cached)} cached, {len(measured)} landmarks"
                 _join_claims()
-                return RunResult(ok=True, final_text=final, cost_usd=report.cost_usd + sam_cost)
+                return RunResult(ok=True, final_text=final, cost_usd=draw_image_cost + sam_for_return)
             _join_claims()
-            return RunResult(ok=True, cost_usd=report.cost_usd)
+            return RunResult(ok=True, cost_usd=draw_image_cost)
         if department == "render":
             from karagoz.engine.shot import render_shot
 
@@ -1211,6 +1370,8 @@ class Studio:
                 work_root=self.work_root,
                 guide_dir=self._effective_guide_dir(),
                 skills_dir=self.skills_dir,
+                budget=self.budget,
+                event_log=self.log,
             )
         except Exception as exc:  # noqa: BLE001 - a code crash fails the task, not the studio
             result = RunResult(ok=False, error=f"{type(exc).__name__}: {exc}")

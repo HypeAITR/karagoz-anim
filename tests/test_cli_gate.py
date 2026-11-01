@@ -13,8 +13,11 @@ from karagoz import cli
 
 
 def test_gate_cli(prod: Path, capsys: pytest.CaptureFixture[str]) -> None:  # noqa: F811
-    assert cli.main(["gate", str(prod), EP, "sh01"]) == 1
-    assert "no placement.json" in capsys.readouterr().err
+    assert cli.main(["gate", str(prod), EP, "sh01"]) == 0
+    out0 = capsys.readouterr().out
+    assert "no placement.json" in out0
+    noted = json.loads((prod / EP / "review" / "sh01" / "gate.json").read_text(encoding="utf-8"))
+    assert noted["flags"] == [] and "no placement.json" in noted["note"]
     setup_shot(prod)
     assert cli.main(["gate", str(prod), EP, "sh01"]) == 0
     out = capsys.readouterr().out

@@ -14,6 +14,7 @@ from karagoz.studio.orchestrator import Studio
 from karagoz.studio.tasks import Change, TransitionError
 
 REQUIRED_SECRETS = ("META_API_KEY", "ELEVENLABS_API_KEY")
+OPTIONAL_SECRETS = ("TYPESAFE_API_KEY",)
 
 
 def cmd_doctor(_: argparse.Namespace) -> int:
@@ -28,6 +29,12 @@ def cmd_doctor(_: argparse.Namespace) -> int:
         present = config.has_secret(name)
         print(f"{'ok  ' if present else 'FAIL'} {name} {'set' if present else 'missing'}")
         ok &= present
+    for name in OPTIONAL_SECRETS:
+        present = config.has_secret(name)
+        if present:
+            print(f"ok   {name} set")
+        else:
+            print(f".... {name} missing (optional, needed only when Jev is on)")
     ffmpeg = shutil.which("ffmpeg")
     print(f"{'ok  ' if ffmpeg else 'FAIL'} ffmpeg {ffmpeg or 'not found on PATH'}")
     ok &= ffmpeg is not None
@@ -216,10 +223,10 @@ def cmd_mouth(args: argparse.Namespace) -> int:
 
 def cmd_draw(args: argparse.Namespace) -> int:
     try:
-        from karagoz.studio.draw import plan_draw, run_draw, sam_face_of
+        from karagoz.studio.draw import link_location_background, plan_draw, retire_stale, run_draw, sam_face_of
 
-        jobs = plan_draw(Path(args.prod), args.episode, args.shot)
         if args.dry_run:
+            jobs = plan_draw(Path(args.prod), args.episode, args.shot)
             for job in jobs:
                 char = job.character if job.character is not None else "-"
                 variant = job.variant if job.variant is not None else "-"
@@ -230,6 +237,9 @@ def cmd_draw(args: argparse.Namespace) -> int:
         from karagoz.meta.image import MuseImage
         from karagoz.meta.sam import Sam
 
+        link_location_background(Path(args.prod), args.episode, args.shot)
+        jobs = plan_draw(Path(args.prod), args.episode, args.shot)
+        retire_stale(jobs, Path(args.prod) / args.episode / "assets" / args.shot)
         report = run_draw(jobs, MuseImage(MetaClient()), face_of=sam_face_of(Sam(MetaClient()), Path(args.prod)))
         print(
             f"done {len(report.done)}, cached {len(report.cached)}, "
@@ -237,7 +247,15 @@ def cmd_draw(args: argparse.Namespace) -> int:
         )
         for path, message in report.failed:
             print(f"failed {path}: {message}")
-        return 1 if report.failed else 0
+        if report.failed:
+            return 1
+        from karagoz.engine.landmarks import measure_shot
+        from karagoz.studio.orchestrator import _shot_has_regions
+
+        if _shot_has_regions(Path(args.prod), args.episode, args.shot):
+            measured = measure_shot(Path(args.prod), args.episode, args.shot, Sam(MetaClient()))
+            print(f"{len(measured)} landmarks measured")
+        return 0
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -324,7 +342,8 @@ def cmd_regions(args: argparse.Namespace) -> int:
     """Build a location's region map (places, front objects, scale) from its background with SAM."""
     from karagoz.engine.regions import build_regions
     from karagoz.meta.client import MetaClient
-    from karagoz.meta.sam import Sam
+    from karagoz.meta.sam import USD_PER_CALL, Sam
+    from karagoz.studio.orchestrator import _CountingSam
 
     out_dir = Path(args.prod) / "locations" / args.location
     background = out_dir / "background.png"
@@ -332,7 +351,8 @@ def cmd_regions(args: argparse.Namespace) -> int:
         print(f"error: {background} not found (draw the location first)", file=sys.stderr)
         return 1
     try:
-        regions = build_regions(background, args.location, args.objects, Sam(MetaClient()), out_dir)
+        counting = _CountingSam(Sam(MetaClient()))
+        regions = build_regions(background, args.location, args.objects, counting, out_dir)
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -343,6 +363,8 @@ def cmd_regions(args: argparse.Namespace) -> int:
     for place in regions["places"]:
         print(f"place {place['name']} ({place['kind']})")
     print(str(out_dir / "regions.yaml"))
+    cost = counting.calls * USD_PER_CALL
+    print(f"sam: {counting.calls} calls, ~{cost:.4f} $")
     return 0
 
 
@@ -350,14 +372,25 @@ def cmd_landmarks(args: argparse.Namespace) -> int:
     """Measure the landmarks (head, face, feet, hip, hands, cups) of every body drawing of a shot."""
     from karagoz.engine.landmarks import measure_shot
     from karagoz.meta.client import MetaClient
-    from karagoz.meta.sam import Sam
+    from karagoz.meta.sam import USD_PER_CALL, Sam
+    from karagoz.studio.orchestrator import _CountingSam
 
     try:
-        written = measure_shot(Path(args.prod), args.episode, args.shot, Sam(MetaClient()))
+        counting = _CountingSam(Sam(MetaClient()))
+        written = measure_shot(Path(args.prod), args.episode, args.shot, counting)
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(f"{len(written)} drawings measured")
+    cost = counting.calls * USD_PER_CALL
+    print(f"sam: {counting.calls} calls, ~{cost:.4f} $")
+    log_path = Path(args.prod) / args.episode / "run" / "events.jsonl"
+    if log_path.is_file():
+        from karagoz.studio.events import EventLog
+
+        EventLog(log_path).append(
+            f"{args.shot}/landmarks", "cost", model="sam-3.1", units=counting.calls, usd=round(cost, 6)
+        )
     return 0
 
 
@@ -453,11 +486,32 @@ def cmd_strip(args: argparse.Namespace) -> int:
 
 
 def cmd_gate(args: argparse.Namespace) -> int:
-    """Flag one shot (writes review/<shot>/gate.json) and print the shown flags."""
+    """Flag one shot (needs placement.json from a render with a region map).
+
+    Writes review/<shot>/gate.json and prints the shown flags. Without placement.json,
+    writes the same noted empty gate.json as the orchestrator and exits 0.
+    """
+    import json
+
     try:
         from karagoz.engine.gate import gate_shot
 
-        out = gate_shot(Path(args.prod), args.episode, args.shot, limit=args.limit)
+        try:
+            out = gate_shot(Path(args.prod), args.episode, args.shot, limit=args.limit)
+        except ValueError as exc:
+            note = f"{type(exc).__name__}: {exc}"
+            empty: dict[str, object] = {
+                "shot": args.shot,
+                "flags": [],
+                "silenced": [],
+                "dropped": 0,
+                "note": note,
+            }
+            gate_path = Path(args.prod) / args.episode / "review" / args.shot / "gate.json"
+            gate_path.parent.mkdir(parents=True, exist_ok=True)
+            gate_path.write_text(json.dumps(empty, indent=1) + "\n", encoding="utf-8")
+            print(note)
+            return 0
         for flag in out["flags"]:
             frames = f" frames {flag['frames']}" if flag["frames"] is not None else ""
             print(f"{flag['id']}: {flag['message']}{frames}")
@@ -593,7 +647,12 @@ def build_parser() -> argparse.ArgumentParser:
     look_p.add_argument("--out", default=None, metavar="FILE", help="output PNG path")
     look_p.set_defaults(func=cmd_look)
 
-    gate_p = sub.add_parser("gate", help="flag a shot's drawings (jumps, wrong way, prop count); never rejects")
+    gate_p = sub.add_parser(
+        "gate",
+        help="flag a shot's drawings (needs placement.json from a render with a region map); never rejects",
+        description="Flag one shot (needs placement.json from a render with a region map) and print the shown "
+        "flags. Without placement.json, writes a noted empty gate.json and exits 0.",
+    )
     gate_p.add_argument("prod", help="production directory")
     gate_p.add_argument("episode", help="episode id")
     gate_p.add_argument("shot", help="shot id")
