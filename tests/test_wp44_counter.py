@@ -90,9 +90,7 @@ def test_cli_regions_reports_sam_cost(
 
     assert cli.main(["regions", str(prod), "salon", "sofa"]) == 0
     out = capsys.readouterr().out
-    assert "sam:" in out and "calls" in out
-    # at least one SAM call at 0.0025 USD each: the total must be printed.
-    assert "$" in out or "USD" in out or "0.00" in out
+    assert "sam: 3 calls, ~0.0075 $" in out
 
 
 def test_cli_landmarks_reports_cost_and_appends_to_event_log(
@@ -112,8 +110,30 @@ def test_cli_landmarks_reports_cost_and_appends_to_event_log(
     assert cli.main(["landmarks", str(prod), "ep", "sh01"]) == 0
     out = capsys.readouterr().out
     assert "1 drawings measured" in out
-    assert "sam:" in out and "calls" in out
+    assert "sam: 7 calls, ~0.0175 $" in out
     lines = log_path.read_text(encoding="utf-8").splitlines()
-    assert len(lines) > before
-    added = [json.loads(line) for line in lines[before:]]
-    assert any(e.get("kind") == "cost" and e.get("usd", 0) > 0 for e in added)
+    assert len(lines) == before + 1
+    event = json.loads(lines[-1])
+    assert event["kind"] == "cost"
+    assert event["task"] == "sh01/landmarks"
+    assert event["model"] == "sam-3.1"
+    assert event["units"] == 7
+    assert event["usd"] == 0.0175
+
+
+def test_cli_landmarks_without_events_file_ok(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import karagoz.meta.sam
+
+    monkeypatch.setattr(karagoz.meta.sam, "Sam", CountingSam)
+    prod = tmp_path / "prod"
+    d = prod / "ep" / "assets" / "sh01" / "ali"
+    d.mkdir(parents=True)
+    Image.new("RGB", (400, 600), (255, 255, 255)).save(d / "p1.png")
+
+    assert cli.main(["landmarks", str(prod), "ep", "sh01"]) == 0
+    out = capsys.readouterr().out
+    assert "1 drawings measured" in out
+    assert "sam: 7 calls, ~0.0175 $" in out
+    assert not (prod / "ep" / "run" / "events.jsonl").exists()

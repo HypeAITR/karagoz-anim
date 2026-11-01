@@ -161,12 +161,26 @@ def select_sections(
         for char in poses.characters.values():
             plist = char.poses
             for first, second in zip(plist, plist[1:], strict=False):
-                if first.support == "sit" and second.support in ("stand", "crouch"):
-                    matched.add("stand-up")
-                if first.support in ("stand", "crouch") and second.support == "sit":
-                    matched.add("sit-down")
                 if first.view != second.view:
                     matched.add("turn-exit")
+            transitions = char.transitions or []
+            if transitions:
+                by_id = {pose.id: pose for pose in plist}
+                for tr in transitions:
+                    frm = by_id.get(tr.from_)
+                    to = by_id.get(tr.to)
+                    if frm is None or to is None:
+                        continue
+                    if frm.support == "sit" and to.support in ("stand", "crouch"):
+                        matched.add("stand-up")
+                    if frm.support in ("stand", "crouch") and to.support == "sit":
+                        matched.add("sit-down")
+            else:
+                for first, second in zip(plist, plist[1:], strict=False):
+                    if first.support == "sit" and second.support in ("stand", "crouch"):
+                        matched.add("stand-up")
+                    if first.support in ("stand", "crouch") and second.support == "sit":
+                        matched.add("sit-down")
     if shot is not None and "turn-exit" not in matched:
         maybe_shots = _load_or_none(prod / episode / "shots.yaml")
         shot_entry = None

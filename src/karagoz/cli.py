@@ -235,7 +235,7 @@ def cmd_draw(args: argparse.Namespace) -> int:
             return 0
         from karagoz.meta.client import MetaClient
         from karagoz.meta.image import MuseImage
-        from karagoz.meta.sam import Sam
+        from karagoz.meta.sam import USD_PER_CALL, Sam
 
         link_location_background(Path(args.prod), args.episode, args.shot)
         jobs = plan_draw(Path(args.prod), args.episode, args.shot)
@@ -250,11 +250,14 @@ def cmd_draw(args: argparse.Namespace) -> int:
         if report.failed:
             return 1
         from karagoz.engine.landmarks import measure_shot
-        from karagoz.studio.orchestrator import _shot_has_regions
+        from karagoz.studio.orchestrator import _CountingSam, _shot_has_regions
 
         if _shot_has_regions(Path(args.prod), args.episode, args.shot):
-            measured = measure_shot(Path(args.prod), args.episode, args.shot, Sam(MetaClient()))
+            counting = _CountingSam(Sam(MetaClient()))
+            measured = measure_shot(Path(args.prod), args.episode, args.shot, counting)
             print(f"{len(measured)} landmarks measured")
+            cost = counting.calls * USD_PER_CALL
+            print(f"sam: {counting.calls} calls, ~{cost:.4f} $")
         return 0
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -365,6 +368,15 @@ def cmd_regions(args: argparse.Namespace) -> int:
     print(str(out_dir / "regions.yaml"))
     cost = counting.calls * USD_PER_CALL
     print(f"sam: {counting.calls} calls, ~{cost:.4f} $")
+    episode = getattr(args, "episode", None)
+    if episode:
+        log_path = Path(args.prod) / episode / "run" / "events.jsonl"
+        if log_path.is_file():
+            from karagoz.studio.events import EventLog
+
+            EventLog(log_path).append(
+                f"{args.location}/regions", "cost", model="sam-3.1", units=counting.calls, usd=round(cost, 6)
+            )
     return 0
 
 
@@ -614,6 +626,7 @@ def build_parser() -> argparse.ArgumentParser:
     regions_p.add_argument("prod", help="production directory")
     regions_p.add_argument("location", help="location name (locations/<name>/background.png)")
     regions_p.add_argument("objects", nargs="+", help='objects to look for, e.g. sofa "coffee table"')
+    regions_p.add_argument("--episode", default=None, help="episode id for the cost event (optional)")
     regions_p.set_defaults(func=cmd_regions)
 
     landmarks_p = sub.add_parser("landmarks", help="measure the landmarks of every body drawing of a shot (SAM)")

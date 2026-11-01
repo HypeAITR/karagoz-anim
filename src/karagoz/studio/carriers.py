@@ -97,6 +97,12 @@ class MuseExecCarrier:
 
     def run(self, brief: Brief, on_event: OnEvent | None = None) -> RunResult:
         start = self.clock()
+        model = brief.model or self.model
+        if not model.endswith("-contributor"):
+            return RunResult(
+                ok=False, seconds=self.clock() - start, error=f"{model}: only Spark Contributor models are allowed"
+            )
+        key = self.api_key()
         proc = self.popen(
             self.argv(brief),
             cwd=brief.workdir,
@@ -107,7 +113,6 @@ class MuseExecCarrier:
             encoding="utf-8",
             errors="replace",
         )
-        key = self.api_key()
         proc.stdin.write(key + "\n")
         proc.stdin.close()
 
