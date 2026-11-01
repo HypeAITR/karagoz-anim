@@ -112,12 +112,29 @@ def build_regions(background: Path, location: str, objects: list[str], sam: SamL
         grouped.sort(key=lambda o: (_center(o.box)[0], o.name))
         step1.extend(grouped)
 
+    seen_names: dict[str, int] = {}
+    for obj in step1:
+        if obj.name not in seen_names:
+            seen_names[obj.name] = 1
+        else:
+            seen_names[obj.name] += 1
+            base = obj.name
+            candidate = f"{base}_{seen_names[base]}"
+            while candidate in seen_names:
+                seen_names[base] += 1
+                candidate = f"{base}_{seen_names[base]}"
+            obj.name = candidate
+            seen_names[obj.name] = 1
+
+    cushion_segs_all: list[Segment] = []
+    if any(obj.kind in SEATABLE for obj in step1):
+        cushion_segs_all = sam.segment(background, "seat cushion", tag=f"regions:{location}:seat cushion")
     cushions_by_object: dict[str, list[Segment]] = {}
     armrests_by_object: dict[str, list[_Object]] = {}
     for obj in step1:
         if obj.kind not in SEATABLE:
             continue
-        cushion_segs = sam.segment(background, "seat cushion", tag=f"regions:{location}:seat cushion")
+        cushion_segs = cushion_segs_all
         arm_concept = f"{obj.kind} armrest"
         arm_segs = sam.segment(background, arm_concept, tag=f"regions:{location}:{arm_concept}")
         middle_y = (obj.box[1] + obj.box[3]) / 2.0
@@ -217,6 +234,20 @@ def build_regions(background: Path, location: str, objects: list[str], sam: SamL
                     "floor": [seat_x, floor_y],
                 }
             )
+
+    seen_places: dict[str, int] = {}
+    for place in places:
+        name = place["name"]
+        if name not in seen_places:
+            seen_places[name] = 1
+        else:
+            seen_places[name] += 1
+            candidate = f"{name}_{seen_places[name]}"
+            while candidate in seen_places:
+                seen_places[name] += 1
+                candidate = f"{name}_{seen_places[name]}"
+            place["name"] = candidate
+            seen_places[place["name"]] = 1
 
     seatable_floors = [o.floor_y for o in step1 if o.kind in SEATABLE]
     lowest: int | None = max(seatable_floors) if seatable_floors else None

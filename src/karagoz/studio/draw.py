@@ -371,18 +371,51 @@ def _will_mirror(shots: Shots, shot: str, character: str, natural_facing: str) -
     return (natural_facing == "right" and screen == "left") or (natural_facing == "left" and screen == "right")
 
 
-def _draw_facing(shots: Shots, shot: str, character: str, info: _CharacterInfo) -> tuple[str, bool]:
+def _pose_side(view: str | None) -> str | None:
+    """The screen side ("left"/"right") of a pose view; None for front/back/unknown."""
+    if view is None:
+        return None
+    if view.endswith("_left"):
+        return "left"
+    if view.endswith("_right"):
+        return "right"
+    return None
+
+
+_FACING_RE = re.compile(r" *FACING:[^.\n]*\.\n?")
+
+
+def _without_facing(prompt: str) -> str:
+    """The prompt with its FACING sentence removed (when no facing is known)."""
+    return _FACING_RE.sub("", prompt)
+
+
+def _draw_facing(
+    shots: Shots, shot: str, character: str, info: _CharacterInfo, pose_view: str | None = None
+) -> tuple[str | None, bool]:
     """The (facing word for the prompt, whether to swap left/right words).
 
-    A character the engine may mirror is drawn in its natural facing with swapped directions (T-57); a character
-    with `mirror_ok: false` is drawn directly in the facing the shot needs, with its words untouched (AUD-2 #37).
+    The engine mirrors per shot, so a mirrored `mirror_ok` character is drawn facing the
+    opposite of the side its pose view asks for, with swapped directions (T-57): the engine flips
+    it back onto the screen side. Otherwise the pose's own view decides the facing, so a turn from
+    right to left changes it. A character with `mirror_ok: false` is drawn directly in the facing
+    it needs, with its words untouched (AUD-2 #37). An invalid `natural_facing` is never copied
+    into the prompt: the pose view stands in, or None when no side is known (the caller then drops
+    the FACING sentence).
     """
-    if not _will_mirror(shots, shot, character, info.natural_facing):
-        return (info.natural_facing, False)
-    if info.mirror_ok:
-        return (info.natural_facing, True)
+    mirror = _will_mirror(shots, shot, character, info.natural_facing)
+    natural = info.natural_facing if info.natural_facing in ("left", "right") else None
+    side = _pose_side(pose_view)
+    if mirror and info.mirror_ok:
+        if side is not None:
+            return ("left" if side == "right" else "right", True)
+        return (natural, True)
+    if side is not None:
+        return (side, False)
+    if not mirror:
+        return (natural, False)
     screen = _shot_facing(shots, shot, character)
-    return (screen if screen is not None else info.natural_facing, False)
+    return (screen if screen is not None else natural, False)
 
 
 def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
@@ -537,7 +570,7 @@ def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
                         acting = pose_entry.acting
                         matched = pose_entry
                         break
-            facing, swap = _draw_facing(shots, shot, char, info)
+            facing, swap = _draw_facing(shots, shot, char, info, matched.view if matched is not None else None)
             if swap:
                 acting = swap_left_right(acting)
             support_str = (
@@ -547,7 +580,11 @@ def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
             if swap:
                 props_str = swap_left_right(props_str)
             tpl = key_pose_tpl if previous is None else key_pose_next_tpl
-            prompt = tpl.format(style=style_text, facing=facing, support=support_str, props=props_str, acting=acting)
+            prompt = tpl.format(
+                style=style_text, facing=facing or "right", support=support_str, props=props_str, acting=acting
+            )
+            if facing is None:
+                prompt = _without_facing(prompt)
             out = assets_dir / char / f"{pose_id}.png"
             jobs.append(
                 DrawJob(
@@ -606,7 +643,16 @@ def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
                         pose_b = pose_entry
             if desc is None:
                 desc = f"the in-between drawing {k} of {n}: halfway between the two drawings"
-            facing, swap = _draw_facing(shots, shot, char, info)
+            side_a = _pose_side(pose_a.view) if pose_a is not None else None
+            side_b = _pose_side(pose_b.view) if pose_b is not None else None
+            between_view: str | None = None
+            if side_a is not None and side_b is not None:
+                between_view = pose_a.view if side_a == side_b and pose_a is not None else None
+            elif side_a is not None and pose_a is not None:
+                between_view = pose_a.view
+            elif side_b is not None and pose_b is not None:
+                between_view = pose_b.view
+            facing, swap = _draw_facing(shots, shot, char, info, between_view)
             if swap:
                 desc = swap_left_right(desc)
             entry: dict[Hand, str | None] | None = None
@@ -661,11 +707,13 @@ def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
                     support_str = formatted.strip() + " "
             prompt = inbetween_tpl.format(
                 style=style_text,
-                facing=facing,
+                facing=facing or "right",
                 support=support_str,
                 props=props_str,
                 description=desc,
             )
+            if facing is None:
+                prompt = _without_facing(prompt)
             jobs.append(
                 DrawJob(
                     kind="inbetween",
@@ -700,7 +748,6 @@ def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
             by_id = {p.id: p for p in poses.characters[char].poses}
             for sid, seq_entry in char_seqs.items():
                 from_pose[sid] = by_id.get(seq_entry.from_)
-        facing, swap = _draw_facing(shots, shot, char, info)
         for drawing in sorted(sequence_drawings[char], key=_sequence_sort_key):
             parsed_sq = _parse_sequence(drawing)
             if parsed_sq is None:
@@ -709,10 +756,11 @@ def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
             seq_def = char_seqs.get(sid)
             if seq_def is None or not 1 <= k <= len(seq_def.drawings):
                 continue
+            matched = from_pose.get(sid)
+            facing, swap = _draw_facing(shots, shot, char, info, matched.view if matched is not None else None)
             acting = seq_def.drawings[k - 1]
             if swap:
                 acting = swap_left_right(acting)
-            matched = from_pose.get(sid)
             support_str = (
                 f"{support_texts[matched.support]} " if matched is not None and matched.support is not None else ""
             )
@@ -721,11 +769,13 @@ def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
                 props_str = swap_left_right(props_str)
             prompt = key_pose_next_tpl.format(
                 style=style_text,
-                facing=facing,
+                facing=facing or "right",
                 support=support_str,
                 props=props_str,
                 acting=acting,
             )
+            if facing is None:
+                prompt = _without_facing(prompt)
             prev: Path = (
                 assets_dir / char / f"{seq_def.from_}.png" if k == 1 else assets_dir / char / f"{sid}.{k - 1}.png"
             )
@@ -745,6 +795,10 @@ def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
                 )
             )
 
+    faceless: dict[str, set[str]] = {}
+    if poses is not None:
+        for cname, cposes in poses.characters.items():
+            faceless[cname] = {p.id for p in cposes.poses if p.faceless is True}
     mouth_tuples: set[tuple[str, str, str]] = set()
     eyes_tuples: set[tuple[str, str, str]] = set()
     for char, body_cells in exp.body.items():
@@ -777,7 +831,7 @@ def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
                         target = sq.to if sq.to is not None else sq.from_
                         body = sq.from_ if k <= total / 2 else target
             shape = shape_per_frame[f] if f < len(shape_per_frame) else "X"
-            if shape != "X":
+            if shape != "X" and body not in faceless.get(char, set()):
                 mouth_tuples.add((char, body, shape))
             eye_state = eyes_cells[f] if f < len(eyes_cells) else "open"
             if eye_state in ("half", "closed"):

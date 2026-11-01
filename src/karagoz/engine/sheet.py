@@ -113,12 +113,12 @@ def _inbetweens(assets: Path, character: str, start: str, end: str) -> list[str]
 
 def movement_parts(prod: Path, episode: str, shot: str) -> list[Part]:
     """Split a shot's poses into movement parts: one key, its inbetweens and the next key."""
-    try:
-        poses = load(prod / episode / "shots" / shot / "poses.yaml")
-    except Exception:
+    poses_path = prod / episode / "shots" / shot / "poses.yaml"
+    if not poses_path.is_file():
         return []
+    poses = load(poses_path)
     if not isinstance(poses, Poses):
-        return []
+        raise ValueError(f"{poses_path}: expected a poses file")
     parts: list[Part] = []
     assets = prod / episode / "assets" / shot
     for character, cposes in poses.characters.items():
@@ -165,6 +165,10 @@ def frame_strip(
         raise ValueError(f"end ({end}) must be > start ({start})")
     if step < 1:
         raise ValueError(f"step must be >= 1, got {step}")
+    if crop is not None:
+        x0, y0, x1, y1 = crop
+        if x1 <= x0 or y1 <= y0:
+            raise ValueError(f"crop box is empty or inverted: {crop}")
     expected = list(range(start, end, step))
     vf = f"select=between(n\\,{start}\\,{end - 1})*not(mod(n-{start}\\,{step}))"
     with tempfile.TemporaryDirectory(prefix="karagoz-strip-") as tmp:
