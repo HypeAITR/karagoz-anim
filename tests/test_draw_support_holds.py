@@ -30,11 +30,11 @@ def edit(path: Path, old: str, new: str) -> None:
     path.write_text(text.replace(old, new, 1), encoding="utf-8")
 
 
-def test_templates_v4() -> None:
+def test_templates_v5() -> None:
     import karagoz.studio.draw as draw
 
     data = yaml.safe_load(draw.TEMPLATES_PATH.read_text(encoding="utf-8"))
-    assert data["version"] == 4
+    assert data["version"] == 5
     assert data["support_text"]["sit"] == SIT
     assert set(data["support_text"]) == {"sit", "stand", "crouch", "lie"}
     assert "what the hands hold" not in data["key_pose_next"]

@@ -3,11 +3,12 @@
 # The reasons for each rule (measured on Muse Image) are in that skill. Do not change a template without running the
 # prompt regression set and recording the result.
 # Placeholders: {style} {facing} {support} {acting} {description} {shape} {eyes} {props} {from_words} {to_words} {k} {n} {pct} {direction}; {never} is replaced at load time.
-version: 4
+version: 5
 
 style: >-
-  Flat-colour 2D TV cartoon style: thick clean black outlines, flat fills with at most one simple flat shadow tone,
-  no texture, no gradients.
+  Flat-colour 2D TV cartoon style: thick clean black outlines, flat fills only, no shadow tone on the body, no cast
+  shadow of one part on another or on clothes, no floor shadow, nothing behind the character, no texture, no
+  gradients.
 
 never: >-
   NEVER: no furniture of any kind (no sofa, no armchair, no chair, no table, no bed), no floor, no shadow on the
@@ -41,6 +42,9 @@ support_direction:
   up: "While rising the body never goes lower than in image 1."
   down: "While going down the body never goes higher than in image 1."
   level: ""
+
+support_sit_down: >-
+  The invisible seat is at knee height; the hips are moving down onto it, not crouching low.
 
 background: >-
   {style} Background only, no people, no characters, no logos, no text: {description}
