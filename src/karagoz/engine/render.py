@@ -154,7 +154,15 @@ def _pattern_to_glob(pattern: str) -> str:
     return re.sub(r"%0?\d*d", "*", pattern)
 
 
-def encode(frames_dir: Path, audio: Path | None, out_mp4: Path, *, pattern: str = "%05d.png", crf: int = 18) -> Path:
+def encode(
+    frames_dir: Path,
+    audio: Path | None,
+    out_mp4: Path,
+    *,
+    pattern: str = "%05d.png",
+    crf: int = 18,
+    comment: str | None = None,
+) -> Path:
     """Encode numbered PNG frames (+ optional audio) into a deterministic MP4."""
     glob = _pattern_to_glob(pattern)
     try:
@@ -230,6 +238,11 @@ def encode(frames_dir: Path, audio: Path | None, out_mp4: Path, *, pattern: str 
         "+faststart",
         "-map_metadata",
         "-1",
+    ]
+    if comment is not None:
+        # Explicit -metadata survives the -map_metadata strip above (a test reads it back with ffprobe).
+        cmd += ["-metadata", f"comment={comment}"]
+    cmd += [
         "-fflags",
         "+bitexact",
         "-flags:v",
@@ -346,6 +359,48 @@ def duck(
     linear = np.power(10.0, gains / 20.0)
     samples = np.frombuffer(raw, dtype="<i2").reshape(-1, channels).astype(np.float64)
     scaled = np.rint(samples * linear[:, None])
+    np.clip(scaled, -32768, 32767, out=scaled)
+    with wave.open(str(wav), "wb") as writer:
+        writer.setnchannels(channels)
+        writer.setsampwidth(width)
+        writer.setframerate(rate)
+        writer.writeframes(scaled.astype("<i2").tobytes())
+
+
+def fade_edges(wav: Path, in_frames: int, out_frames: int, *, hard_in: bool = False, hard_out: bool = False) -> None:
+    """Fade ``wav`` in over its first ``in_frames`` and out over its last ``out_frames`` (shot frames).
+
+    Linear amplitude ramps that touch exact silence at the outer edge, matching the picture fades
+    (``apply_frame_transitions``); ``hard_*`` silences the whole edge instead (``from_black``/``to_black``).
+    Overlapping edges multiply. Spans are clamped to the file.
+    """
+    if in_frames <= 0 and out_frames <= 0:
+        return
+    spf = _SAMPLE_RATE // FPS
+    with wave.open(str(wav), "rb") as reader:
+        channels = reader.getnchannels()
+        width = reader.getsampwidth()
+        rate = reader.getframerate()
+        nframes = reader.getnframes()
+        raw = reader.readframes(nframes)
+    if nframes == 0:
+        return
+    in_n = min(max(in_frames, 0) * spf, nframes)
+    out_n = min(max(out_frames, 0) * spf, nframes)
+    gains = np.ones(nframes, dtype=np.float64)
+    if in_n > 0:
+        if hard_in:
+            gains[:in_n] = 0.0
+        else:
+            gains[:in_n] *= np.arange(in_n, dtype=np.float64) / float(in_n)
+    if out_n > 0:
+        if hard_out:
+            gains[nframes - out_n :] = 0.0
+        else:
+            k = np.arange(out_n, dtype=np.float64)
+            gains[nframes - out_n :] *= (out_n - 1 - k) / float(out_n)
+    samples = np.frombuffer(raw, dtype="<i2").reshape(-1, channels).astype(np.float64)
+    scaled = np.rint(samples * gains[:, None])
     np.clip(scaled, -32768, 32767, out=scaled)
     with wave.open(str(wav), "wb") as writer:
         writer.setnchannels(channels)

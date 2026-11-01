@@ -88,19 +88,21 @@ def test_placement_mode(prod: Path) -> None:  # noqa: F811
     placement = json.loads((a / "placement.json").read_text(encoding="utf-8"))
     ali, ayse = placement["characters"]["ali"]["p1"], placement["characters"]["ayse"]["p1"]
     s_ali, s_ayse = A * 180 * 3 / 100, A * 160 * 3 / 100
-    assert ali["scale"] == pytest.approx(s_ali, abs=1e-4) and (ali["x"], ali["y"]) == (786, 47)
+    # WP-45: ali faces ayse (door, screen left), so he is mirrored and his hip-anchored x moves 786 -> 695.
+    assert ali["scale"] == pytest.approx(s_ali, abs=1e-4) and (ali["x"], ali["y"]) == (695, 47)
     assert ali["anchor"] == "hip" and ali["occluders"] == ["sehpa"] and ali["depth"] == 848
     assert ayse["scale"] == pytest.approx(s_ayse, abs=1e-4) and (ayse["x"], ayse["y"]) == (87, 316)
-    assert ayse["mirror"] is True and ayse["anchor"] == "foot" and ayse["depth"] == 900
+    assert ayse["mirror"] is False and ayse["anchor"] == "foot" and ayse["depth"] == 900
     assert any(w.startswith("ali p1: feet") and "while sitting on koltuk" in w for w in r.warnings)
     assert not any("has no placement" in w for w in r.warnings)  # missing inbetweens use their key's placement
 
-    f0 = prod / EP / "render" / "sh01" / "frames" / "00000.png"
-    assert near(px(f0, 1000, 400), (200, 120, 80))  # ali, on the seat, at his own scale
-    assert near(px(f0, 1000, 650), (60, 60, 80))  # the table mask is in front of him: background shows
-    assert near(px(f0, 300, 600), (90, 160, 90))  # ayse standing at the door place
-    assert near(px(f0, 215, 561), (255, 0, 0), tol=120)  # her marker is on the left: mirrored
-    assert near(px(f0, 1000, 150), (60, 60, 80))  # above ali's head: nothing
+    # 00012: first full frame past the 12-frame from_black fade-in (WP-45).
+    f12 = prod / EP / "render" / "sh01" / "frames" / "00012.png"
+    assert near(px(f12, 930, 400), (200, 120, 80))  # ali, on the seat, at his own scale
+    assert near(px(f12, 1000, 650), (60, 60, 80))  # the table mask is in front of him: background shows
+    assert near(px(f12, 300, 600), (90, 160, 90))  # ayse standing at the door place
+    assert near(px(f12, 380, 561), (255, 0, 0), tol=120)  # her marker is on the right: facing ali
+    assert near(px(f12, 1000, 150), (60, 60, 80))  # above ali's head: nothing
 
 
 def test_without_regions_the_render_is_unchanged(prod: Path) -> None:  # noqa: F811

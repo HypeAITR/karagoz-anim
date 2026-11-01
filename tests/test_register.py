@@ -140,5 +140,6 @@ def test_render_uses_the_refined_placements(prod: Path) -> None:  # noqa: F811
     pl = json.loads((prod / EP / "assets" / "sh01" / "placement.json").read_text(encoding="utf-8"))["characters"]
     p1, p2_ = pl["ali"]["p1"], pl["ali"]["p2"]
     shift = 10 * p1["scale"]
-    assert p2_["x"] == pytest.approx(p1["x"] - shift, abs=1.5)
+    # WP-45: ali is mirrored (he faces ayse), so the in-picture shift lands on screen with the opposite sign.
+    assert p2_["x"] == pytest.approx(p1["x"] + shift, abs=1.5)
     assert p2_["y"] == p1["y"]

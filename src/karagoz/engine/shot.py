@@ -7,6 +7,7 @@ import json
 import os
 import shutil
 import subprocess
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,7 @@ import numpy as np
 import yaml
 from PIL import Image
 
-from karagoz.engine.camera import camera_track
+from karagoz.engine.camera import BBox, camera_track
 from karagoz.engine.compose import ShotAssets, character_bboxes, cutout, render_frames
 from karagoz.engine.framing import frame_targets
 from karagoz.engine.landmarks import body_drawings
@@ -37,16 +38,24 @@ from karagoz.engine.render import (
     add_into,
     duck,
     encode,
+    fade_edges,
     loudness,
     mix,
     normalize,
     sound_file,
 )
 from karagoz.engine.timing import resolve_episode
-from karagoz.engine.xsheet import expand
+from karagoz.engine.xsheet import Exposure, expand, lint, style_lint
 from karagoz.spec import Align, Lines, Mouth, MouthCue, Poses, Regions, Shot, Shots, SpecError, Style, Xsheet, load
 
 STANDING_HEIGHT = 0.80
+
+#: Frames of black/fade per transition edge while no production sets the beat (half a second at 24 fps).
+BLACK_HOLD_DEFAULT = 12
+#: MP4 comment + report line when the episode ran with human review off.
+REVIEW_OFF_COMMENT = "human review: off"
+#: Orchestrator's event-log note for a review-off run (``Studio._auto_approve``).
+REVIEW_OFF_NOTE = "auto-approved"
 
 
 @dataclass
@@ -110,11 +119,15 @@ def _ffmpeg_bin() -> str:
     return found
 
 
-def _join_shot_mp4s(mp4s: list[Path], out_mp4: Path) -> Path:
+def _join_shot_mp4s(mp4s: list[Path], out_mp4: Path, comment: str | None = None) -> Path:
     if len(mp4s) == 1:
         out_mp4.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(mp4s[0], out_mp4)
         return out_mp4
+    if comment is None and review_off(out_mp4.parent.parent):
+        # Episode assembly is <episode>/render/<episode>.mp4 and the CLI joins here directly,
+        # so detect review-off from the episode's event log (no cli.py change needed).
+        comment = REVIEW_OFF_COMMENT
     out_mp4.parent.mkdir(parents=True, exist_ok=True)
     list_path = out_mp4.parent / "concat.txt"
     lines: list[str] = []
@@ -153,6 +166,10 @@ def _join_shot_mp4s(mp4s: list[Path], out_mp4: Path) -> Path:
             "+faststart",
             "-map_metadata",
             "-1",
+        ]
+        if comment is not None:
+            cmd += ["-metadata", f"comment={comment}"]
+        cmd += [
             "-fflags",
             "+bitexact",
             "-flags:v",
@@ -358,6 +375,146 @@ def _placement_mode(
     return (placements, occluders, solver_warnings)
 
 
+def transition_frames(style: Style) -> int:
+    """Frames of black/fade per transition edge.
+
+    No existing beat fits a fade (react/shot_lead/gesture_lead/blink_lead are dialogue-timing beats),
+    so this reads a ``black_hold`` beat productions can tune; the default is half a second (12 frames).
+    """
+    beat = style.live.beats.get("black_hold")
+    if beat is None:
+        return BLACK_HOLD_DEFAULT
+    return max(0, round(beat.value))
+
+
+def _fade_frame(frames_dir: Path, index: int, factor: float) -> None:
+    path = frames_dir / f"{index:05d}.png"
+    img = Image.open(path).convert("RGB")
+    if factor <= 0.0:
+        Image.new("RGB", img.size, (0, 0, 0)).save(path, format="PNG")
+        return
+    if factor >= 1.0:
+        return
+    scaled = np.rint(np.array(img).astype(np.float64) * factor).astype(np.uint8)
+    Image.fromarray(scaled).save(path, format="PNG")
+
+
+def apply_frame_transitions(
+    frames_dir: Path, length: int, transition_in: str | None, transition_out: str | None, fade: int
+) -> None:
+    """Bake the shot's edge transitions into its PNG frames, in place (the shot keeps its length).
+
+    ``from_black``/``to_black`` paint hard black frames; ``fade_*`` scales pixels linearly so the outer
+    frame is exactly black; ``cut``/None leaves frames untouched. Spans clamp to the shot; overlapping
+    edges multiply.
+    """
+    n = min(max(fade, 0), max(length, 0))
+    if n <= 0 or length <= 0:
+        return
+    if transition_in in ("from_black", "fade_from_black"):
+        hard = transition_in == "from_black"
+        for j in range(n):
+            _fade_frame(frames_dir, j, 0.0 if hard else j / n)
+    if transition_out in ("to_black", "fade_to_black"):
+        hard = transition_out == "to_black"
+        for j in range(n):
+            _fade_frame(frames_dir, length - n + j, 0.0 if hard else (n - 1 - j) / n)
+
+
+def _screen_side(view: str | None) -> int | None:
+    if view in ("three_quarter_right", "profile_right"):
+        return 1
+    if view in ("three_quarter_left", "profile_left"):
+        return -1
+    return None
+
+
+def _side_word(side: int) -> str:
+    return "right" if side == 1 else "left"
+
+
+def facing_mirror(
+    base: frozenset[str],
+    order: list[str],
+    bboxes: dict[str, BBox],
+    facing: dict[str, str | None],
+    views: Mapping[str, str | None],
+    characters: dict[str, dict[str, Any]],
+) -> tuple[frozenset[str], list[str]]:
+    """Adjust the view-based ``base`` mirror so ``facing`` characters look at their target on screen.
+
+    The desired direction comes from the two screen positions (bbox centres); the drawn direction comes
+    from ``natural_facing`` flipped by the base mirror (the view describes the target look, the drawing
+    the start; the view stands in when the natural facing is unknown). ``mirror_ok: false`` keeps the
+    base mirror and warns once with the reason — unless the view already claimed that refusal. Unknown,
+    self, missing-position and same-x targets keep the base mirror silently (``check`` owns validation).
+    """
+    out = set(base)
+    warnings: list[str] = []
+    for character in order:
+        target = facing.get(character)
+        if not target or target == character:
+            continue
+        self_box = bboxes.get(character)
+        target_box = bboxes.get(target)
+        if self_box is None or target_box is None:
+            continue
+        diff = (target_box[0] + target_box[2]) - (self_box[0] + self_box[2])
+        if diff == 0:
+            continue
+        desired = 1 if diff > 0 else -1
+        info = characters.get(character, {})
+        raw = info.get("natural_facing")
+        natural = 1 if raw == "right" else (-1 if raw == "left" else None)
+        view_side = _screen_side(views.get(character))
+        drawn = natural if natural is not None else view_side
+        if drawn is None:
+            continue
+        if character in out:
+            drawn = -drawn
+        if drawn == desired:
+            continue
+        if info.get("mirror_ok") is True:
+            if character in out:
+                out.discard(character)
+            else:
+                out.add(character)
+            continue
+        refused_for_view = view_side is not None and natural is not None and view_side != natural
+        if refused_for_view and character not in base:
+            continue  # the view-based warning already fired for this character
+        known = _side_word(natural) if natural is not None else "unknown"
+        warnings.append(
+            f"{character} faces {target} on screen {_side_word(desired)} "
+            f"but mirror_ok is false (natural {known}); keeping unmirrored"
+        )
+    return frozenset(out), warnings
+
+
+def shot_lint_warnings(
+    exp: Exposure, style: Style, speaking: dict[str, list[tuple[str, int, int]]], mouths: dict[str, Mouth]
+) -> list[str]:
+    """The same timing/style lint ``check`` runs (``xsheet.lint`` + ``xsheet.style_lint``), as warning lines."""
+    cells: dict[str, list[str | None]] = {}
+    for character, track in mouths.items():
+        row: list[str | None] = [None] * exp.length
+        for cue in track.cues:
+            for frame in range(max(cue.start, 0), min(cue.end, exp.length)):
+                row[frame] = cue.shape
+        cells[character] = row
+    findings = [*lint(exp, style), *style_lint(exp, style, speaking, cells)]
+    return [f"lint: {finding}" for finding in findings]
+
+
+def review_off(episode_dir: Path) -> bool:
+    """True when the episode's event log carries the orchestrator's review-off note."""
+    try:
+        text = (episode_dir / "run" / "events.jsonl").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    return REVIEW_OFF_NOTE in text
+
+
 def render_shot(prod: Path, episode: str, shot: str) -> ShotRender:
     """Render one shot: frames, mix, MP4."""
     episode_dir = prod / episode
@@ -437,6 +594,18 @@ def render_shot(prod: Path, episode: str, shot: str) -> ShotRender:
         else:
             warnings.append(f"{character} needs mirror for view {view} (natural {natural}) but mirror_ok is false")
     mirror = frozenset(mirror_chars)
+    speaking: dict[str, list[tuple[str, int, int]]] = {}
+    if shot_entry.lines:
+        lint_shot_start = timing.shot(shot).start
+        for line_id in shot_entry.lines:
+            line_entry = lines_by_id.get(line_id)
+            if line_entry is None or line_entry.speaker not in exp.body:
+                continue
+            span = timing.line(line_id)
+            speaking.setdefault(line_entry.speaker, []).append(
+                (line_id, span.start - lint_shot_start, span.end - lint_shot_start)
+            )
+    warnings.extend(shot_lint_warnings(exp, style, speaking, mouths))
     assets = ShotAssets(episode_dir / "assets" / shot)
     scales: dict[str, float] = {}
     for character in order:
@@ -479,12 +648,33 @@ def render_shot(prod: Path, episode: str, shot: str) -> ShotRender:
             scales[character] = character_scale(ref_img, canvas)
         except (ValueError, ZeroDivisionError, OSError):
             continue
+    facing_map: dict[str, str | None] = {c.name: c.facing for c in (shot_entry.characters or [])}
     placement_data = _placement_mode(prod, episode_dir, shot, shot_entry, order, mirror, characters, poses)
     placements_map: dict[str, dict[str, DrawingPlacement]] | None = None
     occluder_masks: dict[str, np.ndarray] | None = None
     if placement_data is not None:
-        placements_map, occluder_masks, solver_warnings = placement_data
-        warnings.extend(solver_warnings)
+        placements_map, occluder_masks, _ = placement_data
+        # The solver boxes are the true screen positions: face from them, re-solving once on a flip.
+        faced, facing_warnings = facing_mirror(
+            mirror,
+            order,
+            character_bboxes(exp, assets, order, placements=placements_map),
+            facing_map,
+            views,
+            characters,
+        )
+        if faced != mirror:
+            mirror = faced
+            placement_data = _placement_mode(prod, episode_dir, shot, shot_entry, order, mirror, characters, poses)
+            if placement_data is not None:
+                placements_map, occluder_masks, _ = placement_data
+        warnings.extend(facing_warnings)
+    else:
+        probe = character_bboxes(exp, assets, order, mirror=mirror, scales=scales)
+        mirror, facing_warnings = facing_mirror(mirror, order, probe, facing_map, views, characters)
+        warnings.extend(facing_warnings)
+    if placement_data is not None:
+        warnings.extend(placement_data[2])
     frames_dir = episode_dir / "render" / shot / "frames"
     if frames_dir.exists():
         shutil.rmtree(frames_dir)
@@ -517,6 +707,8 @@ def render_shot(prod: Path, episode: str, shot: str) -> ShotRender:
             exp, mouths, assets, order, frames_dir, mirror=mirror, scales=scales, camera=camera_boxes
         )
     warnings.extend(render_warnings)
+    fade = transition_frames(style)
+    apply_frame_transitions(frames_dir, exp.length, shot_entry.transition_in, shot_entry.transition_out, fade)
     shot_span = timing.shot(shot)
     clips: list[Clip] = []
     speech: list[tuple[int, int]] = []
@@ -550,10 +742,24 @@ def render_shot(prod: Path, episode: str, shot: str) -> ShotRender:
         mix(music_clips, length=exp.length, out_wav=music_wav)
         duck(music_wav, speech)
         add_into(mix_wav, music_wav)
+    in_n = fade if shot_entry.transition_in in ("from_black", "fade_from_black") else 0
+    out_n = fade if shot_entry.transition_out in ("to_black", "fade_to_black") else 0
+    if in_n or out_n:
+        # Fade before normalize so the loudness target still holds with faded edges.
+        fade_edges(
+            mix_wav,
+            in_n,
+            out_n,
+            hard_in=shot_entry.transition_in == "from_black",
+            hard_out=shot_entry.transition_out == "to_black",
+        )
     if clips or music_clips:
         normalize(mix_wav)
+    off = review_off(episode_dir)
+    if off:
+        warnings.append(f"{REVIEW_OFF_COMMENT} (episode auto-approved)")
     mp4_path = episode_dir / "render" / f"{shot}.mp4"
-    encode(frames_dir, mix_wav, mp4_path)
+    encode(frames_dir, mix_wav, mp4_path, comment=REVIEW_OFF_COMMENT if off else None)
     lufs = loudness(mp4_path) if (clips or music_clips) else None
     if lufs is not None and abs(lufs - TARGET_LUFS) > 1.0:
         warnings.append(f"audio: {lufs:.1f} LUFS, target -14 (peak limit)")
@@ -578,4 +784,5 @@ def render_episode(prod: Path, episode: str) -> Path:
         rendered = render_shot(prod, episode, shot_entry.id)
         mp4s.append(rendered.mp4)
     out_mp4 = episode_dir / "render" / f"{episode}.mp4"
-    return _join_shot_mp4s(mp4s, out_mp4)
+    off = REVIEW_OFF_COMMENT if review_off(episode_dir) else None
+    return _join_shot_mp4s(mp4s, out_mp4, comment=off)

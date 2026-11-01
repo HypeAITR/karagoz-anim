@@ -100,7 +100,8 @@ def test_render_shot(prod: Path) -> None:
 
 def test_mirrored_character(prod: Path) -> None:
     render_shot(prod, EP, "sh01")
-    px = np.array(Image.open(prod / EP / "render" / "sh01" / "frames" / "00000.png").convert("RGB")).astype(int)
+    # Frame 50: past the 12-frame from_black fade-in (WP-45); ayse still holds p1.
+    px = np.array(Image.open(prod / EP / "render" / "sh01" / "frames" / "00050.png").convert("RGB")).astype(int)
     red = (px[:, :, 0] > 200) & (px[:, :, 1] < 60) & (px[:, :, 2] < 60)
     green = (px[:, :, 0] < 120) & (px[:, :, 1] > 140) & (px[:, :, 2] < 120)
     assert red.any() and green.any()
@@ -119,8 +120,9 @@ def test_same_scale_for_all_poses(prod: Path) -> None:
         ys = np.nonzero(mask)[0]
         return int(ys.max() - ys.min())
 
-    assert abs(height("00000.png") - height("00099.png")) <= 2
-    assert height("00000.png") == pytest.approx(STANDING_HEIGHT * 1080 * 439 / 451, abs=12)  # fill inside outline
+    # 00012 is the first full frame past the 12-frame from_black fade-in (WP-45); ali still holds p1.
+    assert abs(height("00012.png") - height("00099.png")) <= 2
+    assert height("00012.png") == pytest.approx(STANDING_HEIGHT * 1080 * 439 / 451, abs=12)  # fill inside outline
 
 
 def test_mirror_not_allowed_warns(prod: Path) -> None:
