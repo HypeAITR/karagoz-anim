@@ -31,6 +31,7 @@ A scene is a stack of layers, each with one behaviour managed by the engine: **h
 
 | Path | What |
 |---|---|
+| `src/karagoz/engine/arap.py` | as-rigid-as-possible mesh solver (from Meta AnimatedDrawings, MIT; sparse rewrite) |
 | `src/karagoz/engine/camera.py` | camera track: framing names into a crop box per frame |
 | `src/karagoz/engine/compose.py` | compositor: cut out drawings, place characters, composite frames |
 | `src/karagoz/engine/framing.py` | per-frame camera target boxes from the drawing on screen at each frame |
@@ -41,6 +42,7 @@ A scene is a stack of layers, each with one behaviour managed by the engine: **h
 | `src/karagoz/engine/placement.py` | placement solver: scale and position of every drawing from names |
 | `src/karagoz/engine/regions.py` | region map from a location's background: named places, masks, world scale |
 | `src/karagoz/engine/register.py` | refine solver placements by aligning the still part of each drawing |
+| `src/karagoz/engine/rig.py` | single-source rig: one drawing, layered meshes bent by ARAP to target points per frame |
 | `src/karagoz/engine/render.py` | deterministic render: numbered PNG frames plus voice lines to MP4 |
 | `src/karagoz/engine/shading.py` | contact shadows and ambient tone for placement-mode renders |
 | `src/karagoz/engine/sheet.py` | one-command looks: contact sheets, movement parts, close looks, frame strips |
