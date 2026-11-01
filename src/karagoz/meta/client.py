@@ -133,6 +133,8 @@ class MetaClient:
                 break
             self.sleep(min(30.0, 2.0**attempt))
         model, units, cost_usd = _call_cost(endpoint, body, result)
+        if status != 200:
+            cost_usd = 0.0  # failed calls produced nothing and are not charged (like DrawReport's refusals)
         record = CallRecord(
             tag,
             endpoint,

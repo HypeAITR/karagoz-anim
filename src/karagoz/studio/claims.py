@@ -8,13 +8,16 @@ import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import yaml
 
 from karagoz.engine.sheet import Part
 from karagoz.meta.jev import Jev
 from karagoz.spec import Poses, load
+
+if TYPE_CHECKING:
+    from karagoz.meta.client import MetaClient
 
 YES, NO = 0.7, 0.3
 
@@ -71,16 +74,13 @@ def descriptions(prod: Path, episode: str, shot: str) -> dict[str, list[tuple[st
     return out
 
 
-def _default_text_model() -> Callable[[str], str]:
+def _default_text_model() -> tuple[Callable[[str], str], MetaClient]:
+    """The default Spark model plus its client, so make_claims can book the spend (WP-48 #3)."""
     from karagoz.meta.client import MetaClient
     from karagoz.meta.spark import CHECK_MODEL, Spark
 
-    spark = Spark(MetaClient(), CHECK_MODEL)
-
-    def _ask(prompt: str) -> str:
-        return spark.ask(prompt)
-
-    return _ask
+    client = MetaClient()
+    return Spark(client, CHECK_MODEL).ask, client
 
 
 def _coerce_claims(raw: Any) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
@@ -127,7 +127,7 @@ def _make_one(
 
 
 def make_claims(prod: Path, episode: str, shot: str, *, parallel: int = 8) -> dict[str, Any]:
-    """Write and return <episode>/review/<shot>/claims.json."""
+    """Write and return <episode>/review/<shot>/claims.json (with this call's spend as cost_usd)."""
     start = time.monotonic()
     poses_path = prod / episode / "shots" / shot / "poses.yaml"
     poses_sha = hashlib.sha256(poses_path.read_bytes()).hexdigest()
@@ -137,9 +137,14 @@ def make_claims(prod: Path, episode: str, shot: str, *, parallel: int = 8) -> di
     except (OSError, json.JSONDecodeError):
         existing = None
     if isinstance(existing, dict) and existing.get("poses_sha") == poses_sha and existing.get("errors") == []:
-        return existing
+        return {**existing, "cost_usd": 0.0}  # reused: this call spent nothing (the file keeps its history)
     desc = descriptions(prod, episode, shot)
-    model = text_model if text_model is not None else _default_text_model()
+    client: MetaClient | None
+    if text_model is not None:
+        model = text_model
+        client = None
+    else:
+        model, client = _default_text_model()
     merged_drawings: dict[str, list[str]] = {}
     merged_pairs: dict[str, list[str]] = {}
     errors: list[str] = []
@@ -156,6 +161,7 @@ def make_claims(prod: Path, episode: str, shot: str, *, parallel: int = 8) -> di
                         merged_pairs[key] = value
                 if error is not None:
                     errors.append(error)
+    cost_usd = round(sum(r.cost_usd for r in client.records), 6) if client is not None else 0.0
     out: dict[str, Any] = {
         "shot": shot,
         "poses_sha": poses_sha,
@@ -163,6 +169,7 @@ def make_claims(prod: Path, episode: str, shot: str, *, parallel: int = 8) -> di
         "pairs": merged_pairs,
         "errors": errors,
         "seconds": round(time.monotonic() - start, 2),
+        "cost_usd": cost_usd,
     }
     claims_path.parent.mkdir(parents=True, exist_ok=True)
     claims_path.write_text(json.dumps(out, indent=1) + "\n", encoding="utf-8")

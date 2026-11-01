@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import sys
+import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -239,10 +240,22 @@ def input_view(department: str, rel: str, data: bytes) -> bytes:
         return data
 
 
+def _digest_files(prod: Path, task: Task) -> list[str]:
+    """The task's input files for staleness: files_in plus style.yaml when it exists.
+
+    style.yaml is briefed and copied into every workdir, so it is an input of every
+    task even though plan_tasks does not list it (WP-39 keeps files_in unchanged).
+    """
+    rels = list(task.files_in)
+    if "style.yaml" not in rels and (prod / "style.yaml").is_file():
+        rels.append("style.yaml")
+    return rels
+
+
 def inputs_digest(prod: Path, task: Task) -> str:
     """sha256 over (rel path, NUL, viewed bytes or `<missing>`, NUL) for every input file."""
     digest = hashlib.sha256()
-    for rel in task.files_in:
+    for rel in _digest_files(prod, task):
         digest.update(rel.encode("utf-8"))
         digest.update(b"\0")
         try:
@@ -256,7 +269,7 @@ def inputs_digest(prod: Path, task: Task) -> str:
 def file_digests(prod: Path, task: Task) -> dict[str, str]:
     """Per-file sha256 hex digests of the viewed input bytes (or of `b"<missing>"`)."""
     out: dict[str, str] = {}
-    for rel in task.files_in:
+    for rel in _digest_files(prod, task):
         try:
             data = input_view(task.department, rel, (prod / rel).read_bytes())
         except OSError:
@@ -469,13 +482,16 @@ class _CountingSam:
 
     Used only when no cost hook is installed (injected fakes, or code_work called
     without a budget/log): hooked MetaClients count through their own records.
+    Thread-safe: measure_shot calls segment from a thread pool (like draw._CountingSam).
     """
 
     inner: SamLike
     calls: int = 0
+    _lock: threading.Lock = field(default_factory=threading.Lock, repr=False, compare=False)
 
     def segment(self, image: Path | bytes, concept: str, *, tag: str = "") -> list[Segment]:
-        self.calls += 1
+        with self._lock:
+            self.calls += 1
         return self.inner.segment(image, concept, tag=tag)
 
 
@@ -489,13 +505,14 @@ def install_cost_hook(client: MetaClient, budget: Budget, log: EventLog, task_id
     unit = task_id.rpartition("/")[0]
 
     def _on_call(record: CallRecord) -> None:
-        budget.charge_record(unit, record)
+        usd = record.cost_usd if record.status == 200 else 0.0  # failed calls cost nothing
+        budget.charge(unit, usd)
         log.append(
             task_id,
             "cost",
             model=record.model,
             units=record.units,
-            usd=record.cost_usd,
+            usd=usd,
             endpoint=record.endpoint,
             status=record.status,
             tag=record.tag,
@@ -643,32 +660,37 @@ def code_work(
                 claims_thread = threading.Thread(target=_make_claims, daemon=True)
                 claims_thread.start()
 
-            def _join_claims() -> None:
-                if claims_thread is not None:
-                    claims_thread.join()
-                    if "error" in claims_holder:
-                        exc = claims_holder["error"]
-                        message = str(exc) if str(exc) else type(exc).__name__
-                        if on_event is not None:
-                            on_event({"payload_type": "code.note", "payload": {"text": f"claims failed: {message}"}})
-                    else:
-                        result = claims_holder.get("result", {})
-                        drawings_n = len(result.get("drawings", {})) if isinstance(result, dict) else 0
-                        pairs_n = len(result.get("pairs", {})) if isinstance(result, dict) else 0
-                        seconds = result.get("seconds", 0.0) if isinstance(result, dict) else 0.0
-                        try:
-                            seconds_f = float(seconds)
-                        except (TypeError, ValueError):
-                            seconds_f = 0.0
-                        if on_event is not None:
-                            on_event(
-                                {
-                                    "payload_type": "code.note",
-                                    "payload": {
-                                        "text": f"claims: {drawings_n} drawings, {pairs_n} pairs, {seconds_f} s"
-                                    },
-                                }
-                            )
+            def _join_claims() -> float:
+                """Wait for the claims thread and return what it spent (0.0 when it ran none or failed)."""
+                if claims_thread is None:
+                    return 0.0
+                claims_thread.join()
+                if "error" in claims_holder:
+                    exc = claims_holder["error"]
+                    message = str(exc) if str(exc) else type(exc).__name__
+                    if on_event is not None:
+                        on_event({"payload_type": "code.note", "payload": {"text": f"claims failed: {message}"}})
+                    return 0.0
+                result = claims_holder.get("result", {})
+                drawings_n = len(result.get("drawings", {})) if isinstance(result, dict) else 0
+                pairs_n = len(result.get("pairs", {})) if isinstance(result, dict) else 0
+                seconds = result.get("seconds", 0.0) if isinstance(result, dict) else 0.0
+                try:
+                    seconds_f = float(seconds)
+                except (TypeError, ValueError):
+                    seconds_f = 0.0
+                if on_event is not None:
+                    on_event(
+                        {
+                            "payload_type": "code.note",
+                            "payload": {"text": f"claims: {drawings_n} drawings, {pairs_n} pairs, {seconds_f} s"},
+                        }
+                    )
+                raw_cost = result.get("cost_usd", 0.0) if isinstance(result, dict) else 0.0
+                try:
+                    return float(raw_cost)
+                except (TypeError, ValueError):
+                    return 0.0
 
             link_location_background(prod, episode, task.unit)
             hooked_image = False
@@ -711,8 +733,8 @@ def code_work(
             draw_image_cost = 0.0 if hooked_image else report.cost_usd
             if report.failed:
                 error = ", ".join(f"{path}: {message}" for path, message in report.failed)
-                _join_claims()
-                return RunResult(ok=False, error=error, cost_usd=draw_image_cost)
+                claims_cost = _join_claims()
+                return RunResult(ok=False, error=error, cost_usd=draw_image_cost + claims_cost)
             # With a region map the render places drawings by their landmarks (WP-11): measure them now (cached by
             # image hash, so only new drawings cost SAM calls).
             if _shot_has_regions(prod, episode, task.unit):
@@ -770,10 +792,10 @@ def code_work(
                         )
                     sam_for_return = sam_cost
                 final = f"{len(report.done)} drawn, {len(report.cached)} cached, {len(measured)} landmarks"
-                _join_claims()
-                return RunResult(ok=True, final_text=final, cost_usd=draw_image_cost + sam_for_return)
-            _join_claims()
-            return RunResult(ok=True, cost_usd=draw_image_cost)
+                claims_cost = _join_claims()
+                return RunResult(ok=True, final_text=final, cost_usd=draw_image_cost + sam_for_return + claims_cost)
+            claims_cost = _join_claims()
+            return RunResult(ok=True, cost_usd=draw_image_cost + claims_cost)
         if department == "render":
             from karagoz.engine.shot import render_shot
 
@@ -1006,6 +1028,7 @@ class Studio:
                 changed.append("needs_approval")
             if changed:
                 self.log.append(existing.id, "note", text=f"definition updated: {', '.join(changed)}")
+        self._prune_removed_shots()
         ran: set[str] = set()
         try:
             while True:
@@ -1048,6 +1071,25 @@ class Studio:
         finally:
             self._save()
         return changes
+
+    def _prune_removed_shots(self) -> None:
+        """Drop the board tasks of shots that left shots.yaml, so they never run again.
+
+        Only acts on a readable shot list: without shots.yaml (the director has not
+        run yet) or with an unreadable one, the board is left alone.
+        """
+        try:
+            shots_obj = load(self._episode_dir / "shots.yaml")
+        except SpecError:
+            return
+        if not isinstance(shots_obj, Shots):
+            return
+        live = {shot.id for shot in shots_obj.shots}
+        for task_id in list(self.board.tasks):
+            unit = task_id.rpartition("/")[0]
+            if re.fullmatch(r"sh[0-9]{2,3}[a-z]?", unit) and unit not in live:
+                del self.board.tasks[task_id]
+                self.log.append(task_id, "note", text=f"shot {unit} removed from shots.yaml: task dropped")
 
     def run(self, until: str | None = None, only: str | None = None) -> None:
         """Repeat step() until no runnable task is READY."""
@@ -1220,11 +1262,21 @@ class Studio:
         try:
             carrier = self.carriers[carrier_name]
         except KeyError:
-            raise ValueError(f"unknown carrier {carrier_name!r} for {task.id}") from None
+            changes.append(self.board.start(task.id, self._digest, task_digest=self._task_digest))
+            task.input_files = file_digests(self.prod, task)
+            self._record(changes[-1])
+            changes.append(self.board.finish(task.id, ok=False, note=f"unknown carrier {carrier_name!r} for {task.id}"))
+            self._record(changes[-1])
+            return changes
         changes.append(self.board.start(task.id, self._digest, task_digest=self._task_digest))
         task.input_files = file_digests(self.prod, task)
         self._record(changes[-1])
-        workdir = self._prepare_workdir(task)
+        try:
+            workdir = self._prepare_workdir(task)
+        except Exception as exc:  # noqa: BLE001 - a workdir-prep failure fails the task, not the studio
+            changes.append(self.board.finish(task.id, ok=False, note=f"{type(exc).__name__}: {exc}"))
+            self._record(changes[-1])
+            return changes
         brief = Brief(
             task_id=task.id,
             prompt=SHORT_PROMPT,
@@ -1340,6 +1392,7 @@ class Studio:
             self.log.append(task.id, "interview", text="", error=f"{type(exc).__name__}: {exc}", usd=0.0, session=None)
             return
         self.budget.charge(task.unit, answer.cost_usd)
+        self.log.append(task.id, "cost", usd=answer.cost_usd, session=answer.session_id)
         if not answer.ok:
             self.log.append(
                 task.id,
