@@ -243,7 +243,6 @@ class _TorchBackend:
                 f"MMS voice {model!r} needs the 'mms' extra (torch + transformers): uv sync --extra mms"
             ) from exc
         vits, tokenizer = _load_model(model)
-        torch.manual_seed(seed)
         inputs = tokenizer(text, return_tensors="pt")
         input_ids = inputs["input_ids"]
         attention_mask = inputs.get("attention_mask")
@@ -253,6 +252,7 @@ class _TorchBackend:
             captured.setdefault("log_duration", output.detach().cpu())
 
         with _SYNTH_LOCK:
+            torch.manual_seed(seed)
             handle = vits.duration_predictor.register_forward_hook(hook)
             try:
                 with torch.no_grad():

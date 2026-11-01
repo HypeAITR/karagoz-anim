@@ -48,7 +48,8 @@ class FakeBackend:
         total = sum(s.frames for s in spans)
         n = total * self.hop_length
         t = np.arange(n, dtype=np.float64) / self.sample_rate
-        samples = (0.3 * np.sin(2 * np.pi * 440 * t)).astype(np.float32)
+        phase = (seed % 360) * np.pi / 180.0
+        samples = (0.3 * np.sin(2 * np.pi * 440 * t + phase)).astype(np.float32)
         return Synthesis(samples=samples, sample_rate=self.sample_rate, hop_length=self.hop_length, spans=tuple(spans))
 
 
@@ -114,6 +115,15 @@ def test_speak_passes_model_speed_and_seed_to_the_backend() -> None:
     assert backend.calls[1] == {"text": "hi", "model": "facebook/mms-tts-tur", "speed": 1.2, "seed": 7}
 
 
+@NEEDS_FFMPEG
+def test_speak_seed_changes_the_audio_but_repeats_for_the_same_seed() -> None:
+    tts = MmsTts(FakeBackend())
+    mp3_a, _ = tts.speak("Su ver.", mms_voice(seed=1))
+    mp3_b, _ = tts.speak("Su ver.", mms_voice(seed=2))
+    assert mp3_a != mp3_b
+    assert tts.speak("Su ver.", mms_voice(seed=1))[0] == mp3_a
+
+
 def test_speak_rejects_a_nonpositive_speed() -> None:
     tts = MmsTts(FakeBackend())
     with pytest.raises(ValueError, match="speed"):
@@ -142,7 +152,7 @@ def test_mms_imports_torch_and_transformers_only_inside_functions() -> None:
     heavy = {"torch", "transformers"}
     for node in ast.parse(src).body:
         if isinstance(node, (ast.Import, ast.ImportFrom)):
-            names = {"a.name.split('.')[0]" for a in node.names}
+            names = {a.name.split(".")[0] for a in node.names}
             if isinstance(node, ast.ImportFrom) and node.module:
                 names.add(node.module.split(".")[0])
             assert not (names & heavy), "torch/transformers must be imported inside functions only"
