@@ -22,7 +22,8 @@ Every character prompt has these sections, in this order (see `src/karagoz/studi
 | **CHANGE** | only what is different in this drawing, after a **BODY** sentence for the pose's `support` (sitting geometry: invisible seat at knee height, thighs horizontal) | template (`support_text`) + Layout (`acting`, inbetween text) |
 | **HANDS** | what each hand holds, from the pose's `holds` (an inbetween: the transition's `holds` entry, or the keys' `holds` when both are the same, else no HANDS line and a `PROPS:` line with the prop's look), the prop described by `props.yaml`; an empty hand is said to be empty | template + Layout (`holds`) |
 | **NEVER** | no furniture, floor, floor shadow, logo, brand mark, second person, text other than the character's own clothing text, border | template |
-| **FACING** | always the character's natural facing (`characters.yaml`) | template; the engine mirrors |
+| **FACING** | the facing the drawing is made in: the natural facing — except `mirror_ok: false`, drawn directly in the shot's facing with left/right words unswapped | template; the engine mirrors only `mirror_ok: true` |
+| **OUTPUT** | flat fills only: no shadow tone on the body, no cast shadow of one part on another or on clothes, no floor shadow, nothing behind the character; one full-body drawing on a plain white background | template |
 
 A section that has nothing to say is left out, never left vague.
 
@@ -30,7 +31,7 @@ A section that has nothing to say is left out, never left vague.
 
 | Behaviour | Evidence | What we do |
 |---|---|---|
-| Does **not** reliably follow "face left/right"; sometimes mirrors | 1 of 4 seated poses mirrored; a "face left" request came back facing right | Draw every character in its natural facing; the engine mirrors (`mirror_ok`); left/right words in the CHANGE text of a mirrored character are swapped by code |
+| Does **not** reliably follow "face left/right"; sometimes mirrors | 1 of 4 seated poses mirrored; a "face left" request came back facing right | Draw each character in its natural facing and the engine mirrors it — except `mirror_ok: false`, drawn directly in the shot's facing with directions unswapped (AUD-2 #37); left/right words in the CHANGE text of a mirrored character are swapped by code |
 | Copies details of the reference, including **logos** and accessories of another reference | shoe swoosh from the reference; earring and eye bags leaked from a style reference into a new character | Clean the reference once (edit it, keep a `-v2`); NEVER lists "logo, brand mark" |
 | Adds **furniture** and **floor shadows** even when told "no furniture" | a sofa drawn into a sitting pose; grey floor shadows under 5 of 18 poses | NEVER names the objects explicitly (sofa, chair, table, floor, shadow on the floor); planned: the compositor drops floor-touching grey blobs |
 | Redraws the **whole body** when a pose is edited from the model sheet | legs on the table in pose 1, feet on the floor in pose 2, legs out in pose 3, though Layout wrote "same seat and legs" | Key poses are drawn **in order, each from the previous pose** (plus the model sheet for identity) |
@@ -45,6 +46,8 @@ A section that has nothing to say is left out, never left vague.
 | `support: crouch` ("crouching, knees bent, hips lifted from the seat") draws a **deep squat** | slice 3b: every drawing of a stand-up from the first inbetween to the crouch key was a squat, lower than sitting | A stand-up has no crouch key (layout skill, section `stand-up`). **Done (WP-23):** `crouch` now says "rising out of the seat, half-way up … not squatting" (template v4; regression result in `docs/cizim-regresyon/` of the research repo) |
 | Inbetweens carry **no BODY sentence** | slice 3b: the first "legs straightening" inbetween came out fully standing | **Done (WP-23):** an inbetween gets BODY: the keys' support when they agree, else "on the way from sitting to standing, drawing k of n, about x% of the way … never lower than in image 1"; Layout still writes hips and knees in every inbetween of a body move |
 | A short prop name in the acting text loses the shape **again** | slice 3b: the glass in the handover was a plain tumbler in one drawing | `props.yaml` description in HANDS (done) and Layout uses the full name (layout skill) |
+| Shades bodies and casts shadows even on flat-style prompts | T-80 (Kutay): the image model draws shadows the style must forbid | **Done:** the OUTPUT style says flat fills only — no shadow tone on the body, no cast shadow of one part on another or on clothes, no floor shadow, nothing behind the character (template v5) |
+| Sit-down inbetweens come out as a **deep crouch** with no seat | D41: stand → sit inbetweens crouched without a seat | **Done:** an inbetween on the way down into `sit` gets the seat sentence (the invisible seat is at knee height, the hips are moving down onto it); stand-up prompts unchanged |
 
 ## Writing acting text (Layout)
 

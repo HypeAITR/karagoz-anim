@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import re
+import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -23,6 +24,7 @@ from karagoz.engine.patch import PatchError, clip_patch, make_patch, save_patch
 from karagoz.engine.timing import resolve_episode
 from karagoz.engine.xsheet import expand
 from karagoz.meta.client import MetaApiError
+from karagoz.meta.sam import USD_PER_CALL as USD_PER_SAM_CALL
 from karagoz.spec import Align, Lines, Pose, Poses, PoseSequence, Shots, SpecError, Style, Xsheet, load
 from karagoz.spec.models import Hand
 
@@ -102,16 +104,23 @@ class DrawReport:
     cached: list[Path]
     failed: list[tuple[Path, str]]
     calls: int
+    images: int = 0
+    sam_calls: int = 0
 
     @property
     def cost_usd(self) -> float:
-        return self.calls * USD_PER_IMAGE
+        """The billed spend: image calls that returned an image, plus SAM calls via `sam_face_of`.
+
+        Refused image calls produced nothing and are not charged (AUD-2 #6); cached jobs made no calls.
+        """
+        return self.images * USD_PER_IMAGE + self.sam_calls * USD_PER_SAM_CALL
 
 
 @dataclass(frozen=True)
 class _CharacterInfo:
     ref: str
     natural_facing: str
+    mirror_ok: bool
 
 
 def _parse_inbetween(drawing: str) -> tuple[str, str, int] | None:
@@ -172,7 +181,7 @@ def _load_characters(path: Path) -> dict[str, _CharacterInfo]:
         ref = entry.get("ref")
         facing = entry.get("natural_facing")
         if isinstance(ref, str) and isinstance(facing, str):
-            out[name] = _CharacterInfo(ref=ref, natural_facing=facing)
+            out[name] = _CharacterInfo(ref=ref, natural_facing=facing, mirror_ok=entry.get("mirror_ok") is True)
     return out
 
 
@@ -340,18 +349,40 @@ def swap_left_right(text: str) -> str:
     return _LR.sub(lambda m: pairs[m.group(0)], text)
 
 
-def _will_mirror(shots: Shots, shot: str, character: str, natural_facing: str) -> bool:
-    """True if the shot shows the character facing opposite to the direction it is drawn in."""
+def _shot_facing(shots: Shots, shot: str, character: str) -> str | None:
+    """The screen facing ("left"/"right") the shot stages the character in; None for front/back/unstaged."""
     for s in shots.shots:
         if s.id != shot:
             continue
         for c in s.characters or []:
             if c.name == character and c.view is not None:
                 if c.view.endswith("_left"):
-                    return natural_facing == "right"
+                    return "left"
                 if c.view.endswith("_right"):
-                    return natural_facing == "left"
-    return False
+                    return "right"
+    return None
+
+
+def _will_mirror(shots: Shots, shot: str, character: str, natural_facing: str) -> bool:
+    """True if the shot shows the character facing opposite to its natural facing."""
+    screen = _shot_facing(shots, shot, character)
+    if screen is None:
+        return False
+    return (natural_facing == "right" and screen == "left") or (natural_facing == "left" and screen == "right")
+
+
+def _draw_facing(shots: Shots, shot: str, character: str, info: _CharacterInfo) -> tuple[str, bool]:
+    """The (facing word for the prompt, whether to swap left/right words).
+
+    A character the engine may mirror is drawn in its natural facing with swapped directions (T-57); a character
+    with `mirror_ok: false` is drawn directly in the facing the shot needs, with its words untouched (AUD-2 #37).
+    """
+    if not _will_mirror(shots, shot, character, info.natural_facing):
+        return (info.natural_facing, False)
+    if info.mirror_ok:
+        return (info.natural_facing, True)
+    screen = _shot_facing(shots, shot, character)
+    return (screen if screen is not None else info.natural_facing, False)
 
 
 def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
@@ -423,6 +454,9 @@ def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
     support_direction = templates.get("support_direction")
     if not isinstance(support_direction, dict):
         raise ValueError(f"{TEMPLATES_PATH}: missing support_direction")
+    support_sit_down = templates.get("support_sit_down")
+    if not isinstance(support_sit_down, str):
+        raise ValueError(f"{TEMPLATES_PATH}: missing support_sit_down")
     prop_descriptions = _load_prop_descriptions(prod / "props.yaml")
 
     shot_entry = next((s for s in shots.shots if s.id == shot), None)
@@ -503,18 +537,17 @@ def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
                         acting = pose_entry.acting
                         matched = pose_entry
                         break
-            if _will_mirror(shots, shot, char, info.natural_facing):
+            facing, swap = _draw_facing(shots, shot, char, info)
+            if swap:
                 acting = swap_left_right(acting)
             support_str = (
                 f"{support_texts[matched.support]} " if matched is not None and matched.support is not None else ""
             )
             props_str = _hands_text(matched.holds if matched is not None else None, prop_descriptions)
-            if _will_mirror(shots, shot, char, info.natural_facing):
+            if swap:
                 props_str = swap_left_right(props_str)
             tpl = key_pose_tpl if previous is None else key_pose_next_tpl
-            prompt = tpl.format(
-                style=style_text, facing=info.natural_facing, support=support_str, props=props_str, acting=acting
-            )
+            prompt = tpl.format(style=style_text, facing=facing, support=support_str, props=props_str, acting=acting)
             out = assets_dir / char / f"{pose_id}.png"
             jobs.append(
                 DrawJob(
@@ -573,15 +606,15 @@ def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
                         pose_b = pose_entry
             if desc is None:
                 desc = f"the in-between drawing {k} of {n}: halfway between the two drawings"
-            mirrored = _will_mirror(shots, shot, char, info.natural_facing)
-            if mirrored:
+            facing, swap = _draw_facing(shots, shot, char, info)
+            if swap:
                 desc = swap_left_right(desc)
             entry: dict[Hand, str | None] | None = None
             if trans_holds is not None and 0 <= k - 1 < len(trans_holds):
                 entry = trans_holds[k - 1]
             if entry is not None:
                 props_str = _hands_text(entry, prop_descriptions)
-                if mirrored:
+                if swap:
                     props_str = swap_left_right(props_str)
             elif (
                 pose_a is not None
@@ -591,7 +624,7 @@ def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
                 and pose_a.holds == pose_b.holds
             ):
                 props_str = _hands_text(pose_a.holds, prop_descriptions)
-                if mirrored:
+                if swap:
                     props_str = swap_left_right(props_str)
             else:
                 named: set[str] = set()
@@ -623,10 +656,12 @@ def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
                         pct=round(100 * k / (n + 1)),
                         direction=direction if isinstance(direction, str) else "",
                     )
+                    if direction_key == "down" and pose_b.support == "sit":
+                        formatted = f"{formatted.strip()} {support_sit_down}"
                     support_str = formatted.strip() + " "
             prompt = inbetween_tpl.format(
                 style=style_text,
-                facing=info.natural_facing,
+                facing=facing,
                 support=support_str,
                 props=props_str,
                 description=desc,
@@ -665,7 +700,7 @@ def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
             by_id = {p.id: p for p in poses.characters[char].poses}
             for sid, seq_entry in char_seqs.items():
                 from_pose[sid] = by_id.get(seq_entry.from_)
-        mirrored = _will_mirror(shots, shot, char, info.natural_facing)
+        facing, swap = _draw_facing(shots, shot, char, info)
         for drawing in sorted(sequence_drawings[char], key=_sequence_sort_key):
             parsed_sq = _parse_sequence(drawing)
             if parsed_sq is None:
@@ -675,18 +710,18 @@ def plan_draw(prod: Path, episode: str, shot: str) -> list[DrawJob]:
             if seq_def is None or not 1 <= k <= len(seq_def.drawings):
                 continue
             acting = seq_def.drawings[k - 1]
-            if mirrored:
+            if swap:
                 acting = swap_left_right(acting)
             matched = from_pose.get(sid)
             support_str = (
                 f"{support_texts[matched.support]} " if matched is not None and matched.support is not None else ""
             )
             props_str = _hands_text(matched.holds if matched is not None else None, prop_descriptions)
-            if mirrored:
+            if swap:
                 props_str = swap_left_right(props_str)
             prompt = key_pose_next_tpl.format(
                 style=style_text,
-                facing=info.natural_facing,
+                facing=facing,
                 support=support_str,
                 props=props_str,
                 acting=acting,
@@ -828,7 +863,8 @@ def _fit_background(img: Image.Image, size: tuple[int, int] = (1920, 1080)) -> I
     return resized.crop((left, top, left + tw, top + th))
 
 
-def _run_simple(job: DrawJob, image: MuseImageLike) -> tuple[int, float, str | None]:
+def _run_simple(job: DrawJob, image: MuseImageLike) -> tuple[int, int, float, str | None]:
+    """Run one whole-drawing job; return (calls, images, seconds, error). `images` is 1 when an image was saved."""
     start = time.monotonic()
     calls = 0
     try:
@@ -853,8 +889,8 @@ def _run_simple(job: DrawJob, image: MuseImageLike) -> tuple[int, float, str | N
             job.out.parent.mkdir(parents=True, exist_ok=True)
             img.convert("RGB").save(job.out, format="PNG")
     except Exception as exc:  # noqa: BLE001 - failures are reported, never fatal
-        return (calls, time.monotonic() - start, str(exc))
-    return (calls, time.monotonic() - start, None)
+        return (calls, 0, time.monotonic() - start, str(exc))
+    return (calls, 1, time.monotonic() - start, None)
 
 
 def _face_box_from_data(data: Any) -> tuple[float, float, float, float] | None:
@@ -941,30 +977,45 @@ def _run_patch(
     job: DrawJob,
     image: MuseImageLike,
     face_of: Callable[[Path], tuple[float, float, float, float] | None] | None = None,
-) -> tuple[int, float, str | None]:
+) -> tuple[int, int, float, str | None]:
+    """Run one patch job; return (calls, images, seconds, error). `images` counts the calls that returned an image:
+    a refused call produced nothing, but a call whose patch step then failed still drew its variant."""
     start = time.monotonic()
     calls = 0
+    images = 0
+
+    def attempt(prompt: str, reasoning: Reasoning) -> None:
+        nonlocal images
+        try:
+            _run_patch_attempt(job, image, prompt, reasoning, face_of)
+        except MetaApiError:
+            raise
+        except Exception:
+            images += 1
+            raise
+        images += 1
+
     try:
         calls += 1
         try:
-            _run_patch_attempt(job, image, job.prompt, job.reasoning, face_of)
+            attempt(job.prompt, job.reasoning)
         except MetaApiError as exc:
             if exc.status != 400:
                 raise
             calls += 1  # same prompt once more: the content filter is not deterministic
-            _run_patch_attempt(job, image, job.prompt, job.reasoning, face_of)
+            attempt(job.prompt, job.reasoning)
     except Exception as first_exc:  # noqa: BLE001 - retry refused/failed patches once
         retriable = isinstance(first_exc, PatchError) or (
             isinstance(first_exc, MetaApiError) and first_exc.status == 400
         )
         if not retriable or job.fallback is None:
-            return (calls, time.monotonic() - start, str(first_exc))
+            return (calls, images, time.monotonic() - start, str(first_exc))
         try:
             calls += 1
-            _run_patch_attempt(job, image, job.fallback, "high", face_of)
+            attempt(job.fallback, "high")
         except Exception as second_exc:  # noqa: BLE001 - second failure is reported
-            return (calls, time.monotonic() - start, str(second_exc))
-    return (calls, time.monotonic() - start, None)
+            return (calls, images, time.monotonic() - start, str(second_exc))
+    return (calls, images, time.monotonic() - start, None)
 
 
 def retire_stale(jobs: list[DrawJob], shot_assets: Path) -> list[Path]:
@@ -1006,6 +1057,14 @@ def retire_stale(jobs: list[DrawJob], shot_assets: Path) -> list[Path]:
     return sorted(retired)
 
 
+def _sam_calls_of(face_of: Callable[[Path], tuple[float, float, float, float] | None] | None) -> int:
+    """The SAM calls a face lookup made so far; 0 for a plain callable without a counter."""
+    if face_of is None:
+        return 0
+    raw = getattr(face_of, "sam_calls", 0)
+    return raw if isinstance(raw, int) and raw > 0 else 0
+
+
 def run_draw(
     jobs: list[DrawJob],
     image: MuseImageLike,
@@ -1018,6 +1077,8 @@ def run_draw(
     cached: list[Path] = []
     failed: list[tuple[Path, str]] = []
     total_calls = 0
+    total_images = 0
+    sam_before = _sam_calls_of(face_of)
     if not jobs:
         return DrawReport(done=done, cached=cached, failed=failed, calls=total_calls)
 
@@ -1064,7 +1125,7 @@ def run_draw(
             else:
                 pending_idx.append(i)
 
-        results: dict[int, tuple[int, float, str | None]] = {}
+        results: dict[int, tuple[int, int, float, str | None]] = {}
         if pending_idx:
             pending_jobs = [wave_jobs[i] for i in pending_idx]
             with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
@@ -1082,8 +1143,9 @@ def run_draw(
             if i in cached_idx:
                 emit(job, "cached", 0, 0.0)
                 continue
-            calls, seconds, error = results[i]
+            calls, images, seconds, error = results[i]
             total_calls += calls
+            total_images += images
             if error is None:
                 done.append(job.out)
                 manifest[rel] = {
@@ -1102,20 +1164,50 @@ def run_draw(
         manifest_path.parent.mkdir(parents=True, exist_ok=True)
         manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    return DrawReport(done=done, cached=cached, failed=failed, calls=total_calls)
+    sam_calls = max(0, _sam_calls_of(face_of) - sam_before)
+    return DrawReport(
+        done=done, cached=cached, failed=failed, calls=total_calls, images=total_images, sam_calls=sam_calls
+    )
 
 
-def sam_face_of(sam: SamLike, prod: Path) -> Callable[[Path], tuple[float, float, float, float] | None]:
-    """Face boxes measured with SAM, cached in `prod/.cache/landmarks` (shared with `measure_shot`)."""
-    characters = _load_characters(prod / "characters.yaml")
-    cache_dir = prod / ".cache" / "landmarks"
+class _CountingSam:
+    """Wrap a SamLike and count segment calls so the run can book them (thread-safe: patch jobs run in parallel)."""
 
-    def face_of(path: Path) -> tuple[float, float, float, float] | None:
-        info = characters.get(path.parent.name)
+    def __init__(self, inner: SamLike) -> None:
+        self._inner = inner
+        self._lock = threading.Lock()
+        self.calls = 0
+
+    def segment(self, image: Path | bytes, concept: str, *, tag: str = "") -> list[Any]:
+        with self._lock:
+            self.calls += 1
+        return self._inner.segment(image, concept, tag=tag)
+
+
+class SamFaceOf:
+    """Face boxes measured with SAM, cached in `prod/.cache/landmarks` (shared with `measure_shot`).
+
+    `sam_calls` counts the SAM segment calls made so far; `run_draw` books the calls of its run in the report.
+    """
+
+    def __init__(self, sam: SamLike, prod: Path) -> None:
+        self._sam = _CountingSam(sam)
+        self._characters = _load_characters(prod / "characters.yaml")
+        self._cache_dir = prod / ".cache" / "landmarks"
+
+    def __call__(self, path: Path) -> tuple[float, float, float, float] | None:
+        info = self._characters.get(path.parent.name)
         facing = info.natural_facing if info is not None else "right"
-        return _face_box_from_data(measure(path, sam, facing=facing, cache_dir=cache_dir))
+        return _face_box_from_data(measure(path, self._sam, facing=facing, cache_dir=self._cache_dir))
 
-    return face_of
+    @property
+    def sam_calls(self) -> int:
+        return self._sam.calls
+
+
+def sam_face_of(sam: SamLike, prod: Path) -> SamFaceOf:
+    """Face boxes measured with SAM, cached in `prod/.cache/landmarks` (shared with `measure_shot`)."""
+    return SamFaceOf(sam, prod)
 
 
 def recut_patches(prod: Path, episode: str, shot: str) -> tuple[list[Path], list[str]]:

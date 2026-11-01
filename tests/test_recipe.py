@@ -50,9 +50,9 @@ def props_file(prod: Path) -> None:  # noqa: F811
 # --- templates -----------------------------------------------------------------------------------------------------
 
 
-def test_templates_v4() -> None:
+def test_templates_v5() -> None:
     data = yaml.safe_load(draw.TEMPLATES_PATH.read_text(encoding="utf-8"))
-    assert data["version"] == 4
+    assert data["version"] == 5
     assert data["support_text"]["crouch"] == CROUCH
     assert data["support_text"]["sit"] == SIT
     assert "CHANGE: {support}{description} Mouth closed." in data["inbetween"]
