@@ -15,6 +15,12 @@ dependencies = [
     "scipy>=1.13",
 ]
 
+[project.optional-dependencies]
+mms = [
+    "torch>=2.0",
+    "transformers>=4.30",
+]
+
 [project.scripts]
 karagoz = "karagoz.cli:main"
 
@@ -48,3 +54,7 @@ select = ["E", "F", "I", "B", "UP", "SIM"]
 python_version = "3.12"
 strict = true
 files = ["src"]
+
+[[tool.mypy.overrides]]
+module = ["torch", "torch.*", "transformers", "transformers.*"]
+ignore_missing_imports = true

@@ -83,6 +83,7 @@ A scene is a stack of layers, each with one behaviour managed by the engine: **h
 | Path | What |
 |---|---|
 | `src/karagoz/voice/elevenlabs.py` | ElevenLabs TTS: MP3 audio plus per-letter timings for every voice line |
+| `src/karagoz/voice/mms.py` | Meta MMS-TTS (VITS, local): MP3 audio plus per-letter timings from the duration predictor |
 
 ### top level — entry points and plumbing
 

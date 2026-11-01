@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import math
 import subprocess
 import urllib.error
@@ -20,11 +21,15 @@ from pydantic import ValidationError
 from karagoz import config
 from karagoz.engine.render import _ffprobe_bin
 from karagoz.spec import Align, Lines, load
+from karagoz.voice.mms import DEFAULT_MODEL as MMS_DEFAULT_MODEL
+from karagoz.voice.mms import MmsTts
 
 BASE_URL = "https://api.elevenlabs.io"
 TIMEOUT_SECONDS = 300.0
 OUTPUT_FORMAT = "mp3_44100_128"
 SFX_MODEL = "eleven_text_to_sound_v2"
+
+logger = logging.getLogger(__name__)
 
 Transport = Callable[[str, dict[str, Any], dict[str, str]], tuple[int, dict[str, Any]]]
 BytesTransport = Callable[[str, dict[str, Any], dict[str, str]], tuple[int, bytes]]
@@ -32,13 +37,15 @@ BytesTransport = Callable[[str, dict[str, Any], dict[str, str]], tuple[int, byte
 
 @dataclass(frozen=True)
 class VoiceConfig:
-    voice_id: str
+    voice_id: str = ""
     model: str = "eleven_v4"
     language: str = "tr"
     stability: float | None = None
     similarity: float | None = None
     speed: float | None = None
     seed: int | None = None
+    provider: Literal["elevenlabs", "mms"] = "elevenlabs"
+    pitch: float | None = None
 
 
 @dataclass(frozen=True)
@@ -84,7 +91,7 @@ def urllib_bytes_transport(url: str, body: dict[str, Any], headers: dict[str, st
         return err.code, err.read()
 
 
-_VOICE_FIELDS = ("voice_id", "model", "language", "stability", "similarity", "speed", "seed")
+_VOICE_FIELDS = ("voice_id", "model", "language", "stability", "similarity", "speed", "seed", "provider", "pitch")
 
 
 def load_voices(path: Path) -> dict[str, VoiceConfig]:
@@ -119,10 +126,16 @@ def _parse_voice(path: Path, speaker: str, entry: Any) -> VoiceConfig:
     unknown = sorted(set(entry) - set(_VOICE_FIELDS))
     if unknown:
         raise ValueError(f"{where}: unknown field(s): {', '.join(unknown)}")
-    voice_id = entry.get("voice_id")
-    if not isinstance(voice_id, str) or not voice_id:
-        raise ValueError(f"{where}: 'voice_id' must be a non-empty string")
-    model = entry.get("model", "eleven_v4")
+    provider = entry.get("provider", "elevenlabs")
+    if provider not in ("elevenlabs", "mms"):
+        raise ValueError(f"{where}: 'provider' must be 'elevenlabs' or 'mms', got {provider!r}")
+    voice_id = entry.get("voice_id", "" if provider == "mms" else None)
+    if provider == "elevenlabs":
+        if not isinstance(voice_id, str) or not voice_id:
+            raise ValueError(f"{where}: 'voice_id' must be a non-empty string")
+    elif not isinstance(voice_id, str):
+        raise ValueError(f"{where}: 'voice_id' must be a string, got {voice_id!r}")
+    model = entry.get("model", MMS_DEFAULT_MODEL if provider == "mms" else "eleven_v4")
     if not isinstance(model, str) or not model:
         raise ValueError(f"{where}: 'model' must be a non-empty string")
     language = entry.get("language", "tr")
@@ -136,6 +149,8 @@ def _parse_voice(path: Path, speaker: str, entry: Any) -> VoiceConfig:
         similarity=_optional_float(entry, where, "similarity"),
         speed=_optional_float(entry, where, "speed"),
         seed=_optional_int(entry, where, "seed"),
+        provider=provider,
+        pitch=_optional_float(entry, where, "pitch"),
     )
 
 
@@ -181,6 +196,7 @@ class ElevenLabs:
     bytes_transport: BytesTransport = urllib_bytes_transport
     api_key: Callable[[], str] = lambda: config.secret("ELEVENLABS_API_KEY")
     base_url: str = BASE_URL
+    provider = "elevenlabs"  # not a field: names this client for per-provider dispatch
 
     def speak(self, text: str, voice: VoiceConfig) -> tuple[bytes, Align]:
         """Synthesize one line; returns (mp3 bytes, per-letter alignment with line unset)."""
@@ -288,16 +304,36 @@ def clamp_align(align: Align, duration_s: float) -> Align:
     )
 
 
+def _normalize_clients(
+    client: ElevenLabs | MmsTts | dict[str, ElevenLabs | MmsTts] | None,
+) -> dict[str, ElevenLabs | MmsTts]:
+    """A per-provider client map: a dict as given, one client under its own provider, else empty (lazy)."""
+    if client is None:
+        return {}
+    if isinstance(client, dict):
+        return dict(client)
+    return {getattr(client, "provider", "elevenlabs"): client}
+
+
+def _client_for(clients: dict[str, ElevenLabs | MmsTts], provider: str) -> ElevenLabs | MmsTts:
+    """The client for a voice provider, built lazily the first time it is needed."""
+    if provider not in ("elevenlabs", "mms"):
+        raise ValueError(f"unknown voice provider {provider!r} (expected 'elevenlabs' or 'mms')")
+    if provider not in clients:
+        clients[provider] = ElevenLabs() if provider == "elevenlabs" else MmsTts()
+    return clients[provider]
+
+
 def synthesize_episode(
     prod: Path,
     episode: str,
-    client: ElevenLabs | None = None,
+    client: ElevenLabs | MmsTts | dict[str, ElevenLabs | MmsTts] | None = None,
     duration: Callable[[Path], float | None] = audio_duration,
 ) -> list[LineAudio]:
     """Synthesize every line of the episode; cached lines (mp3 + align + matching key) are skipped.
 
-    Alignments are clamped to the audio's own duration, both for new lines and for
-    cached lines whose align file on disk still runs past the audio.
+    Each line goes to its voice's provider (ElevenLabs or MMS). Alignments are clamped to the audio's own
+    duration, both for new lines and for cached lines whose align file on disk still runs past the audio.
     """
     voices = load_voices(prod / "voices.yaml")
     lines = load(prod / episode / "lines.yaml")
@@ -306,7 +342,7 @@ def synthesize_episode(
     for entry in lines.lines:
         if entry.speaker not in voices:
             raise ValueError(f"{episode}: no voice configured for speaker {entry.speaker!r} (line {entry.id})")
-    active = ElevenLabs() if client is None else client
+    clients = _normalize_clients(client)
     audio_dir = prod / episode / "audio"
     audio_dir.mkdir(parents=True, exist_ok=True)
     out: list[LineAudio] = []
@@ -331,7 +367,7 @@ def synthesize_episode(
                         align_path.write_text(clamped.model_dump_json(), encoding="utf-8")
             out.append(LineAudio(line=entry.id, mp3=mp3_path, align=align_path, cached=True))
             continue
-        audio, align = active.speak(entry.text, voice)
+        audio, align = _client_for(clients, voice.provider).speak(entry.text, voice)
         mp3_path.write_bytes(audio)
         d = duration(mp3_path)
         if d is not None:
@@ -342,11 +378,14 @@ def synthesize_episode(
     return out
 
 
-def synthesize_sounds(prod: Path, episode: str, client: ElevenLabs | None = None) -> list[SoundAudio]:
+def synthesize_sounds(
+    prod: Path, episode: str, client: ElevenLabs | MmsTts | dict[str, ElevenLabs | MmsTts] | None = None
+) -> list[SoundAudio]:
     """Generate every effect (kind sfx) of the episode; cached and provided files are skipped.
 
     Music is never generated. A file the production put there itself (mp3/wav without a key
-    file) is reported as provided and never touched.
+    file) is reported as provided and never touched. In a production whose voices are all MMS,
+    ElevenLabs is never called: only provided files are used, with one warning per missing effect.
     """
     lines = load(prod / episode / "lines.yaml")
     if not isinstance(lines, Lines):
@@ -356,7 +395,12 @@ def synthesize_sounds(prod: Path, episode: str, client: ElevenLabs | None = None
         return []
     audio_dir = prod / episode / "audio"
     audio_dir.mkdir(parents=True, exist_ok=True)
-    active = client
+    try:
+        voices = load_voices(prod / "voices.yaml")
+    except ValueError:
+        voices = {}
+    mms_only = bool(voices) and all(voice.provider == "mms" for voice in voices.values())
+    clients = _normalize_clients(client)
     out: list[SoundAudio] = []
     for entry in effects:
         key = sound_cache_key(entry.description)
@@ -370,9 +414,17 @@ def synthesize_sounds(prod: Path, episode: str, client: ElevenLabs | None = None
             provided = mp3_path if mp3_path.is_file() else wav_path
             out.append(SoundAudio(sound=entry.id, path=provided, status="provided"))
             continue
-        if active is None:
-            active = ElevenLabs()
-        audio = active.sound(entry.description)
+        if mms_only:
+            logger.warning("mms production: sound %s has no audio file in audio/; effects are not generated", entry.id)
+            continue
+        eleven = clients.get("elevenlabs")
+        if eleven is None:
+            eleven = ElevenLabs()
+            clients["elevenlabs"] = eleven
+        sound = getattr(eleven, "sound", None)
+        if sound is None:
+            raise ValueError(f"the 'elevenlabs' client cannot generate sounds: {type(eleven).__name__}")
+        audio = sound(entry.description)
         mp3_path.write_bytes(audio)
         key_path.write_text(key, encoding="utf-8")
         out.append(SoundAudio(sound=entry.id, path=mp3_path, status="new"))
