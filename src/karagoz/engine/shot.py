@@ -569,7 +569,7 @@ def render_shot(prod: Path, episode: str, shot: str) -> ShotRender:
             mouths[character] = mouth_track(shot, character, lines, shots, xs, timing, style)
         except ValueError:
             mouths[character] = _rest_mouth(shot, character, exp.length)
-    order = [c.name for c in (shot_entry.characters or []) if f"{c.name}.body" in xs.tracks]
+    order = [c.name for c in (shot_entry.characters or []) if f"{c.name}.body" in xs.tracks and not c.offscreen]
     views = {c.name: c.view for c in (shot_entry.characters or [])}
     mirror_chars: list[str] = []
     warnings: list[str] = []
@@ -714,7 +714,11 @@ def render_shot(prod: Path, episode: str, shot: str) -> ShotRender:
     speech: list[tuple[int, int]] = []
     for lid in shot_line_ids:
         line_span = timing.line(lid)
-        clips.append(Clip(episode_dir / "audio" / f"{lid}.mp3", line_span.start - shot_span.start))
+        voice_path = sound_file(audio_dir, lid)
+        if voice_path is None:
+            warnings.append(f"line {lid}: no audio file in audio/")
+            continue
+        clips.append(Clip(voice_path, line_span.start - shot_span.start))
         speech.append((line_span.start - shot_span.start, line_span.end - shot_span.start))
     sounds_by_id = {sound.id: sound for sound in (lines.sounds or [])}
     for sid in shot_entry.sounds or []:

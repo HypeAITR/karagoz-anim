@@ -426,17 +426,49 @@ def _best_shift(
     return (out_dx, out_dy, err)
 
 
+def _parse_sequence(drawing: str) -> tuple[str, int] | None:
+    if "." not in drawing or "-" in drawing:
+        return None
+    sid, k_str = drawing.rsplit(".", 1)
+    if not sid or not sid.startswith("s"):
+        return None
+    digits = sid[1:]
+    if not digits.isdigit() or not 1 <= len(digits) <= 2:
+        return None
+    try:
+        k = int(k_str)
+    except ValueError:
+        return None
+    if k < 1:
+        return None
+    return (sid, k)
+
+
+def _sequence_candidate_keys(assets: ShotAssets, character: str, kind: str) -> list[str]:
+    """Key poses that have ``kind`` patch, in numeric order (sequence drawings borrow from a key)."""
+    out: list[str] = []
+    for i in range(1, 100):
+        key = f"p{i}"
+        if assets.patch(character, key, kind) is not None:
+            out.append(key)
+    return out
+
+
 def _borrowed_patch(exp: Exposure, assets: ShotAssets, character: str, drawing_used: str, kind: str) -> Patch | None:
-    """Nearest key's patch moved onto an inbetween's face, or None when no key qualifies."""
+    """Nearest key's patch moved onto an inbetween/sequence face, or None when no key qualifies."""
     parsed = _parse_inbetween(drawing_used)
-    if parsed is None:
+    seq = _parse_sequence(drawing_used) if parsed is None else None
+    if parsed is None and seq is None:
         return None
     cache_key = (character, drawing_used, kind)
     if cache_key in assets._borrowed_cache:
         return assets._borrowed_cache[cache_key]
-    a, b, k = parsed
-    n = _inbetween_count(exp, character, a, b)
-    candidates = (a, b) if k <= n / 2 else (b, a)
+    if parsed is not None:
+        a, b, k = parsed
+        n = _inbetween_count(exp, character, a, b)
+        candidates: tuple[str, ...] | list[str] = (a, b) if k <= n / 2 else (b, a)
+    else:
+        candidates = _sequence_candidate_keys(assets, character, kind)
     dst_face = _face_box(assets, character, drawing_used)
     dst_img = assets.drawing(character, drawing_used)
     result: Patch | None = None

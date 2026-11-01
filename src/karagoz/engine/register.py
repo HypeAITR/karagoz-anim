@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 from PIL import Image
 
-from karagoz.engine.placement import INBETWEEN_RE, KEY_RE, CharacterInput, DrawingPlacement
+from karagoz.engine.placement import INBETWEEN_RE, KEY_RE, SEQUENCE_RE, CharacterInput, DrawingPlacement
 from karagoz.spec import Regions
 
 _FRAME_W = 1920
@@ -248,9 +248,17 @@ def refine(
                 tasks.append((key, run[0], seated, False))
         for drawing in char_in:
             m = INBETWEEN_RE.match(drawing)
-            if m is None:
-                continue
-            a, b = m.group(1), m.group(2)
+            if m is not None:
+                a, b = m.group(1), m.group(2)
+            else:
+                s = SEQUENCE_RE.match(drawing)
+                if s is None:
+                    continue
+                seq = character.sequences.get(s.group(1))
+                if seq is None:
+                    continue
+                a = seq[0]
+                b = seq[1] if seq[1] is not None else seq[0]
             ra = run_of.get(a)
             rb = run_of.get(b)
             if ra is not None and rb is not None and ra == rb:

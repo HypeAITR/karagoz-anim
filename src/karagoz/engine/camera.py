@@ -48,7 +48,9 @@ def target_bbox(target: str | None, bboxes: dict[str, BBox]) -> BBox | None:
         y1 = max(b[3] for b in bboxes.values())
         return (x0, y0, x1, y1)
     if "." in target:
-        char = target.split(".", 1)[0]
+        char, _, part = target.partition(".")
+        if part != "face":
+            raise KeyError(target)
         if char not in bboxes:
             raise KeyError(target)
         x0, y0, x1, y1 = bboxes[char]
@@ -135,12 +137,13 @@ def _resolve_at_frame(
             max(b[3] for b in bodies),
         )
     if "." in target:
-        char = target.split(".", 1)[0]
-        if target == f"{char}.face" and target in ft:
-            return ft[target]
-        if char in ft:
-            x0, y0, x1, y1 = ft[char]
-            return (x0, y0, x1, y0 + round(FACE_PART * (y1 - y0)))
+        char, _, part = target.partition(".")
+        if part == "face":
+            if target in ft:
+                return ft[target]
+            if char in ft:
+                x0, y0, x1, y1 = ft[char]
+                return (x0, y0, x1, y0 + round(FACE_PART * (y1 - y0)))
     elif target in ft:
         return ft[target]
     try:

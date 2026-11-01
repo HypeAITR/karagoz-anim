@@ -197,6 +197,11 @@ def expand(xs: Xsheet, poses: Poses | None, timing: EpisodeTiming, style: Style)
                         c = _CADENCE_FRAMES[item.cadence or "twos"]
                         if item.step is not None:
                             beat = item.step.removeprefix("beat.")
+                            if beat not in style.live.beats:
+                                raise TimingError(
+                                    "anchor.unknown_beat",
+                                    f"unknown beat '{beat}' in loop step '{item.step}'",
+                                )
                             step = _styled_int(style.live.beats, beat, LOOP_STEP_DEFAULT)
                         else:
                             step = LOOP_STEP_DEFAULT
@@ -220,7 +225,7 @@ def expand(xs: Xsheet, poses: Poses | None, timing: EpisodeTiming, style: Style)
                                         if second in known_poses
                                         else None
                                     )
-                                    if ib is not None and ib * c < step:
+                                    if ib is not None and ib * c <= step:
                                         cycle.extend([first] * (step - ib * c))
                                         for k in range(1, ib + 1):
                                             cycle.extend([f"{first}-{second}.{k}"] * c)
@@ -238,6 +243,7 @@ def expand(xs: Xsheet, poses: Poses | None, timing: EpisodeTiming, style: Style)
                             current = last
                 elif isinstance(item, EyeEvent):
                     timing.frame(item.at, xs.shot)
+                    unsupported.append((track_name, i))
                 else:
                     continue
         elif kind == "eyes":
@@ -276,6 +282,7 @@ def expand(xs: Xsheet, poses: Poses | None, timing: EpisodeTiming, style: Style)
                     unsupported.append((track_name, i))
                 else:
                     timing.frame(item.at, xs.shot)
+                    unsupported.append((track_name, i))
         else:
             continue
     return Exposure(
