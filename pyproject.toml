@@ -40,7 +40,10 @@ packages = ["src/karagoz"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-markers = ["live: calls a paid external API (skipped unless KARAGOZ_LIVE=1)"]
+markers = [
+    "live: calls a paid external API (skipped unless KARAGOZ_LIVE=1)",
+    "rig_golden: compares with the rig experiment golden fixture (skipped unless KARAGOZ_RIG_FIXTURE is set)",
+]
 
 [tool.ruff]
 line-length = 120

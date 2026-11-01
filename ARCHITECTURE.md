@@ -31,6 +31,23 @@ A scene is a stack of layers, each with one behaviour managed by the engine: **h
 
 | Path | What |
 |---|---|
+| `src/karagoz/engine/rig/__init__.py` | rig motor package: inbetween frames from the key drawings (X->Y method) |
+| `src/karagoz/engine/rig/masks.py` | SAM part masks of a drawing and their reconciliation (hierarchy, sides, holes, thin parts) |
+| `src/karagoz/engine/rig/measure.py` | shape measures used by the rig (component sizes, distances) |
+| `src/karagoz/engine/rig/interval.py` | one interval's context: key names, paths, line-width scale |
+| `src/karagoz/engine/rig/joints.py` | joints of both key drawings from the part masks |
+| `src/karagoz/engine/rig/pivot.py` | shoulder pivot (deltoid dome) of the moving arm |
+| `src/karagoz/engine/rig/plan.py` | per-frame plan between two keys: bone directions, lengths, key insertion |
+| `src/karagoz/engine/rig/deform.py` | mesh and MLS deformers |
+| `src/karagoz/engine/rig/changed.py` | changed region between two keys by block matching |
+| `src/karagoz/engine/rig/match.py` | matched contour points between two keys |
+| `src/karagoz/engine/rig/bend.py` | body bending between two keys and the single cut |
+| `src/karagoz/engine/rig/jump.py` | jump measure between consecutive frames |
+| `src/karagoz/engine/rig/canonical.py` | canonical sources: same pixels outside the arm root in every source, gap fill |
+| `src/karagoz/engine/rig/head.py` | head as a rigid layer |
+| `src/karagoz/engine/rig/layers.py` | per-frame layer compositing with z-order |
+| `src/karagoz/engine/rig/frames.py` | the inbetween frames of one interval |
+| `src/karagoz/engine/rig/fill.py` | one image-model edit for the gap under the moving limb, through an injected client |
 | `src/karagoz/engine/camera.py` | camera track: framing names into a crop box per frame |
 | `src/karagoz/engine/compose.py` | compositor: cut out drawings, place characters, composite frames |
 | `src/karagoz/engine/framing.py` | per-frame camera target boxes from the drawing on screen at each frame |
