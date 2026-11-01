@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import threading
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -45,6 +46,8 @@ class Budget:
 
     def charge(self, unit: str, usd: float) -> Verdict:
         """Record the spend always, then return the verdict for the state after it."""
+        if not math.isfinite(usd):
+            raise ValueError(f"usd must be finite, got {usd}")
         if usd < 0:
             raise ValueError(f"usd must be >= 0, got {usd}")
         with self._lock:
