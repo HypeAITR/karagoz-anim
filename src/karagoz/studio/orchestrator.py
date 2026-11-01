@@ -351,13 +351,22 @@ def plan_tasks(prod: Path, episode: str) -> list[Task]:
         )
     )
     base_in = [script, f"{episode}/lines.yaml", f"{episode}/shots.yaml"]
-    for n in sorted({shot.scene for shot in shots.shots}):
+    scenes = sorted({shot.scene for shot in shots.shots})
+    previous_scene = {n: scenes[i - 1] if i else None for i, n in enumerate(scenes)}
+    for n in scenes:
+        prev = previous_scene[n]
         tasks.append(
             Task(
                 id=f"scene{n}/continuity",
-                inputs=["ep/director"],
-                files_in=list(base_in),
-                files_out=[f"{episode}/continuity.yaml"],
+                inputs=["ep/director"] if prev is None else ["ep/director", f"scene{prev}/continuity"],
+                files_in=list(base_in) if prev is None else [*base_in, f"{episode}/continuity/scene{prev}.yaml"],
+                files_out=[f"{episode}/continuity/scene{n}.yaml"],
+                notes=[]
+                if prev is None
+                else [
+                    f"Start from where scene {prev} ended (see {episode}/continuity/scene{prev}.yaml"
+                    " for who holds which prop and who sits where)."
+                ],
             )
         )
     prev_timer_by_scene: dict[int, str] = {}
@@ -370,18 +379,25 @@ def plan_tasks(prod: Path, episode: str) -> list[Task]:
         if shot.location in location_names:
             loc_inputs = [f"{shot.location}/location"]
             loc_files = [f"locations/{shot.location}/background.png", f"locations/{shot.location}/regions.yaml"]
+        own_continuity = f"{episode}/continuity/scene{shot.scene}.yaml"
+        prev_continuity = previous_scene[shot.scene]
+        layout_continuity = (
+            [own_continuity]
+            if prev_continuity is None
+            else [own_continuity, f"{episode}/continuity/scene{prev_continuity}.yaml"]
+        )
         tasks.append(
             Task(
                 id=f"{shot.id}/layout",
                 inputs=[f"scene{shot.scene}/continuity", *loc_inputs],
                 # the region map's place and object names for `on` / `rests_on` (its numbers are hidden by the view)
-                files_in=[*base_in, f"{episode}/continuity.yaml", *loc_files[1:]],
+                files_in=[*base_in, *layout_continuity, *loc_files[1:]],
                 files_out=[poses],
             )
         )
         prev_timer = prev_timer_by_scene.get(shot.scene)
         timer_inputs = [f"{shot.id}/layout", "ep/voice"]
-        timer_files_in = [*base_in, f"{episode}/continuity.yaml", poses, *shot_aligns]
+        timer_files_in = [*base_in, own_continuity, poses, *shot_aligns]
         if prev_timer is not None:
             timer_inputs.append(f"{prev_timer}/timer")
             timer_files_in.append(f"{episode}/shots/{prev_timer}/xsheet.yaml")
@@ -423,7 +439,7 @@ def plan_tasks(prod: Path, episode: str) -> list[Task]:
                 Task(
                     id=f"{shot.id}/gate",
                     inputs=[f"{shot.id}/render"],
-                    files_in=[poses, xsheet, manifest, f"{episode}/continuity.yaml", redraw_json],
+                    files_in=[poses, xsheet, manifest, own_continuity, redraw_json],
                     files_out=[f"{episode}/review/{shot.id}/gate.json"],
                 )
             )

@@ -1,18 +1,18 @@
 ---
 name: continuity
-description: Continuity department. Writes continuity.yaml for a scene - each character's state at the start and end of every shot, and the state of props that change (a cup being emptied, an object handed over). Use when a task brief says "department: continuity".
+description: Continuity department. Writes continuity/scene<N>.yaml for a scene - each character's state at the start and end of every shot, and the state of props that change (a cup being emptied, an object handed over). Use when a task brief says "department: continuity".
 ---
 
 # Continuity
 
 You are the single owner of "what the viewer must see consistently" in one scene. Layout and Timer follow your
-file; they never decide continuity themselves. You write `continuity.yaml` and nothing else.
+file; they never decide continuity themselves. You write `continuity/scene<N>.yaml` for your scene and nothing else.
 
 ## Inputs
 
 `shots.yaml`, `lines.yaml`, the script, and the character/location lists (paths in your brief).
 
-## continuity.yaml
+## continuity/scene<N>.yaml
 
 ```yaml
 version: 1

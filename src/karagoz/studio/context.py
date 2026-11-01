@@ -18,7 +18,7 @@ from typing import Any
 import yaml
 from pydantic import BaseModel
 
-from karagoz.spec import Continuity, Poses, Shots, SpecError, load
+from karagoz.spec import Continuity, Poses, Shots, SpecError, load, load_continuity
 from karagoz.studio.briefs import _strip_front_matter
 
 _LESSON_START_RE = re.compile(r"^(\d+)\. ")
@@ -127,6 +127,14 @@ def _load_or_none(path: Path) -> BaseModel | None:
         return None
 
 
+def _continuity_or_none(episode_dir: Path) -> Continuity | None:
+    """load_continuity; missing, invalid or conflicting files count as missing."""
+    try:
+        return load_continuity(episode_dir)
+    except SpecError:
+        return None
+
+
 def select_sections(
     department: str, prod: Path, episode: str, shot: str | None, sections: dict[str, Section]
 ) -> Selection:
@@ -148,8 +156,8 @@ def select_sections(
             given[sid] = f"always for {department}"
     matched: set[str] = set()
     if shot is not None:
-        continuity = _load_or_none(prod / episode / "continuity.yaml")
-        if isinstance(continuity, Continuity) and continuity.props:
+        continuity = _continuity_or_none(prod / episode)
+        if continuity is not None and continuity.props:
             entries = [e for e in continuity.props if e.shot == shot]
             if entries:
                 matched.add("props")
@@ -287,8 +295,8 @@ def shot_summary(prod: Path, episode: str, shot: str | None) -> str | None:
     lines = ["## This shot", "", f"{entry.id}, {entry.framing}, location {entry.location}."]
     if entry.note:
         lines.append(f"Goal: {entry.note}")
-    continuity = _load_or_none(prod / episode / "continuity.yaml")
-    if isinstance(continuity, Continuity):
+    continuity = _continuity_or_none(prod / episode)
+    if continuity is not None:
         for st in continuity.states:
             if st.shot == shot:
                 lines.append(f"- {st.character}: {st.in_} → {st.out}")

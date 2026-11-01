@@ -14,7 +14,7 @@ import yaml
 
 from karagoz.engine.timing import resolve_episode
 from karagoz.engine.xsheet import expand
-from karagoz.spec import Align, Lines, Poses, Regions, Shots, SpecError, Style, Xsheet, load
+from karagoz.spec import Align, Lines, Poses, Regions, Shots, SpecError, Style, Xsheet, load, load_continuity
 
 KINDS = ("prop_count", "reverse", "jump", "scale_jump", "placement", "world")
 
@@ -647,22 +647,15 @@ def exposure(prod: Path, episode: str, shot: str) -> dict[str, list[str | None]]
     return expand(xs, poses, timing, style).body
 
 
-def _expected_props(path: Path, shot: str) -> int:
-    if not path.is_file():
+def _expected_props(episode_dir: Path, shot: str) -> int:
+    """Distinct props the merged continuity view lists for ``shot`` (0 when unreadable)."""
+    try:
+        continuity = load_continuity(episode_dir)
+    except SpecError:
         return 0
-    data = yaml.safe_load(path.read_text(encoding="utf-8"))
-    if not isinstance(data, dict):
+    if continuity is None or continuity.props is None:
         return 0
-    entries = data.get("props")
-    if not isinstance(entries, list):
-        return 0
-    names: set[str] = set()
-    for entry in entries:
-        if isinstance(entry, dict) and entry.get("shot") == shot:
-            prop = entry.get("prop")
-            if isinstance(prop, str) and prop:
-                names.add(prop)
-    return len(names)
+    return len({entry.prop for entry in continuity.props if entry.shot == shot})
 
 
 def _flag_json(flag: Flag) -> dict[str, Any]:
@@ -744,7 +737,7 @@ def gate_shot(prod: Path, episode: str, shot: str, *, limit: int = 5) -> dict[st
             raise ValueError(f"{poses_path}: expected a poses file")
         poses = poses_obj
 
-    expected = _expected_props(prod / episode / "continuity.yaml", shot)
+    expected = _expected_props(prod / episode, shot)
     cells = exposure(prod, episode, shot)
     flags = gate_flags(cells, placement_data, landmarks_data, poses, expected)
     flags = [*flags, *world_flags(_shot_regions(prod, episode, shot), _shot_heights(prod, cells))]

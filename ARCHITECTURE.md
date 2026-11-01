@@ -23,6 +23,7 @@ A scene is a stack of layers, each with one behaviour managed by the engine: **h
 |---|---|
 | `src/karagoz/spec/anchor.py` | anchor language: a named point plus optional offsets |
 | `src/karagoz/spec/check.py` | cross-file checks for one episode |
+| `src/karagoz/spec/continuity.py` | per-scene continuity files merged into one view |
 | `src/karagoz/spec/findings.py` | stable, agent-readable validation findings |
 | `src/karagoz/spec/io.py` | file-kind routing and loading with agent-readable findings |
 | `src/karagoz/spec/models.py` | typed models for every spec file kind |

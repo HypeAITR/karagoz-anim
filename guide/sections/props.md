@@ -9,7 +9,7 @@ tags: [props]
 
 # Props
 
-- One holder (a character's hand) or one place at every moment (`continuity.yaml`).
+- One holder (a character's hand) or one place at every moment (`continuity/scene<N>.yaml`).
 - States move one way (a glass empties when someone drinks; it only fills if the script says so).
 - **Write the prop's full description every time** — "tulip-shaped Turkish tea glass", not "glass". The model lost
   the shape when the name was shortened.

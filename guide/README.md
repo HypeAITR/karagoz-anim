@@ -46,7 +46,7 @@ from sitting", not "stand-up mechanics"). It is the line the agent sees in the i
 
 1. `always_for` the task's department.
 2. Tags matched by rules in code from the task's own data (for example: a prop changes holder in
-   `continuity.yaml` → `handover`; a character's poses go from `sit` to `stand` → `stand-up`). If the rules
+   `continuity/scene<N>.yaml` → `handover`; a character's poses go from `sit` to `stand` → `stand-up`). If the rules
    cannot classify a task, every section of the department is given (more context, never less).
 3. The orchestrator may add or remove sections, with a reason.
 4. Every task's log records which sections were given and which the agent opened itself, so missing rules show up.
