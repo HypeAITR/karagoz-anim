@@ -254,9 +254,8 @@ def test_mirrored_character_gets_swapped_directions(prod: Path) -> None:
     new = "{ name: ali, place: koltuk, facing: ayse, view: three_quarter_left }"
     shots.write_text(shots.read_text(encoding="utf-8").replace(old, new), encoding="utf-8")
     poses = prod / EP / "shots" / "sh01" / "poses.yaml"
-    poses.write_text(
-        poses.read_text(encoding="utf-8").replace("sağ kol Ayşe'ye", "right arm to the left, Ayşe'ye"), "utf-8"
-    )
+    text = poses.read_text(encoding="utf-8").replace("view: three_quarter_right", "view: three_quarter_left")
+    poses.write_text(text.replace("sağ kol Ayşe'ye", "right arm to the left, Ayşe'ye"), "utf-8")
     p2 = next(j for j in plan_draw(prod, EP, "sh01") if j.kind == "pose" and j.drawing == "p2")
     assert "left arm to the right" in p2.prompt and "faces the right side" in p2.prompt
 

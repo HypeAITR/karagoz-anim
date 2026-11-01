@@ -119,6 +119,7 @@ def test_mirror_ok_true_keeps_natural_facing_and_swap(prod: Path) -> None:  # no
     poses = prod / EP / "shots" / "sh01" / "poses.yaml"
     text = poses.read_text(encoding="utf-8")
     assert "sağ kol Ayşe'ye" in text
+    text = text.replace("view: three_quarter_right", "view: three_quarter_left")
     poses.write_text(text.replace("sağ kol Ayşe'ye", "right arm to the left, Ayşe'ye"), encoding="utf-8")
     prompt = drawing_prompts(prod)["p2"]
     assert "faces the right side" in prompt

@@ -685,10 +685,27 @@ def _read_json_object(path: Path) -> dict[str, Any]:
     return loaded if isinstance(loaded, dict) else {}
 
 
+def _read_ack(path: Path) -> tuple[dict[str, Any], str | None]:
+    """The acknowledged flags, or ({}, warning) when the ack file is missing or corrupt."""
+    if not path.is_file():
+        return {}, None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError as exc:
+        return {}, f"gate-ack.json cannot be read ({exc}); treated as no acknowledgements"
+    try:
+        loaded = json.loads(text)
+    except json.JSONDecodeError as exc:
+        return {}, f"gate-ack.json is corrupt (invalid JSON: {exc.msg}); treated as no acknowledgements"
+    if not isinstance(loaded, dict):
+        return {}, "gate-ack.json is corrupt (expected an object); treated as no acknowledgements"
+    return loaded, None
+
+
 def acknowledge(prod: Path, episode: str, shot: str, flag: Flag, note: str) -> None:
     """Record that the orchestrator looked at a flag and keeps the drawing."""
     path = prod / episode / "review" / shot / "gate-ack.json"
-    ack = _read_json_object(path)
+    ack, _ = _read_ack(path)
     ack[flag.id] = {"shas": list(flag.shas), "note": note}
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(ack, indent=1) + "\n", encoding="utf-8")
@@ -732,7 +749,7 @@ def gate_shot(prod: Path, episode: str, shot: str, *, limit: int = 5) -> dict[st
     flags = gate_flags(cells, placement_data, landmarks_data, poses, expected)
     flags = [*flags, *world_flags(_shot_regions(prod, episode, shot), _shot_heights(prod, cells))]
 
-    ack = _read_json_object(prod / episode / "review" / shot / "gate-ack.json")
+    ack, ack_warning = _read_ack(prod / episode / "review" / shot / "gate-ack.json")
     marked: list[Flag] = []
     for flag in flags:
         entry = ack.get(flag.id)
@@ -748,6 +765,7 @@ def gate_shot(prod: Path, episode: str, shot: str, *, limit: int = 5) -> dict[st
         "flags": [_flag_json(flag) for flag in shown],
         "silenced": [_flag_json(flag) for flag in silenced],
         "dropped": dropped,
+        "warnings": [ack_warning] if ack_warning is not None else [],
     }
     gate_path = prod / episode / "review" / shot / "gate.json"
     gate_path.parent.mkdir(parents=True, exist_ok=True)

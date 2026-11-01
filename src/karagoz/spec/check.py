@@ -664,6 +664,52 @@ def check_episode(episode_dir: Path, style_path: Path | None = None) -> list[Fin
                             )
                         )
 
+    # Poses.yaml internal references: duplicate ids, transitions and sequences naming undefined poses.
+    for _pfolder, prel, pm in poses_loaded:
+        for pchar, pcposes in pm.characters.items():
+            seen_ids: set[str] = set()
+            for k, pose in enumerate(pcposes.poses):
+                if pose.id in seen_ids:
+                    findings.append(
+                        Finding(
+                            "error",
+                            "pose.duplicate",
+                            prel,
+                            f"characters.{pchar}.poses[{k}]",
+                            f"Duplicate pose id '{pose.id}' for '{pchar}' in shot '{pm.shot}'.",
+                        )
+                    )
+                else:
+                    seen_ids.add(pose.id)
+            for i, ptrans in enumerate(pcposes.transitions or []):
+                for side, ref in (("from", ptrans.from_), ("to", ptrans.to)):
+                    if ref not in seen_ids:
+                        findings.append(
+                            Finding(
+                                "error",
+                                "pose.undefined",
+                                prel,
+                                f"characters.{pchar}.transitions[{i}].{side}",
+                                f"Transition '{ptrans.from_}' -> '{ptrans.to}' of '{pchar}': "
+                                f"pose '{ref}' is not defined.",
+                            )
+                        )
+            for i, seq in enumerate(pcposes.sequences or []):
+                refs: list[tuple[str, str]] = [("from", seq.from_)]
+                if seq.to is not None:
+                    refs.append(("to", seq.to))
+                for side, ref in refs:
+                    if ref not in seen_ids:
+                        findings.append(
+                            Finding(
+                                "error",
+                                "pose.undefined",
+                                prel,
+                                f"characters.{pchar}.sequences[{i}].{side}",
+                                f"Sequence '{seq.id}' of '{pchar}': pose '{ref}' is not defined.",
+                            )
+                        )
+
     # Pose references, first hold, transitions.
     for _folder, xrel, xs in xsheet_loaded:
         poses = poses_by_shot.get(xs.shot)
@@ -744,6 +790,19 @@ def check_episode(episode_dir: Path, style_path: Path | None = None) -> list[Fin
                         _check_support_change(findings, poses, char, prev, item, xrel, base)
                     prev = item.to
                 elif isinstance(item, LoopEvent):
+                    if item.step is not None and style is not None:
+                        beat_name = item.step.split(".", 1)[1] if "." in item.step else item.step
+                        if beat_name not in beats:
+                            findings.append(
+                                Finding(
+                                    "error",
+                                    "loop.unknown_beat",
+                                    xrel,
+                                    f"{base}.step",
+                                    f"Unknown beat '{beat_name}' in loop step '{item.step}'.",
+                                    beats_hint,
+                                )
+                            )
                     for k, loop_item in enumerate(item.loop):
                         if loop_item.startswith("p"):
                             defined = False
