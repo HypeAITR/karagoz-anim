@@ -133,14 +133,30 @@ def _parse_voice(path: Path, speaker: str, entry: Any) -> VoiceConfig:
     if provider == "elevenlabs":
         if not isinstance(voice_id, str) or not voice_id:
             raise ValueError(f"{where}: 'voice_id' must be a non-empty string")
+        if entry.get("pitch") is not None:
+            raise ValueError(f"{where}: 'pitch' is only supported for provider 'mms'")
     elif not isinstance(voice_id, str):
         raise ValueError(f"{where}: 'voice_id' must be a string, got {voice_id!r}")
+    if provider == "mms":
+        for field in ("stability", "similarity"):
+            if entry.get(field) is not None:
+                raise ValueError(f"{where}: '{field}' is only supported for provider 'elevenlabs'")
     model = entry.get("model", MMS_DEFAULT_MODEL if provider == "mms" else "eleven_v4")
     if not isinstance(model, str) or not model:
         raise ValueError(f"{where}: 'model' must be a non-empty string")
     language = entry.get("language", "tr")
     if not isinstance(language, str) or not language:
         raise ValueError(f"{where}: 'language' must be a non-empty string")
+    pitch = _optional_float(entry, where, "pitch")
+    if pitch is not None:
+        if not math.isfinite(pitch):
+            raise ValueError(f"{where}: 'pitch' must be finite, got {pitch!r}")
+        try:
+            ratio = 2.0 ** (pitch / 12.0)
+        except OverflowError:
+            raise ValueError(f"{where}: 'pitch' {pitch!r} is out of range") from None
+        if not math.isfinite(ratio) or ratio <= 0:
+            raise ValueError(f"{where}: 'pitch' {pitch!r} is out of range")
     return VoiceConfig(
         voice_id=voice_id,
         model=model,
@@ -150,7 +166,7 @@ def _parse_voice(path: Path, speaker: str, entry: Any) -> VoiceConfig:
         speed=_optional_float(entry, where, "speed"),
         seed=_optional_int(entry, where, "seed"),
         provider=provider,
-        pitch=_optional_float(entry, where, "pitch"),
+        pitch=pitch,
     )
 
 
@@ -220,6 +236,8 @@ class ElevenLabs:
             raise RuntimeError(f"ElevenLabs HTTP {status}: {_without_key(_error_message(result), key)[:300]}")
         try:
             audio = base64.b64decode(result["audio_base64"])
+            if not audio:
+                raise RuntimeError("ElevenLabs: empty audio response")
             alignment = result["alignment"]
             align = Align(
                 version=1,

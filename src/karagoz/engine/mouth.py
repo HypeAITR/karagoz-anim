@@ -106,7 +106,7 @@ def _apply_min_hold(cues: list[_Cue], min_hold: int) -> list[_Cue]:
                         second = cues[i + 1].letters or ""
                         cues[i].letters = (first + second) or None
                         cues.pop(i + 1)
-                    i += 1
+                    # no advance: re-check the merged cue against min_hold
                 else:
                     cues[i].end = new_end
                     nxt.start = new_end
@@ -296,7 +296,7 @@ def mouth_track(
                     target = cue
                     break
             if target is None:
-                continue
+                raise ValueError(f"mouth edit at {edit.at!r} resolves outside shot {shot!r} (frame {rel})")
             target.shape = edit.shape
             target.src = "edit"
             filled = _merge_same_shape(filled)
