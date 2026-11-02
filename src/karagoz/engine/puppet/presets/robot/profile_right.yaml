@@ -1,0 +1,109 @@
+# Robot profile_right view (facing viewer's right, yaw ~90 deg).
+# Same part names as the other views. Seeds are [x, y] pixels in the
+# 2400x1792 reference _wp/kukla-ortak/views/profile_right.png, read from the
+# image (region interiors, verified not on lines/background, one region per
+# seed). Far arm (character left: viewer right) is hidden behind the torso in
+# this view: hidden: true, no seeds, no file.
+# The character faces right, so the near side is _r and the far side (_l arm)
+# is hidden; both legs/boots/feet are visible (far leg behind near leg).
+yaw_deg: 90
+line_max_luma: 25.0
+features:
+  eye_mid: {part: head, point: [1328, 395], front: true}
+  seam: {part: torso, point: [1382, 1021], front: true}
+parts:
+  - name: torso
+    parent: null
+    concepts: ["robot torso", "torso"]
+    seed: [[1149, 893], [1023, 1156], [1259, 1159], [1193, 1224], [1237, 649]]
+    z: 0
+  - name: neck
+    parent: torso
+    concepts: ["robot neck"]
+    seed: [[1173, 581], [1169, 599]]
+    z: 1
+  - name: head
+    parent: neck
+    concepts: ["robot head", "head"]
+    seed: [[1076, 397], [1278, 399]]
+    z: 6
+  - name: shoulder_cap_r
+    parent: torso
+    concepts: ["robot shoulder"]
+    seed: [[1119, 733]]
+    z: 5
+  - name: upper_arm_r
+    parent: shoulder_cap_r
+    concepts: ["robot arm"]
+    seed: [[1117, 808], [1118, 877], [1118, 949]]
+    z: 2
+  - name: elbow_r
+    parent: upper_arm_r
+    concepts: ["robot elbow"]
+    seed: [[1117, 1016]]
+    z: 3
+  - name: forearm_r
+    parent: elbow_r
+    concepts: ["robot arm"]
+    seed: [[1118, 1067], [1117, 1131], [1118, 1198]]
+    z: 2
+  - name: hand_r
+    parent: forearm_r
+    concepts: ["robot claw"]
+    seed: [[1109, 1266], [1074, 1335], [1151, 1336]]
+    z: 4
+  - name: shoulder_cap_l
+    parent: torso
+    concepts: ["robot shoulder"]
+    hidden: true
+    z: 5
+  - name: upper_arm_l
+    parent: shoulder_cap_l
+    concepts: ["robot arm"]
+    hidden: true
+    z: 2
+  - name: elbow_l
+    parent: upper_arm_l
+    concepts: ["robot elbow"]
+    hidden: true
+    z: 3
+  - name: forearm_l
+    parent: elbow_l
+    concepts: ["robot arm"]
+    hidden: true
+    z: 2
+  - name: hand_l
+    parent: forearm_l
+    concepts: ["robot claw"]
+    hidden: true
+    z: 4
+  - name: leg_r
+    parent: torso
+    concepts: ["robot leg"]
+    seed: [[1152, 1399]]
+    z: -1
+  - name: boot_r
+    parent: leg_r
+    concepts: ["robot boot"]
+    seed: [[1147, 1509], [1148, 1423]]
+    z: 2
+  - name: foot_r
+    parent: boot_r
+    concepts: ["robot foot"]
+    seed: [[1169, 1640]]
+    z: 3
+  - name: leg_l
+    parent: torso
+    concepts: ["robot leg"]
+    seed: [[1195, 1323], [1195, 1363]]
+    z: -2
+  - name: boot_l
+    parent: leg_l
+    concepts: ["robot boot"]
+    seed: [[1229, 1456]]
+    z: 1
+  - name: foot_l
+    parent: boot_l
+    concepts: ["robot foot"]
+    seed: [[1278, 1554], [1268, 1577], [1254, 1599]]
+    z: 2

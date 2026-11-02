@@ -497,6 +497,108 @@ def cmd_strip(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_puppet(args: argparse.Namespace) -> int:
+    """Build a layered puppet from one reference drawing (package K-0)."""
+    if args.puppet_command == "build":
+        return cmd_puppet_build(args)
+    if args.puppet_command == "build-set":
+        return cmd_puppet_build_set(args)
+    raise ValueError(f"unknown puppet command: {args.puppet_command}")
+
+
+def cmd_puppet_build(args: argparse.Namespace) -> int:
+    from karagoz.engine.puppet import build_puppet
+    from karagoz.meta.client import MetaClient
+    from karagoz.meta.image import MuseImage
+    from karagoz.meta.sam import Sam
+
+    try:
+        sam = None if args.no_sam else Sam(MetaClient())
+        files = build_puppet(
+            Path(args.reference),
+            Path(args.config),
+            Path(args.out_dir),
+            sam=sam,
+            image=MuseImage(MetaClient()),
+            max_image_calls=args.max_image_calls,
+        )
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    report = files.report
+    recomp = report["recomposition"]
+    print(f"parts {len(report['completed'])} -> {args.out_dir}")
+    print(f"sam calls {report['sam_calls']}, model calls {report['model_calls']}, ~${report['cost_usd']:.4f}")
+    print(
+        f"recomposition outside band {recomp['outside_band_gt40']} (must be 0), "
+        f"inside band {recomp['inside_band_gt40']}"
+    )
+    worst = min(info["border_line_coverage"] for info in report["outlines"].values())
+    print(f"worst outline coverage {worst:.3f} (target >= 0.95)")
+    worst_paper = max((max(j["paper_px"].values()) for j in report["joints"].values()), default=0)
+    print(f"worst rotation paper {worst_paper} px (target 0)")
+    worst_own = max((max(j["own_px"].values()) for j in report["joints"].values()), default=0)
+    print(f"worst rotation own-pixel {worst_own} px (target 0)")
+    for name, methods in report["completed"].items():
+        if "model" in methods:
+            print(f"model fill: {name}")
+    for name, info in report["outlines"].items():
+        if not info["islands_ok"]:
+            print(f"islands mismatch: {name} has {info['components']:.0f}, preset says {info['islands']}")
+    for entry in report["needs_human"]:
+        who = entry.get("assigned_to", entry.get("decision", ""))
+        print(f"needs human: {entry['kind']} region {entry.get('region')} ({who})")
+    problems = []
+    if recomp["outside_band_gt40"]:
+        problems.append("recomposition differs outside the line band")
+    if worst < 0.95:
+        problems.append("outline coverage below 0.95")
+    if worst_paper:
+        problems.append("rotation test shows paper")
+    if worst_own:
+        problems.append("rotation test leaves own pixels on paper")
+    if any(not info["islands_ok"] for info in report["outlines"].values()):
+        problems.append("outline island count differs from preset")
+    if report["needs_human"]:
+        problems.append("regions need a human decision")
+    for problem in problems:
+        print(f"warn: {problem}")
+    return 0
+
+
+def cmd_puppet_build_set(args: argparse.Namespace) -> int:
+    from karagoz.engine.puppet import build_puppet_set
+
+    try:
+        files = build_puppet_set(
+            Path(args.set_config),
+            Path(args.out_dir),
+            workers=args.workers,
+            use_sam=not args.no_sam,
+            max_image_calls=args.max_image_calls,
+        )
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    report = files.report
+    print(f"views {len(report['views'])} + heads {len(report['head_views'])} -> {args.out_dir}")
+    for name, view in {**report["views"], **report["head_views"]}.items():
+        print(
+            f"{name}: declared {view['yaw_declared']:g} measured {view['yaw_measured']} "
+            f"diff {view['yaw_diff']} flag {view['yaw_flag']} ({view['yaw_method']})"
+        )
+    for name, info in report["parts"].items():
+        pal = ", ".join(f"{v} {d:.1f}" for v, d in info["palette"].items())
+        print(f"{name}: palette {pal}")
+    totals = report["totals"]
+    print(f"sam calls {totals['sam_calls']}, model calls {totals['model_calls']}, ~${totals['cost_usd']:.4f}")
+    flagged = [n for n, v in {**report["views"], **report["head_views"]}.items() if v["yaw_flag"]]
+    flagged += [f"{n}/{v}" for n, info in report["parts"].items() for v, f in info["palette_flag"].items() if f]
+    if flagged:
+        print(f"warn: flags on {', '.join(flagged)}")
+    return 0
+
+
 def cmd_gate(args: argparse.Namespace) -> int:
     """Flag one shot (needs placement.json from a render with a region map).
 
@@ -671,6 +773,24 @@ def build_parser() -> argparse.ArgumentParser:
     gate_p.add_argument("shot", help="shot id")
     gate_p.add_argument("--limit", type=int, default=5, help="most flags shown (prop count always shown)")
     gate_p.set_defaults(func=cmd_gate)
+
+    puppet_p = sub.add_parser("puppet", help="build a layered puppet from a reference drawing")
+    puppet_sub = puppet_p.add_subparsers(dest="puppet_command", required=True)
+    puppet_build = puppet_sub.add_parser("build", help="split the reference into complete parts (SAM + seeds)")
+    puppet_build.add_argument("reference", help="reference drawing (flat colours, black outlines)")
+    puppet_build.add_argument("config", help="parts config YAML (names, parents, concepts, seeds)")
+    puppet_build.add_argument(
+        "out_dir", help="output directory (puppet.json, parts/, report.json, sheet.png, parts_green.png)"
+    )
+    puppet_build.add_argument("--no-sam", action="store_true", help="skip SAM, decide by seed points alone")
+    puppet_build.add_argument("--max-image-calls", type=int, default=3, help="most Muse Image fills (default 3)")
+    puppet_set = puppet_sub.add_parser("build-set", help="build every view of a puppet set in parallel (K-0c)")
+    puppet_set.add_argument("set_config", help="set config YAML (character, views, head views)")
+    puppet_set.add_argument("out_dir", help="output directory (views/, head_views/, set.json, set_report.json)")
+    puppet_set.add_argument("--workers", type=int, default=None, help="parallel view workers (default: half the CPUs)")
+    puppet_set.add_argument("--no-sam", action="store_true", help="skip SAM, decide by seed points alone")
+    puppet_set.add_argument("--max-image-calls", type=int, default=3, help="most Muse Image fills (default 3)")
+    puppet_p.set_defaults(func=cmd_puppet)
 
     strip_p = sub.add_parser("strip", help="write a contact sheet of a run of video frames")
     strip_p.add_argument("video", help="video file")

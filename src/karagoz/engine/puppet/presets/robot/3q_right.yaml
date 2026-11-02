@@ -1,0 +1,108 @@
+# Robot demo character (flat colours, black outlines, rigid parts, round caps/rings).
+# The character faces the viewer, so the _r side is image-left and _l is image-right.
+# Seeds are [x, y] pixels in the 2400x1792 reference. SAM concepts are tried in
+# order; a missing SAM mask never blocks the build (the seed alone decides).
+line_max_luma: 25.0
+# Probe points in the 2400x1792 reference for the cross-view report: the eye
+# midpoint (front-surface depth cue) and the chest grid (one-sided detail on
+# the robot's own left, image right). Measured on robot.jpg, not guessed.
+features:
+  eye_mid: {part: head, point: [1281, 380], front: true}
+  seam: {part: torso, point: [1313, 950], front: true}
+  chest_grid: {part: torso, point: [1429, 1012], front: true}
+parts:
+  - name: torso
+    parent: null
+    concepts: ["robot torso", "torso"]
+    seed: [[1128, 806], [1401, 871], [1215, 1178], [1307, 658], [1123, 1067]]
+    z: 0
+  - name: neck
+    parent: torso
+    concepts: ["robot neck"]
+    seed: [1200, 588]
+    z: 1
+  - name: head
+    parent: neck
+    concepts: ["robot head", "head"]
+    seed: [[1200, 300], [1028, 320], [1181, 369], [1358, 367]]
+    z: 6
+  - name: shoulder_cap_r
+    parent: torso
+    concepts: ["robot shoulder"]
+    seed: [930, 735]
+    z: 5
+  - name: upper_arm_r
+    parent: shoulder_cap_r
+    concepts: ["robot arm"]
+    seed: [[770, 722], [825, 722], [888, 730]]
+    z: 2
+  - name: elbow_r
+    parent: upper_arm_r
+    concepts: ["robot elbow"]
+    seed: [700, 722]
+    z: 3
+  - name: forearm_r
+    parent: elbow_r
+    concepts: ["robot arm"]
+    seed: [[560, 722], [642, 736]]
+    z: 2
+  - name: hand_r
+    parent: forearm_r
+    concepts: ["robot claw"]
+    seed: [[420, 735], [467, 696]]
+    z: 4
+  - name: shoulder_cap_l
+    parent: torso
+    concepts: ["robot shoulder"]
+    seed: [1500, 700]
+    z: 5
+  - name: upper_arm_l
+    parent: shoulder_cap_l
+    concepts: ["robot arm"]
+    seed: [[1640, 722], [1561, 724], [1678, 723]]
+    z: 2
+  - name: elbow_l
+    parent: upper_arm_l
+    concepts: ["robot elbow"]
+    seed: [[1750, 722], [1716, 722]]
+    z: 3
+  - name: forearm_l
+    parent: elbow_l
+    concepts: ["robot arm"]
+    seed: [[1850, 722], [1792, 722], [1908, 721]]
+    z: 2
+  - name: hand_l
+    parent: forearm_l
+    concepts: ["robot claw"]
+    seed: [[1975, 740], [2036, 684], [2035, 766], [1945, 721]]
+    z: 4
+  - name: leg_r
+    parent: torso
+    concepts: ["robot leg"]
+    seed: [[1090, 1290], [1090, 1200], [1096, 1365]]
+    z: -1
+  - name: boot_r
+    parent: leg_r
+    concepts: ["robot boot"]
+    seed: [[1032, 1433], [1052, 1369]]
+    z: 2
+  - name: foot_r
+    parent: boot_r
+    concepts: ["robot foot"]
+    seed: [[1032, 1594], [1172, 1578], [1143, 1640]]
+    z: 3
+  - name: leg_l
+    parent: torso
+    concepts: ["robot leg"]
+    seed: [[1360, 1290], [1420, 1190], [1361, 1342]]
+    z: -1
+  - name: boot_l
+    parent: leg_l
+    concepts: ["robot boot"]
+    seed: [1355, 1433]
+    z: 2
+  - name: foot_l
+    parent: boot_l
+    concepts: ["robot foot"]
+    seed: [[1355, 1594], [1436, 1552], [1408, 1614]]
+    z: 3

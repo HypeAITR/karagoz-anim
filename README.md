@@ -58,6 +58,7 @@ Four layers: studio agents, the coordinate engine, model adapters, and render. T
 - `karagoz look` — crop a close look at one drawing by region name
 - `karagoz gate` — flag a shot's drawings (jumps, wrong way, prop count); never rejects
 - `karagoz strip` — write a contact sheet of a run of video frames
+- `karagoz puppet` — build a layered puppet from a reference drawing (SAM + seeds)
 - `karagoz review` — write the shot's REVIEW.md again and print it
 - `karagoz redraw` — move drawings to history so they are drawn again
 - `karagoz keep` — keep one gate flag or checker finding with a note

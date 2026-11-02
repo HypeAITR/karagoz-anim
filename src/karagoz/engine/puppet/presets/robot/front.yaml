@@ -1,0 +1,116 @@
+# Robot front view (yaw ~0). Same part names as the 3q_right preset.
+# Seeds are [x, y] pixels in _wp/kukla-ortak/views/front.png (2400x1792).
+# The character faces the viewer, so the _r side is image-left and _l is image-right.
+# All 19 parts are visible in front, so no hidden:true is needed here.
+# Head note: the head's main dark is one line-bounded region (region 5)
+# with no chin line and no constriction toward the neck, so the engine
+# correctly refuses to split it (K-0d item 2: no guess without constriction).
+# The neck is therefore seeded in the lower neck band below the ring
+# (region 12); the head keeps region 5 plus eyes, antenna top/base and
+# ears: 7 islands, declared below.
+# Features are probe points read from the drawing: eye_mid (face centre),
+# seam (chest centre line, the yaw ruler), chest_grid (one-sided detail).
+yaw_deg: 0
+line_max_luma: 25.0
+features:
+  eye_mid: {part: head, point: [1200, 400], front: true}
+  seam: {part: torso, point: [1222, 950], front: true}
+  chest_grid: {part: torso, point: [1395, 1010], front: true}
+parts:
+  - name: torso
+    parent: null
+    concepts: ["robot torso", "torso"]
+    seed: [[1150, 850], [1150, 1150], [1317, 884], [1261, 667], [1043, 1074], [1041, 1238]]
+    z: 0
+  - name: neck
+    parent: torso
+    concepts: ["robot neck"]
+    seed: [1200, 590]
+    z: 1
+  - name: head
+    parent: neck
+    concepts: ["robot head", "head"]
+    seed: [[1100, 400], [1300, 400], [1200, 130], [1200, 210], [980, 420], [1420, 420], [1200, 300]]
+    z: 6
+  - name: shoulder_cap_r
+    parent: torso
+    concepts: ["robot shoulder"]
+    seed: [910, 720]
+    z: 5
+  - name: upper_arm_r
+    parent: shoulder_cap_r
+    concepts: ["robot arm"]
+    seed: [[750, 735], [800, 735], [850, 735]]
+    z: 2
+  - name: elbow_r
+    parent: upper_arm_r
+    concepts: ["robot elbow"]
+    seed: [[700, 700], [700, 775]]
+    z: 3
+  - name: forearm_r
+    parent: elbow_r
+    concepts: ["robot arm"]
+    seed: [[470, 735], [530, 735], [590, 735], [630, 735]]
+    z: 2
+  - name: hand_r
+    parent: forearm_r
+    concepts: ["robot claw"]
+    seed: [[380, 700], [380, 770]]
+    z: 4
+    islands: 2
+  - name: shoulder_cap_l
+    parent: torso
+    concepts: ["robot shoulder"]
+    seed: [1485, 720]
+    z: 5
+  - name: upper_arm_l
+    parent: shoulder_cap_l
+    concepts: ["robot arm"]
+    seed: [[1560, 735], [1600, 735], [1650, 735]]
+    z: 2
+  - name: elbow_l
+    parent: upper_arm_l
+    concepts: ["robot elbow"]
+    seed: [[1700, 700], [1700, 770]]
+    z: 3
+  - name: forearm_l
+    parent: elbow_l
+    concepts: ["robot arm"]
+    seed: [[1770, 735], [1830, 735], [1890, 735], [1950, 735]]
+    z: 2
+  - name: hand_l
+    parent: forearm_l
+    concepts: ["robot claw"]
+    seed: [[2010, 700], [2010, 770]]
+    z: 4
+    islands: 2
+  - name: leg_r
+    parent: torso
+    concepts: ["robot leg"]
+    seed: [[1070, 1300], [1070, 1350]]
+    z: -1
+  - name: boot_r
+    parent: leg_r
+    concepts: ["robot boot"]
+    seed: [1075, 1480]
+    z: 2
+  - name: foot_r
+    parent: boot_r
+    concepts: ["robot foot"]
+    seed: [[1060, 1590], [1060, 1640]]
+    z: 3
+  - name: leg_l
+    parent: torso
+    concepts: ["robot leg"]
+    seed: [[1330, 1320], [1330, 1370]]
+    z: -1
+  - name: boot_l
+    parent: leg_l
+    concepts: ["robot boot"]
+    seed: [1330, 1480]
+    z: 2
+  - name: foot_l
+    parent: boot_l
+    concepts: ["robot foot"]
+    seed: [[1345, 1590], [1345, 1640]]
+    z: 3
