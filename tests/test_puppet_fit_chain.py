@@ -13,6 +13,7 @@ from karagoz.engine.puppet.fit import (
     LoadedView,
     TransitionResult,
     _ang_dist,
+    _warp_points,
     chain_objective,
     context_blocked,
     difference_locked,
@@ -25,7 +26,7 @@ from karagoz.engine.puppet.fit import (
     transition_from_poses,
     write_transition_outputs,
 )
-from karagoz.engine.puppet.pose import Pose
+from karagoz.engine.puppet.pose import Pose, part_matrix3
 from karagoz.engine.rig.plan import MAX_EXTRA_KEYS
 
 
@@ -154,6 +155,96 @@ def test_transition_sheet_and_json_written(
     assert (out / "pose_Y.json").is_file()
     assert (out / "transition_sheet.png").is_file()
     assert json.loads((out / "transition.json").read_text(encoding="utf-8"))["decision"] == "rig"
+
+
+def test_limits_keep_chain_search_inside(puppet: object, images: dict) -> None:
+    limited = puppet.model_copy(deep=True)  # type: ignore[union-attr]
+    limited.parts["arm"].limits = [-10.0, 10.0]
+    angles = {"arm": 40.0, "fore": -25.0, "hand": 15.0, "leg": 10.0, "foot": -8.0}
+    drawing = draw_pose(limited, images, angles, dict(TRUE_ROOT))  # type: ignore[arg-type]
+    feat = drawing_features(drawing)
+    samples = extract_part_samples(limited, images)  # type: ignore[arg-type]
+    start = Pose(view="synth", canvas=[160, 160])
+    start.tx, start.ty, start.scale = TRUE_ROOT["tx"], TRUE_ROOT["ty"], TRUE_ROOT["scale"]
+    fitted = fit_chain(limited, start, "hand", drawing, samples, feat)  # type: ignore[arg-type]
+    assert -10.0 <= float(fitted.angles.get("arm", 999.0)) <= 10.0
+
+
+def test_explained_pixels_decay_chain_scores(puppet: object, images: dict) -> None:
+    import cv2
+
+    true = {"arm": -80.0, "fore": 0.0, "hand": 0.0, "leg": 10.0, "foot": 0.0}
+    rigid = {"arm": 140.0, "fore": 0.0, "hand": 0.0, "leg": 10.0, "foot": 0.0}
+    drawing = draw_pose(puppet, images, true, dict(TRUE_ROOT))  # type: ignore[arg-type]
+    feat = drawing_features(drawing)
+    samples = extract_part_samples(puppet, images)  # type: ignore[arg-type]
+    height, width = feat.line.shape
+
+    def pose_at(angles: dict[str, float]) -> Pose:
+        pose = Pose(view="synth", canvas=[160, 160], angles=dict(angles))
+        pose.tx, pose.ty, pose.scale = TRUE_ROOT["tx"], TRUE_ROOT["ty"], TRUE_ROOT["scale"]
+        return pose
+
+    def cover_mask(angles: dict[str, float]) -> np.ndarray:
+        mask = np.zeros((height, width), np.bool_)
+        pose = pose_at(angles)
+        for name in ("arm", "fore", "hand"):
+            mat = np.asarray(part_matrix3(puppet, pose, name)[:2], dtype=np.float64)  # type: ignore[arg-type]
+            for pts in (samples[name].line_xy, samples[name].flat_xy):  # type: ignore[union-attr]
+                if not len(pts):
+                    continue
+                warped = np.round(_warp_points(np.asarray(pts, dtype=np.float64), mat)).astype(np.int64)
+                valid = (warped[:, 0] >= 0) & (warped[:, 1] >= 0) & (warped[:, 0] < width) & (warped[:, 1] < height)
+                mask[warped[valid, 1], warped[valid, 0]] = True
+        grown = cv2.dilate(mask.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0
+        return np.asarray(grown, dtype=np.bool_)
+
+    chain = ["arm", "fore", "hand"]
+    tau = 4.0
+    true_pose, rigid_pose = pose_at(true), pose_at(rigid)
+    plain_true = chain_objective(puppet, true_pose, chain, samples, feat, tau)  # type: ignore[arg-type]
+    plain_rigid = chain_objective(puppet, rigid_pose, chain, samples, feat, tau)  # type: ignore[arg-type]
+    assert plain_true > plain_rigid
+    explained = cover_mask(rigid)
+    decayed_true = chain_objective(puppet, true_pose, chain, samples, feat, tau, None, None, explained)  # type: ignore[arg-type]
+    decayed_rigid = chain_objective(puppet, rigid_pose, chain, samples, feat, tau, None, None, explained)  # type: ignore[arg-type]
+    # Agreement on explained pixels decays: the rigid chain lying on explained
+    # pixels loses most of its score, the true chain on unexplained pixels
+    # keeps its own, so unexplained placement wins by a wider margin.
+    assert decayed_rigid < plain_rigid - 0.5
+    # The true hang shares only the shoulder pivot region with the mask, so it
+    # keeps nearly all of its score (a broken decay would cost most of it).
+    assert abs(decayed_true - plain_true) < 0.25
+    assert decayed_true > decayed_rigid
+
+
+def test_limits_do_not_harm_inside_recovery(puppet: object, images: dict) -> None:
+    limited = puppet.model_copy(deep=True)  # type: ignore[union-attr]
+    limited.parts["arm"].limits = [-10.0, 10.0]
+    angles = {"arm": 5.0, "fore": -25.0, "hand": 15.0, "leg": 10.0, "foot": -8.0}
+    drawing = draw_pose(limited, images, angles, dict(TRUE_ROOT))  # type: ignore[arg-type]
+    feat = drawing_features(drawing)
+    samples = extract_part_samples(limited, images)  # type: ignore[arg-type]
+    start = Pose(view="synth", canvas=[160, 160])
+    start.tx, start.ty, start.scale = TRUE_ROOT["tx"], TRUE_ROOT["ty"], TRUE_ROOT["scale"]
+    fitted = fit_chain(limited, start, "hand", drawing, samples, feat)  # type: ignore[arg-type]
+    assert _ang_dist(fitted.angles.get("arm", 0.0), 5.0) <= 2.0
+
+
+def test_xy_far_move_pulled_from_scratch_start(puppet: object, images: dict) -> None:
+    angles_x = dict(ZERO_ANGLES)
+    angles_y = {"arm": 150.0, "fore": 0.0, "hand": 0.0, "leg": 0.0, "foot": 0.0}
+    rgb_x = draw_pose(puppet, images, angles_x, dict(TRUE_ROOT))  # type: ignore[arg-type]
+    rgb_y = draw_pose(puppet, images, angles_y, dict(TRUE_ROOT))  # type: ignore[arg-type]
+    pose_x = Pose(view="synth", canvas=[160, 160], angles=dict(angles_x), **TRUE_ROOT)
+    pose_y = Pose(view="synth", canvas=[160, 160], angles=dict(angles_y), **TRUE_ROOT)
+    loaded = synth_view(puppet, images)  # type: ignore[arg-type]
+    result = transition_from_poses(loaded, pose_x, pose_y, rgb_x, rgb_y)  # type: ignore[arg-type]
+    # A 150 deg move exceeds the X-anchored pull window: the pull must also
+    # try the chain's from-scratch fit on Y and keep the best, so the move
+    # is reached (a justified split) instead of ret.
+    assert _ang_dist(result.pose_y.angles.get("arm", 0.0), 150.0) <= 2.0
+    assert result.decision == "split"
 
 
 def test_difference_map_marks_only_the_moved_chain(puppet: object, images: dict) -> None:

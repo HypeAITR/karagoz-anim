@@ -48,6 +48,10 @@ class PartSpec(_Strict):
     concepts: list[str] = Field(default_factory=list)
     seed: list[list[float]] | None = None
     z: int = 0
+    # Optional joint rotation limits [lo, hi] in degrees, relative to rest.
+    # Declared here so a preset can pin a torso-mounted cap; the fit search
+    # clips every candidate into the range (K-1 REV1).
+    limits: list[float] | None = None
     # Hidden in this view: no region is claimed for the part, it gets no file,
     # and downstream views (head variants) render in its place. The seed, if
     # any, is ignored. The root can never be hidden.
@@ -67,6 +71,18 @@ class PartSpec(_Strict):
             if not isinstance(pair, list) or len(pair) != 2:
                 raise ValueError("seed must be [x, y] or a list of [x, y]")
         return pairs
+
+    @field_validator("limits", mode="before")
+    @classmethod
+    def _limits_pair(cls, value: object) -> object:
+        if value is None:
+            return None
+        pair = [float(v) for v in value] if isinstance(value, (list, tuple)) else None
+        if pair is None or len(pair) != 2:
+            raise ValueError("limits must be [lo, hi] degrees")
+        if not pair[0] <= pair[1]:
+            raise ValueError(f"limits need lo <= hi, got {pair}")
+        return pair
 
 
 class PuppetConfig(_Strict):
@@ -223,6 +239,9 @@ class PuppetPart(_Strict):
     pivot: list[float]
     z: int
     file: str
+    # Optional joint rotation limits [lo, hi] in degrees, relative to rest
+    # (see PartSpec.limits); the fit search clips every candidate into range.
+    limits: list[float] | None = None
     completed: list[str] = Field(default_factory=list)
     approved: bool = False
     # Hidden in this view: not drawn here (a head variant renders instead),
@@ -231,6 +250,18 @@ class PuppetPart(_Strict):
     # True when the pivot was projected onto the parent boundary because a
     # third part hides the joint (no visible touch to measure).
     estimated: bool = False
+
+    @field_validator("limits", mode="before")
+    @classmethod
+    def _limits_pair(cls, value: object) -> object:
+        if value is None:
+            return None
+        pair = [float(v) for v in value] if isinstance(value, (list, tuple)) else None
+        if pair is None or len(pair) != 2:
+            raise ValueError("limits must be [lo, hi] degrees")
+        if not pair[0] <= pair[1]:
+            raise ValueError(f"limits need lo <= hi, got {pair}")
+        return pair
 
 
 class Puppet(_Strict):

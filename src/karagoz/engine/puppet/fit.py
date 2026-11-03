@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Collection
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
 from functools import cached_property
@@ -44,6 +45,10 @@ COLOUR_TAU = 60.0
 W_LINE = 1.0
 W_COLOUR = 0.5
 W_PAPER = 1.0
+# Agreement kept on drawing pixels other placed parts already explain: a
+# chain lying on the face keeps a quarter of those samples' agreement, so
+# unexplained drawing pixels decide between parasites and true placements.
+EXPLAIN_DECAY = 0.75
 MAX_LINE_PTS = 4000
 MAX_FLAT_PTS = 4000
 MAX_COVER_PTS = 30000
@@ -335,6 +340,35 @@ def _matrix_for(puppet: Puppet, pose: Pose, part: str, angle: float) -> NDArray[
     return np.asarray(part_matrix3(puppet, trial, part)[:2], dtype=np.float64)
 
 
+def _limits_of(puppet: Puppet, name: str) -> tuple[float, float] | None:
+    """Joint rotation limits [lo, hi] of a part, if the puppet declares them.
+
+    Limits are data (`PuppetPart.limits`, degrees relative to rest), never
+    part names in code: every search path clips its candidates into range.
+    A pinned (``frozen``) member keeps its exact angle either way.
+    """
+    part = puppet.parts.get(name)
+    lim = part.limits if part is not None else None
+    if lim is None:
+        return None
+    return (float(lim[0]), float(lim[1]))
+
+
+def _clip_cands(cands: list[float], lim: tuple[float, float] | None) -> list[float]:
+    """Clip search candidates into joint limits, dropping duplicates."""
+    if lim is None:
+        return [float(c) for c in cands]
+    out: list[float] = []
+    seen: set[float] = set()
+    for cand in cands:
+        value = min(max(float(cand), lim[0]), lim[1])
+        key = round(value, 9)
+        if key not in seen:
+            seen.add(key)
+            out.append(value)
+    return out
+
+
 def snap_part(
     puppet: Puppet,
     pose: Pose,
@@ -353,13 +387,16 @@ def snap_part(
     ``hint_deg +/- window_deg/2``), then ``FINE_STEP`` refinement around the
     best few. The score is the part's own chamfer + colour minus paper (see
     :func:`score_samples`); confidence is the gap to the best separate peak.
+    When the puppet declares joint limits for the part, every candidate is
+    clipped into range.
     """
     feat = features if features is not None else drawing_features(np.asarray(drawing, dtype=np.uint8))
     samp = samples[part] if samples is not None and part in samples else None
     if samp is None:
         raise ValueError(f"no samples for part {part!r}")
     tau = _tau_for(puppet, pose)
-    coarse = _coarse_angles(hint_deg, window_deg)
+    lim = _limits_of(puppet, part)
+    coarse = _coarse_angles(hint_deg, window_deg, lim)
     mats = np.stack([_matrix_for(puppet, pose, part, angle) for angle in coarse])
     scores = {float(a): v for a, v in zip(coarse, batch_scores(samp, mats, feat, tau, explained), strict=True)}
     ordered = sorted(scores, key=lambda a: scores[a], reverse=True)
@@ -372,8 +409,10 @@ def snap_part(
     best_angle = float(ordered[0])
     best_score = float(scores[best_angle])
     for seed in seeds:
-        angle = seed - FINE_RANGE
-        while angle <= seed + FINE_RANGE + 1e-9:
+        lo_c = seed - FINE_RANGE if lim is None else max(seed - FINE_RANGE, lim[0])
+        hi_c = seed + FINE_RANGE if lim is None else min(seed + FINE_RANGE, lim[1])
+        angle = lo_c
+        while angle <= hi_c + 1e-9:
             key = round(float(angle), 1)
             if key not in scores:
                 scores[key] = score_samples(samp, _matrix_for(puppet, pose, part, angle), feat, tau, explained)
@@ -390,13 +429,14 @@ def explained_mask(
     pose: Pose,
     samples: dict[str, PartSamples],
     shape: tuple[int, int],
-    skip: str | None = None,
+    skip: str | Collection[str] | None = None,
 ) -> NDArray[np.bool_]:
     """Drawing pixels some placed part (except ``skip``) covers."""
+    skipped = {skip} if isinstance(skip, str) else set(skip or ())
     height, width = shape
     cover = np.zeros((height, width), np.bool_)
     for name, samp in samples.items():
-        if name == skip or len(samp.flat_xy) == 0:
+        if name in skipped or len(samp.flat_xy) == 0:
             continue
         mat = np.asarray(part_matrix3(puppet, pose, name)[:2], dtype=np.float64)
         warped = _warp_points(samp.flat_xy, mat)
@@ -406,7 +446,7 @@ def explained_mask(
         cover[yi[valid], xi[valid]] = True
     line_cover = np.zeros((height, width), np.bool_)
     for name, samp in samples.items():
-        if name == skip or len(samp.line_xy) == 0:
+        if name in skipped or len(samp.line_xy) == 0:
             continue
         mat = np.asarray(part_matrix3(puppet, pose, name)[:2], dtype=np.float64)
         warped = _warp_points(samp.line_xy, mat)
@@ -478,6 +518,21 @@ def context_blocked(
     return blocked
 
 
+def _decay_at(expl: NDArray[np.bool_] | None, xy: NDArray[np.float64]) -> NDArray[np.float64]:
+    """Keep factor per sample: agreement on explained pixels decays.
+
+    ``xy`` must be in canvas (owned samples always are): each sample keeps
+    ``1 - EXPLAIN_DECAY`` of its agreement where another placed part already
+    explains the drawing, all of it on unexplained pixels.
+    """
+    if expl is None or len(xy) == 0:
+        return np.ones(len(xy), np.float64)
+    xi = np.round(xy[:, 0]).astype(np.int64)
+    yi = np.round(xy[:, 1]).astype(np.int64)
+    hit = np.asarray(expl[yi, xi], dtype=np.float64)
+    return np.asarray(1.0 - EXPLAIN_DECAY * hit, dtype=np.float64)
+
+
 def exclusive_total(
     puppet: Puppet,
     pose: Pose,
@@ -486,13 +541,17 @@ def exclusive_total(
     feat: DrawingFeatures,
     tau: float,
     blocked: NDArray[np.bool_] | None = None,
+    explained: NDArray[np.bool_] | None = None,
 ) -> float:
     """One chain's joint score with exclusive pixel ownership.
 
     Each drawing pixel is explained once (top part wins, z order): a folded
     limb stacked on the same drawn pixels gains nothing for the extra parts,
     while a clean placement explains every part's own pixels. Parts with
-    samples but no owned pixels left score ``-STACK_PENALTY``.
+    samples but no owned pixels left score ``-STACK_PENALTY``. Line and
+    colour agreement on pixels other placed parts already explain (``explained``)
+    decays, so a limb on unexplained drawing pixels beats one lying on the
+    face or belly.
     """
     height, width = feat.line.shape
     dist_f = feat.dist_f
@@ -523,15 +582,17 @@ def exclusive_total(
             total -= STACK_PENALTY
             continue
         if int(owned_line.sum()):
+            keep = _decay_at(explained, line_xy[owned_line])
             dist = _bilinear(dist_f, line_xy[owned_line, 0], line_xy[owned_line, 1], 50.0)
-            total += W_LINE * float(np.mean(np.exp(-dist / max(tau, 1e-6))))
+            total += W_LINE * float(np.mean(keep * np.exp(-dist / max(tau, 1e-6))))
         if int(owned_flat.sum()):
             own_xy = flat_xy[owned_flat]
+            keep = _decay_at(explained, own_xy)
             drawn = np.stack([_bilinear(rgb_f[..., c], own_xy[:, 0], own_xy[:, 1], 255.0) for c in range(3)], axis=1)
             own = np.asarray(samp.flat_rgb[owned_flat].astype(np.float64))
             cd = np.mean(np.abs(drawn - own), axis=1)
             paper_hit = _bilinear(paper_f, own_xy[:, 0], own_xy[:, 1], 1.0)
-            total += W_COLOUR * float(np.mean(np.exp(-cd / COLOUR_TAU))) - W_PAPER * float(np.mean(paper_hit))
+            total += W_COLOUR * float(np.mean(keep * np.exp(-cd / COLOUR_TAU))) - W_PAPER * float(np.mean(paper_hit))
         n_out = int((len(line_xy) - int((line_idx >= 0).sum())) + (len(flat_xy) - int((flat_idx >= 0).sum())))
         if n_out:
             total -= W_PAPER * n_out / max(len(line_xy) + len(flat_xy), 1)
@@ -559,14 +620,16 @@ def chain_objective(
     tau: float,
     center: dict[str, float] | None = None,
     blocked: NDArray[np.bool_] | None = None,
+    explained: NDArray[np.bool_] | None = None,
 ) -> float:
     """The joint objective a chain fit maximizes: exclusive pixels, ties to rest.
 
     Near-symmetric configurations can score almost the same; the tiny rest
     prior picks the clean one. With a transition anchor the centre is X's
-    angles (continuity) instead of rest.
+    angles (continuity) instead of rest. Agreement on ``explained`` pixels
+    decays (see :func:`exclusive_total`).
     """
-    total = exclusive_total(puppet, pose, chain, samples, feat, tau, blocked)
+    total = exclusive_total(puppet, pose, chain, samples, feat, tau, blocked, explained)
     for name in chain:
         target = float(center[name]) if center is not None and name in center else 0.0
         total -= REST_PRIOR * abs(_ang_dist(float(pose.angles.get(name, 0.0)), target))
@@ -596,21 +659,21 @@ def _part_confidence(
     return cur_score, gap
 
 
-def _sweep_cands(current: float, local_deg: float | None) -> list[float]:
+def _sweep_cands(current: float, local_deg: float | None, limits: tuple[float, float] | None = None) -> list[float]:
     if local_deg is None:
         cands: list[float] = []
         angle = -180.0
         while angle < 180.0:
             cands.append(float(angle))
             angle += 15.0
-        return cands
+        return _clip_cands(cands, limits)
     cands = [float(current)]
     step = 10.0
     k = step
     while k <= local_deg + 1e-9:
         cands += [float(current - k), float(current + k)]
         k += step
-    return cands
+    return _clip_cands(cands, limits)
 
 
 def _greedy_from(
@@ -626,6 +689,7 @@ def _greedy_from(
     blocked: NDArray[np.bool_] | None,
     pair_grid: bool = False,
     frozen: dict[str, float] | None = None,
+    explained: NDArray[np.bool_] | None = None,
 ) -> tuple[dict[str, float], float]:
     """Forward greedy: each joint takes the angle that best serves its downstream.
 
@@ -635,6 +699,7 @@ def _greedy_from(
     complex, sharing one rotation no single-joint sweep can compose) go first
     on a coarse 2D grid. ``frozen`` members keep their angle throughout (a
     transition pull freezing the locked members of a changed chain).
+    ``explained`` decays agreement on pixels other parts already explain.
     """
     stay = dict(frozen or {})
     best = dict(from_angles)
@@ -643,13 +708,15 @@ def _greedy_from(
     if pair_grid and len(chain) >= 2:
         first, second = chain[0], chain[1]
         free = [m for m in (first, second) if m not in stay]
-        grid = [float(v) for v in range(-180, 180, 45)]
+        full = [float(v) for v in range(-180, 180, 45)]
+        grid_first = _clip_cands(full, _limits_of(puppet, first))
+        grid_second = _clip_cands(full, _limits_of(puppet, second))
         if len(free) == 2:
             top = (-math.inf, 0.0, 0.0)
-            for a in grid:
-                for b in grid:
+            for a in grid_first:
+                for b in grid_second:
                     trial = work.model_copy(update={"angles": {**best, first: a, second: b}})
-                    value = exclusive_total(puppet, trial, chain, samples, feat, tau, blocked)
+                    value = exclusive_total(puppet, trial, chain, samples, feat, tau, blocked, explained)
                     value -= REST_PRIOR * (
                         abs(_ang_dist(a, float(center.get(first, 0.0))))
                         + abs(_ang_dist(b, float(center.get(second, 0.0))))
@@ -660,9 +727,9 @@ def _greedy_from(
         elif len(free) == 1:
             name = free[0]
             solo = (-math.inf, 0.0)
-            for a in grid:
+            for a in grid_first if name == first else grid_second:
                 trial = work.model_copy(update={"angles": {**best, name: a}})
-                value = exclusive_total(puppet, trial, chain, samples, feat, tau, blocked)
+                value = exclusive_total(puppet, trial, chain, samples, feat, tau, blocked, explained)
                 value -= REST_PRIOR * abs(_ang_dist(a, float(center.get(name, 0.0))))
                 if value > solo[0]:
                     solo = (value, a)
@@ -670,18 +737,18 @@ def _greedy_from(
     for name in chain:
         if name in stay:
             continue
-        cands = _sweep_cands(float(best.get(name, 0.0)), local_deg)
+        cands = _sweep_cands(float(best.get(name, 0.0)), local_deg, _limits_of(puppet, name))
         target = float(center.get(name, 0.0))
         vals: list[float] = []
         for a in cands:
             trial = work.model_copy(update={"angles": {**best, name: float(a)}})
             vals.append(
-                exclusive_total(puppet, trial, chain, samples, feat, tau, blocked)
+                exclusive_total(puppet, trial, chain, samples, feat, tau, blocked, explained)
                 - REST_PRIOR * abs(_ang_dist(float(a), target))
             )
         best[name] = float(cands[int(np.argmax(np.asarray(vals, dtype=np.float64)))])
     trial = work.model_copy(update={"angles": dict(best)})
-    return best, chain_objective(puppet, trial, chain, samples, feat, tau, center, blocked)
+    return best, chain_objective(puppet, trial, chain, samples, feat, tau, center, blocked, explained)
 
 
 def fit_chain(
@@ -710,7 +777,9 @@ def fit_chain(
     ``local_deg`` window so the chain stays near X. ``frozen`` pins members to
     fixed angles (the locked members of a changed chain): they keep their
     angle through the baseline, the greedy and the descent, so the pull only
-    moves what the difference map unlocked.
+    moves what the difference map unlocked. Declared joint limits
+    (``PuppetPart.limits``) clip every other candidate on every search path;
+    ``frozen`` still pins exactly.
     """
     feat = features if features is not None else drawing_features(np.asarray(drawing, dtype=np.uint8))
     if samples is None:
@@ -746,9 +815,22 @@ def fit_chain(
         work.scores[name] = float(res.score)
         work.confidences[name] = float(res.confidence)
     blocked = context_blocked(puppet, work, chain, samples, feat.line.shape)
+    # Pixels other placed parts explain (dilated cover, robust to the sparse
+    # striding of large parts): agreement there decays, so the chain prefers
+    # unexplained drawing pixels. Other parts sit still during this fit, so
+    # one field serves every candidate below.
+    explained = explained_mask(puppet, work, samples, feat.line.shape, skip=set(chain))
     best_angles = dict(work.angles)
     best_total = chain_objective(
-        puppet, work.model_copy(update={"angles": dict(best_angles)}), chain, samples, feat, tau, center, blocked
+        puppet,
+        work.model_copy(update={"angles": dict(best_angles)}),
+        chain,
+        samples,
+        feat,
+        tau,
+        center,
+        blocked,
+        explained,
     )
     if anchor is None:
         # From scratch the partwise baseline can inherit one wild carrier
@@ -756,13 +838,36 @@ def fit_chain(
         # global greedy restarts from rest zeros with the pair grid on.
         zeros = {m: 0.0 for m in chain}
         greedy, value = _greedy_from(
-            puppet, work, chain, zeros, samples, feat, tau, center, local_deg, blocked, pair_grid=True, frozen=stay
+            puppet,
+            work,
+            chain,
+            zeros,
+            samples,
+            feat,
+            tau,
+            center,
+            local_deg,
+            blocked,
+            pair_grid=True,
+            frozen=stay,
+            explained=explained,
         )
     else:
         # A transition pull stays near X: greedy restarts from the baseline
         # with the narrow local window.
         greedy, value = _greedy_from(
-            puppet, work, chain, best_angles, samples, feat, tau, center, local_deg, blocked, frozen=stay
+            puppet,
+            work,
+            chain,
+            best_angles,
+            samples,
+            feat,
+            tau,
+            center,
+            local_deg,
+            blocked,
+            frozen=stay,
+            explained=explained,
         )
     if value > best_total:
         best_total, best_angles = value, greedy
@@ -790,7 +895,9 @@ def fit_chain(
                     continue
                 affected = chain[j:]
                 old_term = REST_PRIOR * abs(_ang_dist(float(best_angles[name]), float(center.get(name, 0.0))))
-                for cand in (best_angles[name] - step, best_angles[name] + step):
+                lim = _limits_of(puppet, name)
+                cands = _clip_cands([best_angles[name] - step, best_angles[name] + step], lim)
+                for cand in cands:
                     trial = work.model_copy(update={"angles": {**best_angles, name: float(cand)}})
                     new = 0.0
                     fresh: dict[str, float] = {}
@@ -809,7 +916,7 @@ def fit_chain(
     # The descent maximizes plain part sums; keep it only when the exclusive
     # joint objective agrees it did not wander back into a fold.
     descended = work.model_copy(update={"angles": dict(best_angles)})
-    if chain_objective(puppet, descended, chain, samples, feat, tau, center, blocked) < best_total:
+    if chain_objective(puppet, descended, chain, samples, feat, tau, center, blocked, explained) < best_total:
         best_angles = dict(pre_descent)
     for name in chain:
         work.angles[name] = float(best_angles[name])
@@ -1525,10 +1632,33 @@ def transition_from_poses(
             local_deg=90.0,
             frozen=frozen,
         )
+        # The X-anchored pull cannot cross a large move (its window is local):
+        # also try the chain's from-scratch fit on Y and keep whichever scores
+        # better under the transition (X-anchor) objective. Locked members stay
+        # frozen in both starts. The fresh start only wins when it is clean
+        # (every member explains itself): a coincidental partial fit of a
+        # shape-changed part must not bypass the ret below.
+        fresh = fit_chain(
+            loaded.puppet,
+            start,
+            leaf,
+            np.asarray(rgb_y, dtype=np.uint8),
+            own,
+            feat_y,
+            frozen=frozen,
+        )
+        tau_pick = _tau_for(loaded.puppet, base)
+        blocked_pick = context_blocked(loaded.puppet, start, names[leaf], own, feat_y.line.shape)
+        old_total = chain_objective(loaded.puppet, pulled, names[leaf], own, feat_y, tau_pick, anchor, blocked_pick)
+        new_total = chain_objective(loaded.puppet, fresh, names[leaf], own, feat_y, tau_pick, anchor, blocked_pick)
+        clean = all(
+            float(fresh.scores.get(m, 0.0)) >= STACK_SCORE for m in names[leaf] if not loaded.puppet.parts[m].hidden
+        )
+        best = fresh if clean and new_total > old_total else pulled
         for member in names[leaf]:
-            base.angles[member] = float(pulled.angles.get(member, 0.0))
-            base.scores[member] = float(pulled.scores.get(member, 0.0))
-            base.confidences[member] = float(pulled.confidences.get(member, 0.0))
+            base.angles[member] = float(best.angles.get(member, 0.0))
+            base.scores[member] = float(best.scores.get(member, 0.0))
+            base.confidences[member] = float(best.confidences.get(member, 0.0))
     tau = _tau_for(loaded.puppet, base)
     for name in locked:
         if name in own:
@@ -1791,14 +1921,15 @@ def fit_chain_poses(
     return summary
 
 
-def _coarse_angles(hint: float | None, window_deg: float) -> list[float]:
+def _coarse_angles(hint: float | None, window_deg: float, limits: tuple[float, float] | None = None) -> list[float]:
     if hint is None:
         start = -180.0
-        return [start + i * COARSE_STEP for i in range(int(360.0 / COARSE_STEP))]
+        cands = [start + i * COARSE_STEP for i in range(int(360.0 / COARSE_STEP))]
+        return _clip_cands(cands, limits)
     half = float(window_deg) / 2.0
     lo = float(hint) - half
     n = max(1, int(round((2.0 * half) / COARSE_STEP)) + 1)
-    return [lo + i * COARSE_STEP for i in range(n)]
+    return _clip_cands([lo + i * COARSE_STEP for i in range(n)], limits)
 
 
 def _ang_dist(a: float, b: float) -> float:
