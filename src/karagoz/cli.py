@@ -503,7 +503,90 @@ def cmd_puppet(args: argparse.Namespace) -> int:
         return cmd_puppet_build(args)
     if args.puppet_command == "build-set":
         return cmd_puppet_build_set(args)
+    if args.puppet_command == "fit":
+        return cmd_puppet_fit(args)
+    if args.puppet_command == "chain":
+        return cmd_puppet_chain(args)
+    if args.puppet_command == "transition":
+        return cmd_puppet_transition(args)
     raise ValueError(f"unknown puppet command: {args.puppet_command}")
+
+
+def cmd_puppet_fit(args: argparse.Namespace) -> int:
+    """Fit a built puppet set to one key drawing (package K-1)."""
+    from karagoz.engine.puppet.fit import fit_pose, load_drawing, write_fit_outputs
+
+    try:
+        rgb = load_drawing(Path(args.drawing))
+        pose, kept, totals = fit_pose(Path(args.set_dir), rgb)
+        loaded = kept[pose.view]
+        report = write_fit_outputs(loaded, pose, rgb, Path(args.out_dir), totals, drawing_name=Path(args.drawing).name)
+        print(f"view {pose.view} total {report['total']:.3f} -> {args.out_dir}")
+        print(f"root tx {pose.tx:.1f} ty {pose.ty:.1f} rot {pose.rotation:.1f} scale {pose.scale:.3f}")
+        for name, info in report["parts"].items():
+            print(
+                f"{name}: angle {info['angle']:+.1f} score {info['score']:.3f} "
+                f"conf {info['confidence']:.3f} chain {info['chain']}"
+            )
+        if report["needs_human"]:
+            print(f"needs human: {', '.join(report['needs_human'])}")
+        print(f"residual {report['residual_px']} px")
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_puppet_chain(args: argparse.Namespace) -> int:
+    """Fit every pose once, then every consecutive X->Y interval, in parallel (K-1)."""
+    from karagoz.engine.puppet.fit import fit_chain_poses
+
+    try:
+        paths = [Path(p) for p in args.paths]
+        if len(paths) < 3:
+            raise ValueError("chain needs at least two drawings plus the output directory")
+        *drawings, out_dir = paths
+        summary = fit_chain_poses(Path(args.set_dir), drawings, out_dir, workers=args.workers)
+        for interval in summary["intervals"]:
+            print(f"{interval['from']} -> {interval['to']}: {interval['decision']}")
+            print(f"  {interval['reason']}")
+        print(str(out_dir / "chain_summary.json"))
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_puppet_transition(args: argparse.Namespace) -> int:
+    """Fit X and Y once each, then report the X->Y transition (K-1)."""
+    from karagoz.engine.puppet.fit import (
+        fit_pose,
+        load_drawing,
+        load_view,
+        transition_from_poses,
+        write_transition_outputs,
+    )
+
+    try:
+        rgb_x = load_drawing(Path(args.x))
+        rgb_y = load_drawing(Path(args.y))
+        pose_x, _kept_x, _ = fit_pose(Path(args.set_dir), rgb_x)
+        pose_y, _kept_y, _ = fit_pose(Path(args.set_dir), rgb_y)
+        loaded = load_view(Path(args.set_dir), pose_y.view)
+        result = transition_from_poses(loaded, pose_x, pose_y, rgb_x, rgb_y)
+        doc = write_transition_outputs(
+            loaded, result, rgb_x, rgb_y, Path(args.out_dir), Path(args.x).name, Path(args.y).name
+        )
+        print(f"{args.x} -> {args.y}: {doc['decision']}")
+        print(f"locked: {', '.join(doc['locked']) or 'none'}")
+        for leaf, info in doc["changed_chains"].items():
+            deltas = ", ".join(f"{m} {d:+.1f}" for m, d in info["delta"].items())
+            print(f"changed {leaf}: {deltas}")
+        print(doc["reason"])
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
 
 
 def cmd_puppet_build(args: argparse.Namespace) -> int:
@@ -790,6 +873,19 @@ def build_parser() -> argparse.ArgumentParser:
     puppet_set.add_argument("--workers", type=int, default=None, help="parallel view workers (default: half the CPUs)")
     puppet_set.add_argument("--no-sam", action="store_true", help="skip SAM, decide by seed points alone")
     puppet_set.add_argument("--max-image-calls", type=int, default=3, help="most Muse Image fills (default 3)")
+    puppet_fit = puppet_sub.add_parser("fit", help="fit a puppet set to one key drawing (K-1)")
+    puppet_fit.add_argument("set_dir", help="built puppet set directory (set.json, views/)")
+    puppet_fit.add_argument("drawing", help="key drawing to fit (PNG)")
+    puppet_fit.add_argument("out_dir", help="output directory (fit_report.json, fit_sheet.png)")
+    puppet_chain = puppet_sub.add_parser("chain", help="fit poses once, then every X->Y interval (K-1)")
+    puppet_chain.add_argument("set_dir", help="built puppet set directory (set.json, views/)")
+    puppet_chain.add_argument("paths", nargs="+", help="X.png [X1.png ...] Y.png <out_dir>")
+    puppet_chain.add_argument("--workers", type=int, default=None, help="parallel workers (default: half the CPUs)")
+    puppet_transition = puppet_sub.add_parser("transition", help="report one X->Y transition (K-1)")
+    puppet_transition.add_argument("set_dir", help="built puppet set directory (set.json, views/)")
+    puppet_transition.add_argument("x", help="first key drawing (PNG)")
+    puppet_transition.add_argument("y", help="second key drawing (PNG)")
+    puppet_transition.add_argument("out_dir", help="output directory (transition.json, transition_sheet.png)")
     puppet_p.set_defaults(func=cmd_puppet)
 
     strip_p = sub.add_parser("strip", help="write a contact sheet of a run of video frames")

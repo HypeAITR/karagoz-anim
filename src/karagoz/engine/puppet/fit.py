@@ -1,0 +1,1808 @@
+"""Fit the layered puppet to a key drawing (package K-1).
+
+Tree order, one free angle per part once its parent is placed: ``snap_part``
+searches that angle (coarse 5 degrees, then 0.5 degree refinement) on the
+chamfer agreement of the part's lines plus the colour agreement of its flat
+fills, minus a paper penalty. Chains (limbs) are fitted jointly from the same
+score so a limb never ends up inconsistent; ``fit_pose`` does root similarity
+first, then chains, then a second pass, z order and view selection.
+``transition`` fits X and Y once each, locks unchanged parts and pulls changed
+chains from X to Y, with the rig interval gate deciding ``rig``/``split`` and
+the fit score deciding ``ret``.
+
+No paid calls: everything here is local pixels (chamfer + colour).
+"""
+
+from __future__ import annotations
+
+import json
+import math
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+import cv2
+import numpy as np
+from numpy.typing import NDArray
+from PIL import Image, ImageDraw, ImageFont
+
+from karagoz.engine.puppet.model import Puppet, load_set
+from karagoz.engine.puppet.parts import line_mask
+from karagoz.engine.puppet.pose import Pose, chains, part_matrix3, render_pose, tree_order, z_order
+from karagoz.engine.rig.plan import (
+    DEVIATION_THRESHOLD,
+    JUMP_THRESHOLD,
+    MAX_EXTRA_KEYS,
+    SCALE_LIMIT,
+)
+
+LINE_LUMA = 25.0
+PAPER_LUMA = 235.0
+COLOUR_TAU = 60.0
+W_LINE = 1.0
+W_COLOUR = 0.5
+W_PAPER = 1.0
+MAX_LINE_PTS = 4000
+MAX_FLAT_PTS = 4000
+MAX_COVER_PTS = 30000
+ROOT_MAX_FLAT = 1200
+COARSE_STEP = 5.0
+FINE_STEP = 0.5
+FINE_RANGE = 5.0
+# A "separate peak" is a distinctly different configuration, not the shoulder
+# of the same optimum: small parts have broad plateaus around the best angle,
+# while a hidden or symmetric part scores the same all the way around.
+PEAK_SEP_DEG = 45.0
+CONF_MIN = 0.04
+SCORE_MIN = 0.25
+# A stacked part (folded limb, hidden part parked visibly) shares most pixels
+# with a sibling yet still matches colours there: overlap past OVERLAP_MAX
+# with a score below STACK_SCORE means it explains nothing of its own.
+# True placements stay under 0.3 overlap (seams); clean scores clear 1.1.
+OVERLAP_MAX = 0.5
+STACK_SCORE = 1.0
+SECOND_PASS = True
+
+
+@dataclass
+class SnapResult:
+    """One part snapped: best angle, its score and the peak gap (confidence)."""
+
+    angle: float
+    score: float
+    confidence: float
+    scores: dict[float, float] = field(default_factory=dict)
+
+
+@dataclass
+class DrawingFeatures:
+    rgb: NDArray[np.uint8]
+    line: NDArray[np.bool_]
+    dist: NDArray[np.float32]
+    paper: NDArray[np.bool_]
+
+
+@dataclass
+class PartSamples:
+    line_xy: NDArray[np.float64]
+    flat_xy: NDArray[np.float64]
+    flat_rgb: NDArray[np.uint8]
+    cover_xy: NDArray[np.float64]
+
+
+def load_drawing(path: Path) -> NDArray[np.uint8]:
+    """Key drawing as RGB (alpha composited onto white paper)."""
+    with Image.open(path) as opened:
+        rgba = opened.convert("RGBA")
+    bg = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+    flat = Image.alpha_composite(bg, rgba).convert("RGB")
+    return np.asarray(flat, dtype=np.uint8)
+
+
+def drawing_features(rgb: NDArray[np.uint8]) -> DrawingFeatures:
+    """Line mask, chamfer distance to the lines and paper mask of a drawing."""
+    line = np.asarray(line_mask(np.asarray(rgb, dtype=np.uint8), LINE_LUMA), dtype=np.bool_)
+    bg = np.asarray((~line).astype(np.uint8), dtype=np.uint8)
+    dist = np.asarray(cv2.distanceTransform(bg, cv2.DIST_L2, 3), dtype=np.float32)
+    luma = np.asarray(rgb.astype(np.float32) @ np.array([0.299, 0.587, 0.114], np.float32))
+    paper = np.asarray((luma >= PAPER_LUMA) & ~line, dtype=np.bool_)
+    return DrawingFeatures(rgb=np.asarray(rgb, dtype=np.uint8), line=line, dist=dist, paper=paper)
+
+
+def _stride(n: int, cap: int) -> int:
+    if n <= cap or n == 0:
+        return 1
+    return int(math.ceil(n / cap))
+
+
+def extract_part_samples(
+    puppet: Puppet,
+    images: dict[str, NDArray[np.uint8]],
+    *,
+    max_line: int = MAX_LINE_PTS,
+    max_flat: int = MAX_FLAT_PTS,
+) -> dict[str, PartSamples]:
+    """Sparse line/flat points per part in reference pixels (+ own colours)."""
+    out: dict[str, PartSamples] = {}
+    for name, part in puppet.parts.items():
+        img = images.get(name)
+        if part.hidden or img is None or img.ndim != 3 or img.shape[2] != 4:
+            out[name] = PartSamples(
+                line_xy=np.zeros((0, 2), np.float64),
+                flat_xy=np.zeros((0, 2), np.float64),
+                flat_rgb=np.zeros((0, 3), np.uint8),
+                cover_xy=np.zeros((0, 2), np.float64),
+            )
+            continue
+        alpha = np.asarray(img[..., 3] > 127, dtype=np.bool_)
+        rgb = np.asarray(img[..., :3], dtype=np.uint8)
+        ink = np.asarray(line_mask(np.asarray(rgb, dtype=np.uint8), LINE_LUMA) & alpha, dtype=np.bool_)
+        flat = np.asarray(alpha & ~ink, dtype=np.bool_)
+        lys, lxs = np.nonzero(ink)
+        fys, fxs = np.nonzero(flat)
+        ays, axs = np.nonzero(alpha)
+        st = _stride(len(lxs), max_line)
+        ft = _stride(len(fxs), max_flat)
+        ct = _stride(len(axs), MAX_COVER_PTS)
+        if len(lxs):
+            line_xy = np.stack([lxs[::st].astype(np.float64), lys[::st].astype(np.float64)], axis=1)
+        else:
+            line_xy = np.zeros((0, 2), np.float64)
+        if len(fxs):
+            flat_xy = np.stack([fxs[::ft].astype(np.float64), fys[::ft].astype(np.float64)], axis=1)
+            flat_rgb = np.asarray(rgb[fys[::ft], fxs[::ft]], dtype=np.uint8)
+        else:
+            flat_xy = np.zeros((0, 2), np.float64)
+            flat_rgb = np.zeros((0, 3), np.uint8)
+        if len(axs):
+            cover_xy = np.stack([axs[::ct].astype(np.float64), ays[::ct].astype(np.float64)], axis=1)
+        else:
+            cover_xy = np.zeros((0, 2), np.float64)
+        out[name] = PartSamples(line_xy=line_xy, flat_xy=flat_xy, flat_rgb=flat_rgb, cover_xy=cover_xy)
+    return out
+
+
+def _warp_points(xy: NDArray[np.float64], mat2x3: NDArray[np.float64]) -> NDArray[np.float64]:
+    if len(xy) == 0:
+        return np.zeros((0, 2), np.float64)
+    m = np.asarray(mat2x3, dtype=np.float64)
+    ones = np.ones((len(xy), 1), np.float64)
+    homo = np.concatenate([xy, ones], axis=1)
+    return np.asarray(homo @ m.T, dtype=np.float64)
+
+
+def _bilinear(
+    field: NDArray[np.float64], x: NDArray[np.float64], y: NDArray[np.float64], outside: float
+) -> NDArray[np.float64]:
+    """Bilinear samples of a 2D float field at subpixel positions."""
+    height, width = field.shape
+    x0 = np.floor(x).astype(np.int64)
+    y0 = np.floor(y).astype(np.int64)
+    fx = x - x0
+    fy = y - y0
+    valid = (x0 >= 0) & (y0 >= 0) & (x0 + 1 < width) & (y0 + 1 < height)
+    xs = np.clip(x0, 0, width - 1)
+    ys = np.clip(y0, 0, height - 1)
+    xn = np.minimum(xs + 1, width - 1)
+    yn = np.minimum(ys + 1, height - 1)
+    val = (
+        (1.0 - fx) * (1.0 - fy) * field[ys, xs]
+        + fx * (1.0 - fy) * field[ys, xn]
+        + (1.0 - fx) * fy * field[yn, xs]
+        + fx * fy * field[yn, xn]
+    )
+    return np.asarray(np.where(valid, val, outside), dtype=np.float64)
+
+
+def _warp_batch(xy: NDArray[np.float64], mats: NDArray[np.float64]) -> NDArray[np.float64]:
+    """Warp points by a stack of 2x3 matrices: (N, 2) and (K, 2, 3) -> (K, N, 2)."""
+    homo = np.concatenate([np.asarray(xy, dtype=np.float64), np.ones((len(xy), 1), np.float64)], axis=1)
+    return np.asarray(np.einsum("kij,nj->kni", np.asarray(mats, dtype=np.float64), homo), dtype=np.float64)
+
+
+def batch_scores(
+    samp: PartSamples,
+    mats: NDArray[np.float64],
+    feat: DrawingFeatures,
+    tau: float,
+    explained: NDArray[np.bool_] | None = None,
+) -> list[float]:
+    """Score one part under many candidate matrices at once.
+
+    The point transforms and bilinear lookups run stacked, so a 72-angle
+    sweep costs about as much as a few single scores.
+    """
+    mats = np.asarray(mats, dtype=np.float64).reshape(-1, 2, 3)
+    total = np.zeros(mats.shape[0], np.float64)
+    height, width = feat.line.shape
+    dist_f = np.asarray(feat.dist, dtype=np.float64)
+    paper_f = np.asarray(feat.paper.astype(np.float64), dtype=np.float64)
+    rgb_f = np.asarray(feat.rgb.astype(np.float64), dtype=np.float64)
+    if len(samp.line_xy):
+        coords = _warp_batch(samp.line_xy, mats).reshape(-1, 2)
+        dist = _bilinear(dist_f, coords[:, 0], coords[:, 1], 50.0).reshape(mats.shape[0], -1)
+        if explained is not None:
+            xi = np.round(coords[:, 0]).astype(np.int64).reshape(mats.shape[0], -1)
+            yi = np.round(coords[:, 1]).astype(np.int64).reshape(mats.shape[0], -1)
+            for k in range(mats.shape[0]):
+                valid = (xi[k] >= 0) & (yi[k] >= 0) & (xi[k] < width) & (yi[k] < height)
+                hit = np.zeros(xi.shape[1], np.bool_)
+                hit[valid] = np.asarray(explained[yi[k][valid], xi[k][valid]], dtype=np.bool_)
+                dist[k][hit] = 50.0
+        total += W_LINE * np.mean(np.exp(-dist / max(tau, 1e-6)), axis=1)
+    if len(samp.flat_xy):
+        coords = _warp_batch(samp.flat_xy, mats).reshape(-1, 2)
+        x, y = coords[:, 0], coords[:, 1]
+        drawn = np.stack([_bilinear(rgb_f[..., c], x, y, 255.0) for c in range(3)], axis=1)
+        drawn = drawn.reshape(mats.shape[0], -1, 3)
+        own = np.asarray(samp.flat_rgb.astype(np.float64))
+        cd = np.mean(np.abs(drawn - own[None, :, :]), axis=2)
+        agree = np.exp(-cd / COLOUR_TAU)
+        if explained is not None:
+            xi = np.round(x).astype(np.int64).reshape(mats.shape[0], -1)
+            yi = np.round(y).astype(np.int64).reshape(mats.shape[0], -1)
+            for k in range(mats.shape[0]):
+                valid = (xi[k] >= 0) & (yi[k] >= 0) & (xi[k] < width) & (yi[k] < height)
+                covered = np.zeros(xi.shape[1], np.bool_)
+                covered[valid] = np.asarray(explained[yi[k][valid], xi[k][valid]], dtype=np.bool_)
+                agree[k][covered] = 0.0
+        paper_hit = _bilinear(paper_f, x, y, 1.0).reshape(mats.shape[0], -1)
+        total += W_COLOUR * np.mean(agree, axis=1) - W_PAPER * np.mean(paper_hit, axis=1)
+    return [float(v) for v in total]
+
+
+def score_samples(
+    samp: PartSamples,
+    mat2x3: NDArray[np.float64],
+    feat: DrawingFeatures,
+    tau: float,
+    explained: NDArray[np.bool_] | None = None,
+) -> float:
+    """Chamfer + colour agreement minus paper penalty (higher is better).
+
+    ``explained`` marks drawing pixels other placed parts already cover: for
+    ``fill_last`` samples landing there count as misses (the hole is the
+    unexplained rest).
+    """
+    height, width = feat.line.shape
+    dist_f = np.asarray(feat.dist, dtype=np.float64)
+    paper_f = np.asarray(feat.paper.astype(np.float64), dtype=np.float64)
+    rgb_f = np.asarray(feat.rgb.astype(np.float64), dtype=np.float64)
+    total = 0.0
+    weight = 0.0
+    if len(samp.line_xy):
+        warped = _warp_points(samp.line_xy, mat2x3)
+        x, y = warped[:, 0], warped[:, 1]
+        dist = _bilinear(dist_f, x, y, 50.0)
+        if explained is not None:
+            xi = np.round(x).astype(np.int64)
+            yi = np.round(y).astype(np.int64)
+            valid = (xi >= 0) & (yi >= 0) & (xi < width) & (yi < height)
+            hit = np.zeros(len(x), np.bool_)
+            hit[valid] = np.asarray(explained[yi[valid], xi[valid]], dtype=np.bool_)
+            dist[hit] = 50.0
+        line_agree = float(np.mean(np.exp(-dist / max(tau, 1e-6)))) if len(dist) else 0.0
+        total += W_LINE * line_agree
+        weight += W_LINE
+    if len(samp.flat_xy):
+        warped = _warp_points(samp.flat_xy, mat2x3)
+        x, y = warped[:, 0], warped[:, 1]
+        drawn = np.stack(
+            [_bilinear(rgb_f[..., c], x, y, 255.0) for c in range(3)],
+            axis=1,
+        )
+        own = np.asarray(samp.flat_rgb.astype(np.float64))
+        cd = np.mean(np.abs(drawn - own), axis=1)
+        agree = np.exp(-cd / COLOUR_TAU)
+        if explained is not None:
+            xi = np.round(x).astype(np.int64)
+            yi = np.round(y).astype(np.int64)
+            valid = (xi >= 0) & (yi >= 0) & (xi < width) & (yi < height)
+            covered = np.zeros(len(x), np.bool_)
+            covered[valid] = np.asarray(explained[yi[valid], xi[valid]], dtype=np.bool_)
+            agree[covered] = 0.0
+        paper_hit = _bilinear(paper_f, x, y, 1.0)
+        colour_agree = float(np.mean(agree)) if len(agree) else 0.0
+        paper_frac = float(np.mean(paper_hit)) if len(paper_hit) else 0.0
+        total += W_COLOUR * colour_agree - W_PAPER * paper_frac
+        weight += W_COLOUR + W_PAPER
+    if weight == 0:
+        return 0.0
+    return float(total)
+
+
+def _tau_for(puppet: Puppet, pose: Pose) -> float:
+    return float(max(2.0, float(puppet.line_width_px) * float(pose.scale)))
+
+
+def _matrix_for(puppet: Puppet, pose: Pose, part: str, angle: float) -> NDArray[np.float64]:
+    trial = pose.model_copy(update={"angles": {**pose.angles, part: float(angle)}})
+    return np.asarray(part_matrix3(puppet, trial, part)[:2], dtype=np.float64)
+
+
+def snap_part(
+    puppet: Puppet,
+    pose: Pose,
+    part: str,
+    drawing: NDArray[np.uint8],
+    samples: dict[str, PartSamples] | None = None,
+    features: DrawingFeatures | None = None,
+    *,
+    hint_deg: float | None = None,
+    window_deg: float = 180.0,
+    explained: NDArray[np.bool_] | None = None,
+) -> SnapResult:
+    """Snap one part: search its angle about its pivot, ancestors fixed.
+
+    Coarse ``COARSE_STEP`` sweep (full circle without a hint, else
+    ``hint_deg +/- window_deg/2``), then ``FINE_STEP`` refinement around the
+    best few. The score is the part's own chamfer + colour minus paper (see
+    :func:`score_samples`); confidence is the gap to the best separate peak.
+    """
+    feat = features if features is not None else drawing_features(np.asarray(drawing, dtype=np.uint8))
+    samp = samples[part] if samples is not None and part in samples else None
+    if samp is None:
+        raise ValueError(f"no samples for part {part!r}")
+    tau = _tau_for(puppet, pose)
+    coarse = _coarse_angles(hint_deg, window_deg)
+    mats = np.stack([_matrix_for(puppet, pose, part, angle) for angle in coarse])
+    scores = {float(a): v for a, v in zip(coarse, batch_scores(samp, mats, feat, tau, explained), strict=True)}
+    ordered = sorted(scores, key=lambda a: scores[a], reverse=True)
+    seeds: list[float] = []
+    for cand in ordered:
+        if all(_ang_dist(float(cand), float(s)) >= 2 * COARSE_STEP for s in seeds):
+            seeds.append(float(cand))
+        if len(seeds) >= 3:
+            break
+    best_angle = float(ordered[0])
+    best_score = float(scores[best_angle])
+    for seed in seeds:
+        angle = seed - FINE_RANGE
+        while angle <= seed + FINE_RANGE + 1e-9:
+            key = round(float(angle), 1)
+            if key not in scores:
+                scores[key] = score_samples(samp, _matrix_for(puppet, pose, part, angle), feat, tau, explained)
+            if scores[key] > best_score:
+                best_score = float(scores[key])
+                best_angle = float(key)
+            angle += FINE_STEP
+    gap = _second_peak_gap(scores, best_angle)
+    return SnapResult(angle=best_angle, score=best_score, confidence=gap, scores=scores)
+
+
+def explained_mask(
+    puppet: Puppet,
+    pose: Pose,
+    samples: dict[str, PartSamples],
+    shape: tuple[int, int],
+    skip: str | None = None,
+) -> NDArray[np.bool_]:
+    """Drawing pixels some placed part (except ``skip``) covers."""
+    height, width = shape
+    cover = np.zeros((height, width), np.bool_)
+    for name, samp in samples.items():
+        if name == skip or len(samp.flat_xy) == 0:
+            continue
+        mat = np.asarray(part_matrix3(puppet, pose, name)[:2], dtype=np.float64)
+        warped = _warp_points(samp.flat_xy, mat)
+        xi = np.round(warped[:, 0]).astype(np.int64)
+        yi = np.round(warped[:, 1]).astype(np.int64)
+        valid = (xi >= 0) & (yi >= 0) & (xi < width) & (yi < height)
+        cover[yi[valid], xi[valid]] = True
+    line_cover = np.zeros((height, width), np.bool_)
+    for name, samp in samples.items():
+        if name == skip or len(samp.line_xy) == 0:
+            continue
+        mat = np.asarray(part_matrix3(puppet, pose, name)[:2], dtype=np.float64)
+        warped = _warp_points(samp.line_xy, mat)
+        xi = np.round(warped[:, 0]).astype(np.int64)
+        yi = np.round(warped[:, 1]).astype(np.int64)
+        valid = (xi >= 0) & (yi >= 0) & (xi < width) & (yi < height)
+        line_cover[yi[valid], xi[valid]] = True
+    grown = (
+        np.asarray(
+            cv2.dilate(cover.astype(np.uint8), cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))),
+            dtype=np.uint8,
+        )
+        > 0
+    )
+    return np.asarray(grown | line_cover, dtype=np.bool_)
+
+
+def fill_last(
+    puppet: Puppet,
+    pose: Pose,
+    part: str,
+    drawing: NDArray[np.uint8],
+    samples: dict[str, PartSamples] | None = None,
+    features: DrawingFeatures | None = None,
+    *,
+    hint_deg: float | None = None,
+    window_deg: float = 360.0,
+) -> SnapResult:
+    """Place the jigsaw's last piece into the hole the other parts leave.
+
+    The score runs on the unexplained pixels only: samples landing on pixels
+    already covered by placed parts count as misses (see :func:`score_samples`).
+    """
+    feat = features if features is not None else drawing_features(np.asarray(drawing, dtype=np.uint8))
+    if samples is None:
+        raise ValueError("fill_last needs part samples")
+    hole = ~explained_mask(puppet, pose, samples, feat.line.shape, skip=part)
+    return snap_part(
+        puppet, pose, part, feat.rgb, samples, feat, hint_deg=hint_deg, window_deg=window_deg, explained=~hole
+    )
+
+
+REST_PRIOR = 0.0005
+STACK_PENALTY = 0.25
+
+
+def context_blocked(
+    puppet: Puppet,
+    pose: Pose,
+    chain: list[str],
+    samples: dict[str, PartSamples],
+    shape: tuple[int, int],
+) -> NDArray[np.bool_]:
+    """Drawing pixels the already-placed parts outside ``chain`` cover.
+
+    The torso and the fitted chains claim their pixels first, so a chain
+    candidate cannot parasitize them (a folded limb stacked on the torso
+    gains nothing). Unfitted chains sit at rest; their wrong pixels mostly
+    land on paper, which penalizes candidates there anyway.
+    """
+    height, width = shape
+    blocked = np.zeros(height * width, np.bool_)
+    for name, samp in samples.items():
+        if name in chain or len(samp.cover_xy) == 0:
+            continue
+        mat = np.asarray(part_matrix3(puppet, pose, name)[:2], dtype=np.float64)
+        keys = _pixel_keys(_warp_points(samp.cover_xy, mat), height, width)
+        blocked[keys[keys >= 0]] = True
+    return blocked
+
+
+def exclusive_total(
+    puppet: Puppet,
+    pose: Pose,
+    chain: list[str],
+    samples: dict[str, PartSamples],
+    feat: DrawingFeatures,
+    tau: float,
+    blocked: NDArray[np.bool_] | None = None,
+) -> float:
+    """One chain's joint score with exclusive pixel ownership.
+
+    Each drawing pixel is explained once (top part wins, z order): a folded
+    limb stacked on the same drawn pixels gains nothing for the extra parts,
+    while a clean placement explains every part's own pixels. Parts with
+    samples but no owned pixels left score ``-STACK_PENALTY``.
+    """
+    height, width = feat.line.shape
+    dist_f = np.asarray(feat.dist, dtype=np.float64)
+    paper_f = np.asarray(feat.paper.astype(np.float64), dtype=np.float64)
+    rgb_f = np.asarray(feat.rgb.astype(np.float64), dtype=np.float64)
+    members = [m for m in reversed(z_order(puppet, pose)) if m in chain and m in samples]
+    coords: dict[str, tuple[NDArray[np.float64], NDArray[np.float64]]] = {}
+    for name in members:
+        samp = samples[name]
+        mat = np.asarray(part_matrix3(puppet, pose, name)[:2], dtype=np.float64)
+        coords[name] = (_warp_points(samp.line_xy, mat), _warp_points(samp.flat_xy, mat))
+    owner = np.zeros(height * width, np.int8)
+    if blocked is not None:
+        owner[np.asarray(blocked, dtype=np.bool_)] = 1
+    total = 0.0
+    for name in members:
+        samp = samples[name]
+        line_xy, flat_xy = coords[name]
+        line_idx = _pixel_keys(line_xy, height, width)
+        flat_idx = _pixel_keys(flat_xy, height, width)
+        owned_line = line_idx >= 0
+        owned_flat = flat_idx >= 0
+        owned_line[owned_line] = owner[line_idx[owned_line]] == 0
+        owned_flat[owned_flat] = owner[flat_idx[owned_flat]] == 0
+        owner[line_idx[line_idx >= 0]] = 1
+        owner[flat_idx[flat_idx >= 0]] = 1
+        if (len(line_xy) + len(flat_xy)) > 0 and int(owned_line.sum()) + int(owned_flat.sum()) == 0:
+            total -= STACK_PENALTY
+            continue
+        if int(owned_line.sum()):
+            dist = _bilinear(dist_f, line_xy[owned_line, 0], line_xy[owned_line, 1], 50.0)
+            total += W_LINE * float(np.mean(np.exp(-dist / max(tau, 1e-6))))
+        if int(owned_flat.sum()):
+            own_xy = flat_xy[owned_flat]
+            drawn = np.stack([_bilinear(rgb_f[..., c], own_xy[:, 0], own_xy[:, 1], 255.0) for c in range(3)], axis=1)
+            own = np.asarray(samp.flat_rgb[owned_flat].astype(np.float64))
+            cd = np.mean(np.abs(drawn - own), axis=1)
+            paper_hit = _bilinear(paper_f, own_xy[:, 0], own_xy[:, 1], 1.0)
+            total += W_COLOUR * float(np.mean(np.exp(-cd / COLOUR_TAU))) - W_PAPER * float(np.mean(paper_hit))
+        n_out = int((len(line_xy) - int((line_idx >= 0).sum())) + (len(flat_xy) - int((flat_idx >= 0).sum())))
+        if n_out:
+            total -= W_PAPER * n_out / max(len(line_xy) + len(flat_xy), 1)
+    return total
+
+
+def _pixel_keys(xy: NDArray[np.float64], height: int, width: int) -> NDArray[np.int64]:
+    """Flat drawing-pixel keys for warped points, -1 outside the canvas."""
+    if len(xy) == 0:
+        return np.zeros(0, np.int64)
+    xi = np.round(xy[:, 0]).astype(np.int64)
+    yi = np.round(xy[:, 1]).astype(np.int64)
+    valid = (xi >= 0) & (yi >= 0) & (xi < width) & (yi < height)
+    keys = np.full(len(xy), -1, np.int64)
+    keys[valid] = yi[valid] * width + xi[valid]
+    return keys
+
+
+def chain_objective(
+    puppet: Puppet,
+    pose: Pose,
+    chain: list[str],
+    samples: dict[str, PartSamples],
+    feat: DrawingFeatures,
+    tau: float,
+    center: dict[str, float] | None = None,
+    blocked: NDArray[np.bool_] | None = None,
+) -> float:
+    """The joint objective a chain fit maximizes: exclusive pixels, ties to rest.
+
+    Near-symmetric configurations can score almost the same; the tiny rest
+    prior picks the clean one. With a transition anchor the centre is X's
+    angles (continuity) instead of rest.
+    """
+    total = exclusive_total(puppet, pose, chain, samples, feat, tau, blocked)
+    for name in chain:
+        target = float(center[name]) if center is not None and name in center else 0.0
+        total -= REST_PRIOR * abs(_ang_dist(float(pose.angles.get(name, 0.0)), target))
+    return total
+
+
+def _part_confidence(
+    puppet: Puppet,
+    pose: Pose,
+    part: str,
+    samples: dict[str, PartSamples],
+    feat: DrawingFeatures,
+    tau: float,
+) -> tuple[float, float]:
+    """Score + full-circle second-peak gap for one part, others fixed."""
+    samp = samples[part]
+    steps: list[float] = []
+    angle = 0.0
+    while angle < 360.0:
+        steps.append(float(angle))
+        angle += 15.0
+    mats = np.stack([_matrix_for(puppet, pose, part, a) for a in steps])
+    scores = {a: v for a, v in zip(steps, batch_scores(samp, mats, feat, tau, None), strict=True)}
+    cur_score = score_samples(samp, np.asarray(part_matrix3(puppet, pose, part)[:2], dtype=np.float64), feat, tau, None)
+    ordered = sorted(scores, key=lambda a: scores[a], reverse=True)
+    gap = _second_peak_gap(scores, float(ordered[0]))
+    return cur_score, gap
+
+
+def _sweep_cands(current: float, local_deg: float | None) -> list[float]:
+    if local_deg is None:
+        cands: list[float] = []
+        angle = -180.0
+        while angle < 180.0:
+            cands.append(float(angle))
+            angle += 15.0
+        return cands
+    cands = [float(current)]
+    step = 10.0
+    k = step
+    while k <= local_deg + 1e-9:
+        cands += [float(current - k), float(current + k)]
+        k += step
+    return cands
+
+
+def _greedy_from(
+    puppet: Puppet,
+    work: Pose,
+    chain: list[str],
+    from_angles: dict[str, float],
+    samples: dict[str, PartSamples],
+    feat: DrawingFeatures,
+    tau: float,
+    center: dict[str, float],
+    local_deg: float | None,
+    blocked: NDArray[np.bool_] | None,
+    pair_grid: bool = False,
+    frozen: dict[str, float] | None = None,
+) -> tuple[dict[str, float], float]:
+    """Forward greedy: each joint takes the angle that best serves its downstream.
+
+    Candidates compete for unexplained pixels only (exclusive ownership): the
+    rest prior (or the transition anchor) breaks near-ties toward the clean
+    configuration. With ``pair_grid`` the first two joints (shoulder/hip
+    complex, sharing one rotation no single-joint sweep can compose) go first
+    on a coarse 2D grid. ``frozen`` members keep their angle throughout (a
+    transition pull freezing the locked members of a changed chain).
+    """
+    stay = dict(frozen or {})
+    best = dict(from_angles)
+    for name, angle in stay.items():
+        best[name] = float(angle)
+    if pair_grid and len(chain) >= 2:
+        first, second = chain[0], chain[1]
+        free = [m for m in (first, second) if m not in stay]
+        grid = [float(v) for v in range(-180, 180, 45)]
+        if len(free) == 2:
+            top = (-math.inf, 0.0, 0.0)
+            for a in grid:
+                for b in grid:
+                    trial = work.model_copy(update={"angles": {**best, first: a, second: b}})
+                    value = exclusive_total(puppet, trial, chain, samples, feat, tau, blocked)
+                    value -= REST_PRIOR * (
+                        abs(_ang_dist(a, float(center.get(first, 0.0))))
+                        + abs(_ang_dist(b, float(center.get(second, 0.0))))
+                    )
+                    if value > top[0]:
+                        top = (value, a, b)
+            best[first], best[second] = float(top[1]), float(top[2])
+        elif len(free) == 1:
+            name = free[0]
+            solo = (-math.inf, 0.0)
+            for a in grid:
+                trial = work.model_copy(update={"angles": {**best, name: a}})
+                value = exclusive_total(puppet, trial, chain, samples, feat, tau, blocked)
+                value -= REST_PRIOR * abs(_ang_dist(a, float(center.get(name, 0.0))))
+                if value > solo[0]:
+                    solo = (value, a)
+            best[name] = float(solo[1])
+    for name in chain:
+        if name in stay:
+            continue
+        cands = _sweep_cands(float(best.get(name, 0.0)), local_deg)
+        target = float(center.get(name, 0.0))
+        vals: list[float] = []
+        for a in cands:
+            trial = work.model_copy(update={"angles": {**best, name: float(a)}})
+            vals.append(
+                exclusive_total(puppet, trial, chain, samples, feat, tau, blocked)
+                - REST_PRIOR * abs(_ang_dist(float(a), target))
+            )
+        best[name] = float(cands[int(np.argmax(np.asarray(vals, dtype=np.float64)))])
+    trial = work.model_copy(update={"angles": dict(best)})
+    return best, chain_objective(puppet, trial, chain, samples, feat, tau, center, blocked)
+
+
+def fit_chain(
+    puppet: Puppet,
+    pose: Pose,
+    chain_name: str,
+    drawing: NDArray[np.uint8],
+    samples: dict[str, PartSamples] | None = None,
+    features: DrawingFeatures | None = None,
+    *,
+    anchor: dict[str, float] | None = None,
+    local_deg: float | None = None,
+    frozen: dict[str, float] | None = None,
+) -> Pose:
+    """Fit a whole limb jointly (2-5 angles).
+
+    Part-by-part snaps first (the baseline), then forward greedy runs from the
+    baseline and — for a fit from scratch — from rest zeros, then coordinate
+    descent; the best joint objective wins, so the chain fit is never worse
+    than part-by-part on the same drawing. An unobservable carrier joint (an
+    elbow ring) can poison the baseline with a wild angle its descendants then
+    compensate; the from-rest greedy does not inherit that mistake. Without a
+    keypoint model the limb end comes from the chain's own chamfer search;
+    single-part snapping stays for the human's Shift-snap and low-confidence
+    parts. A transition pull passes ``anchor`` (X's angles) and a narrow
+    ``local_deg`` window so the chain stays near X. ``frozen`` pins members to
+    fixed angles (the locked members of a changed chain): they keep their
+    angle through the baseline, the greedy and the descent, so the pull only
+    moves what the difference map unlocked.
+    """
+    feat = features if features is not None else drawing_features(np.asarray(drawing, dtype=np.uint8))
+    if samples is None:
+        raise ValueError("fit_chain needs part samples")
+    names = chains(puppet)
+    if chain_name not in names:
+        raise ValueError(f"unknown chain {chain_name!r} (known: {sorted(names)})")
+    chain = names[chain_name]
+    stay = {m: float(v) for m, v in (frozen or {}).items() if m in chain}
+    center = {m: float(anchor[m]) if anchor is not None and m in anchor else 0.0 for m in chain}
+    tau = _tau_for(puppet, pose)
+    work = pose.model_copy(deep=True)
+    for name, angle in stay.items():
+        work.angles[name] = float(angle)
+    # Baseline: part by part in tree order.
+    for name in chain:
+        if name in stay:
+            continue
+        if local_deg is None:
+            res = snap_part(puppet, work, name, feat.rgb, samples, feat)
+        else:
+            res = snap_part(
+                puppet,
+                work,
+                name,
+                feat.rgb,
+                samples,
+                feat,
+                hint_deg=float(work.angles.get(name, 0.0)),
+                window_deg=float(local_deg),
+            )
+        work.angles[name] = float(res.angle)
+        work.scores[name] = float(res.score)
+        work.confidences[name] = float(res.confidence)
+    blocked = context_blocked(puppet, work, chain, samples, feat.line.shape)
+    best_angles = dict(work.angles)
+    best_total = chain_objective(
+        puppet, work.model_copy(update={"angles": dict(best_angles)}), chain, samples, feat, tau, center, blocked
+    )
+    if anchor is None:
+        # From scratch the partwise baseline can inherit one wild carrier
+        # joint (an elbow ring) that its descendants then compensate, so the
+        # global greedy restarts from rest zeros with the pair grid on.
+        zeros = {m: 0.0 for m in chain}
+        greedy, value = _greedy_from(
+            puppet, work, chain, zeros, samples, feat, tau, center, local_deg, blocked, pair_grid=True, frozen=stay
+        )
+    else:
+        # A transition pull stays near X: greedy restarts from the baseline
+        # with the narrow local window.
+        greedy, value = _greedy_from(
+            puppet, work, chain, best_angles, samples, feat, tau, center, local_deg, blocked, frozen=stay
+        )
+    if value > best_total:
+        best_total, best_angles = value, greedy
+    # Coordinate descent on the joint objective. Turning one joint only moves
+    # its downstream members, so candidates re-score just those (cached plain
+    # sums for the rest); only the turned joint's prior term changes.
+    part_score: dict[str, float] = {}
+    settled = work.model_copy(update={"angles": dict(best_angles)})
+    for member in chain:
+        mat = np.asarray(part_matrix3(puppet, settled, member)[:2], dtype=np.float64)
+        part_score[member] = score_samples(samples[member], mat, feat, tau, None)
+    best_plain = float(sum(part_score.values()))
+    best_prior = REST_PRIOR * sum(
+        abs(_ang_dist(float(best_angles.get(m, 0.0)), float(center.get(m, 0.0)))) for m in chain
+    )
+    pre_descent = dict(best_angles)
+    for step in (5.0, 2.0, 0.5, 0.25):
+        improved = True
+        sweeps = 0
+        while improved and sweeps < 4:
+            improved = False
+            sweeps += 1
+            for j, name in enumerate(chain):
+                if name in stay:
+                    continue
+                affected = chain[j:]
+                old_term = REST_PRIOR * abs(_ang_dist(float(best_angles[name]), float(center.get(name, 0.0))))
+                for cand in (best_angles[name] - step, best_angles[name] + step):
+                    trial = work.model_copy(update={"angles": {**best_angles, name: float(cand)}})
+                    new = 0.0
+                    fresh: dict[str, float] = {}
+                    for member in affected:
+                        mat = np.asarray(part_matrix3(puppet, trial, member)[:2], dtype=np.float64)
+                        fresh[member] = score_samples(samples[member], mat, feat, tau, None)
+                        new += fresh[member]
+                    old = sum(part_score[m] for m in affected)
+                    new_term = REST_PRIOR * abs(_ang_dist(float(cand), float(center.get(name, 0.0))))
+                    if best_plain - old + new - (best_prior - old_term + new_term) > best_plain - best_prior:
+                        best_plain = best_plain - old + new
+                        best_prior = best_prior - old_term + new_term
+                        best_angles[name] = float(cand)
+                        part_score.update(fresh)
+                        improved = True
+    # The descent maximizes plain part sums; keep it only when the exclusive
+    # joint objective agrees it did not wander back into a fold.
+    descended = work.model_copy(update={"angles": dict(best_angles)})
+    if chain_objective(puppet, descended, chain, samples, feat, tau, center, blocked) < best_total:
+        best_angles = dict(pre_descent)
+    for name in chain:
+        work.angles[name] = float(best_angles[name])
+    for name in chain:
+        score, gap = _part_confidence(puppet, work, name, samples, feat, tau)
+        work.scores[name] = float(score)
+        work.confidences[name] = float(gap)
+    return work
+
+
+def fit_root(
+    puppet: Puppet,
+    pose: Pose,
+    drawing: NDArray[np.uint8],
+    samples: dict[str, PartSamples] | None = None,
+    features: DrawingFeatures | None = None,
+) -> Pose:
+    """Root similarity from the torso: multi-start chamfer search, then refine."""
+    feat = features if features is not None else drawing_features(np.asarray(drawing, dtype=np.uint8))
+    if samples is None:
+        raise ValueError("fit_root needs part samples")
+    root = puppet.root
+    full = samples[root]
+    # The root search evaluates thousands of candidates: thin the torso flats.
+    stride = _stride(len(full.flat_xy), ROOT_MAX_FLAT)
+    samp = PartSamples(
+        line_xy=full.line_xy,
+        flat_xy=full.flat_xy[::stride],
+        flat_rgb=full.flat_rgb[::stride],
+        cover_xy=full.cover_xy,
+    )
+    pw, ph = int(puppet.canvas[0]), int(puppet.canvas[1])
+    dh, dw = feat.line.shape
+    scale0 = min(dw / max(pw, 1), dh / max(ph, 1))
+    pivot = puppet.parts[root].pivot
+    cx, cy = float(pivot[0]), float(pivot[1])
+    dcx, dcy = dw / 2.0, dh / 2.0
+    pcx, pcy = pw / 2.0, ph / 2.0
+    t0x = dcx - (scale0 * (pcx - cx) + cx)
+    t0y = dcy - (scale0 * (pcy - cy) + cy)
+    span = max(24.0, 0.08 * max(dw, dh))
+    work = pose.model_copy(deep=True)
+
+    def root_score(scale: float, rot: float, tx: float, ty: float) -> float:
+        trial = work.model_copy(
+            update={"scale": float(scale), "rotation": float(rot), "tx": float(tx), "ty": float(ty)}
+        )
+        tau = _tau_for(puppet, trial)
+        mat = np.asarray(part_matrix3(puppet, trial, root)[:2], dtype=np.float64)
+        return score_samples(samp, mat, feat, tau, None)
+
+    best = (float(scale0), 0.0, float(t0x), float(t0y))
+    best_s = root_score(*best)
+    grid: list[tuple[float, float, float, float, float]] = []
+    scales = [scale0 + k * 0.03 for k in range(-4, 5) if scale0 + k * 0.03 > 0.2]
+    params: list[tuple[float, float, float, float]] = []
+    for scale in scales:
+        for rot in (-10.0, -5.0, 0.0, 5.0, 10.0):
+            for tx in (t0x - span, t0x - span / 2, t0x, t0x + span / 2, t0x + span):
+                for ty in (t0y - span, t0y - span / 2, t0y, t0y + span / 2, t0y + span):
+                    params.append((float(scale), float(rot), float(tx), float(ty)))
+    by_scale: dict[float, list[int]] = {}
+    for i, (scale, _rot, _tx, _ty) in enumerate(params):
+        by_scale.setdefault(scale, []).append(i)
+    values = [0.0] * len(params)
+    for scale, idx in by_scale.items():
+        trial0 = work.model_copy(update={"scale": float(scale), "rotation": 0.0, "tx": 0.0, "ty": 0.0})
+        tau_s = _tau_for(puppet, trial0)
+        for chunk in range(0, len(idx), 256):
+            sel = idx[chunk : chunk + 256]
+            mats = np.stack(
+                [
+                    np.asarray(
+                        part_matrix3(
+                            puppet,
+                            work.model_copy(
+                                update={
+                                    "scale": params[j][0],
+                                    "rotation": params[j][1],
+                                    "tx": params[j][2],
+                                    "ty": params[j][3],
+                                }
+                            ),
+                            root,
+                        )[:2],
+                        dtype=np.float64,
+                    )
+                    for j in sel
+                ]
+            )
+            for j, value in zip(sel, batch_scores(samp, mats, feat, tau_s, None), strict=True):
+                values[j] = value
+    for (scale, rot, tx, ty), value in zip(params, values, strict=True):
+        grid.append((value, scale, rot, tx, ty))
+        if value > best_s:
+            best_s = value
+            best = (scale, rot, tx, ty)
+    # Multi-start polish: the coarse grid can sit in the wrong basin (a small
+    # translation step overshoots while scale compensates), so the best few
+    # coarse cells each get a fine hill-climb.
+    grid.sort(key=lambda cell: cell[0], reverse=True)
+    starts = [(cell[1], cell[2], cell[3], cell[4]) for cell in grid[:6]]
+    if best not in starts:
+        starts.append(best)
+    for start in starts:
+        cand_best = (float(start[0]), float(start[1]), float(start[2]), float(start[3]))
+        cand_s = root_score(*cand_best)
+        for ds, dr, dt in ((0.01, 1.0, 2.0), (0.005, 0.5, 1.0)):
+            improved = True
+            rounds = 0
+            while improved and rounds < 25:
+                improved = False
+                rounds += 1
+                scale, rot, tx, ty = cand_best
+                for cand in (
+                    (scale + ds, rot, tx, ty),
+                    (scale - ds, rot, tx, ty),
+                    (scale, rot + dr, tx, ty),
+                    (scale, rot - dr, tx, ty),
+                    (scale, rot, tx + dt, ty),
+                    (scale, rot, tx - dt, ty),
+                    (scale, rot, tx, ty + dt),
+                    (scale, rot, tx, ty - dt),
+                ):
+                    if cand[0] <= 0.2:
+                        continue
+                    value = root_score(*cand)
+                    if value > cand_s:
+                        cand_s = value
+                        cand_best = (float(cand[0]), float(cand[1]), float(cand[2]), float(cand[3]))
+                        improved = True
+                        break
+        if cand_s > best_s:
+            best_s = cand_s
+            best = cand_best
+    work.scale = float(best[0])
+    work.rotation = float(best[1])
+    work.tx = float(best[2])
+    work.ty = float(best[3])
+    return work
+
+
+@dataclass
+class LoadedView:
+    name: str
+    puppet: Puppet
+    images: dict[str, NDArray[np.uint8]]
+    yaw_deg: float = 0.0
+
+
+def _rgba_from(path: Path) -> NDArray[np.uint8]:
+    with Image.open(path) as opened:
+        rgba = opened.convert("RGBA")
+    return np.asarray(rgba, dtype=np.uint8)
+
+
+def load_view(set_dir: Path, view: str) -> LoadedView:
+    """One built view puppet plus its part images (and ``_shadow`` when built)."""
+    pset = load_set(Path(set_dir))
+    if view in pset.views:
+        entry = pset.views[view]
+    elif view in pset.head_views:
+        entry = pset.head_views[view]
+    else:
+        raise ValueError(f"unknown view {view!r} (known: {sorted([*pset.views, *pset.head_views])})")
+    base = Path(set_dir) / entry.dir
+    puppet = Puppet.model_validate_json((base / "puppet.json").read_text(encoding="utf-8"))
+    images: dict[str, NDArray[np.uint8]] = {}
+    for name, part in puppet.parts.items():
+        if part.hidden or not part.file:
+            continue
+        png = base / part.file
+        if png.is_file():
+            images[name] = _rgba_from(png)
+    shadow = base / "parts" / "_shadow.png"
+    if shadow.is_file():
+        images["_shadow"] = _rgba_from(shadow)
+    return LoadedView(name=view, puppet=puppet, images=images, yaw_deg=float(entry.yaw_deg))
+
+
+def all_views(set_dir: Path) -> dict[str, LoadedView]:
+    """Every body view of the set (head views render through ``head_for``; K-2)."""
+    pset = load_set(Path(set_dir))
+    return {name: load_view(set_dir, name) for name in pset.views}
+
+
+def chain_order(puppet: Puppet) -> list[str]:
+    """Chain names parents-first (by each chain's top part in tree order)."""
+    order = tree_order(puppet)
+    pos = {name: i for i, name in enumerate(order)}
+    names = chains(puppet)
+
+    def key(leaf: str) -> tuple[int, str]:
+        top = names[leaf][0] if names[leaf] else leaf
+        return (pos.get(top, len(order)), leaf)
+
+    return sorted(names, key=key)
+
+
+def resolve_z(
+    puppet: Puppet,
+    pose: Pose,
+    samples: dict[str, PartSamples],
+    feat: DrawingFeatures,
+) -> Pose:
+    """Top-most wins: where two parts overlap, the one agreeing with the drawing stays up."""
+    work = pose.model_copy(deep=True)
+    names = [n for n in z_order(puppet, work) if n in samples and len(samples[n].flat_xy)]
+    warped: dict[str, NDArray[np.float64]] = {}
+    for name in names:
+        mat = np.asarray(part_matrix3(puppet, work, name)[:2], dtype=np.float64)
+        warped[name] = _warp_points(samples[name].flat_xy, mat)
+    height, width = feat.line.shape
+    drew = np.asarray(feat.rgb.astype(np.float64))
+
+    def agree_idx(name: str, idx: NDArray[np.int64], xs: NDArray[np.int64], ys: NDArray[np.int64]) -> float:
+        own = np.asarray(samples[name].flat_rgb[idx].astype(np.float64))
+        cd = np.mean(np.abs(drew[ys, xs] - own), axis=1)
+        return float(np.mean(np.exp(-cd / COLOUR_TAU)))
+
+    rounded: dict[str, tuple[NDArray[np.int64], NDArray[np.int64], NDArray[np.bool_]]] = {}
+    boxes: dict[str, tuple[int, int, int, int]] = {}
+    for name in names:
+        w = warped[name]
+        xs = np.round(w[:, 0]).astype(np.int64)
+        ys = np.round(w[:, 1]).astype(np.int64)
+        ok = (xs >= 0) & (ys >= 0) & (xs < width) & (ys < height)
+        rounded[name] = (xs, ys, ok)
+        if bool(ok.any()):
+            boxes[name] = (int(xs[ok].min()), int(ys[ok].min()), int(xs[ok].max()), int(ys[ok].max()))
+        else:
+            boxes[name] = (0, 0, -1, -1)
+    for i, upper in enumerate(names):
+        xu, yu, ok_u = rounded[upper]
+        ax0, ay0, ax1, ay1 = boxes[upper]
+        for lower in names[:i]:
+            bx0, by0, bx1, by1 = boxes[lower]
+            if ax1 < bx0 or bx1 < ax0 or ay1 < by0 or by1 < ay0:
+                continue
+            xl, yl, ok_l = rounded[lower]
+            cells_l = set(zip(xl[ok_l].tolist(), yl[ok_l].tolist(), strict=True))
+            hit_u = np.zeros(len(xu), np.bool_)
+            for k in range(len(xu)):
+                hit_u[k] = bool(ok_u[k]) and (int(xu[k]), int(yu[k])) in cells_l
+            idx_u = np.nonzero(hit_u)[0]
+            if len(idx_u) < 50:
+                continue
+            cells_hit = set(zip(xu[idx_u].tolist(), yu[idx_u].tolist(), strict=True))
+            hit_l = np.zeros(len(xl), np.bool_)
+            for k in range(len(xl)):
+                hit_l[k] = bool(ok_l[k]) and (int(xl[k]), int(yl[k])) in cells_hit
+            idx_l = np.nonzero(hit_l)[0]
+            if len(idx_l) < 50:
+                continue
+            au = agree_idx(upper, idx_u, xu[idx_u], yu[idx_u])
+            al = agree_idx(lower, idx_l, xl[idx_l], yl[idx_l])
+            if al > au + 0.15:
+                zu = int(work.z_override.get(upper, puppet.parts[upper].z))
+                work.z_override[lower] = zu + 1
+    return work
+
+
+def overlap_fraction(
+    puppet: Puppet,
+    pose: Pose,
+    samples: dict[str, PartSamples],
+    shape: tuple[int, int],
+) -> dict[str, float]:
+    """Per part, the fraction of its in-bounds pixels another part also covers.
+
+    Order-free (whoever is on top still shares them): a part stacked onto a
+    sibling's pixels — a folded limb, a hidden part parked somewhere visible —
+    stands out whatever the z order says.
+    """
+    height, width = shape
+    count = np.zeros(height * width, np.int16)
+    keys: dict[str, NDArray[np.int64]] = {}
+    for name, samp in samples.items():
+        mat = np.asarray(part_matrix3(puppet, pose, name)[:2], dtype=np.float64)
+        both: list[NDArray[np.int64]] = []
+        for pts in (samp.line_xy, samp.flat_xy):
+            if len(pts):
+                keys_m = _pixel_keys(_warp_points(pts, mat), height, width)
+                both.append(keys_m[keys_m >= 0])
+        merged = np.concatenate(both) if both else np.zeros(0, np.int64)
+        keys[name] = merged
+        if len(merged):
+            count[merged] += 1
+    out: dict[str, float] = {}
+    for name, merged in keys.items():
+        out[name] = float(np.mean(count[merged] > 1)) if len(merged) else 0.0
+    return out
+
+
+def needs_human(pose: Pose, puppet: Puppet | None = None) -> list[str]:
+    """Parts with low confidence, low score or heavy overlap: the review asks a human.
+
+    Hidden parts (no file, no pixels) are never listed.
+    """
+    out: list[str] = []
+    for name in pose.scores:
+        if puppet is not None and puppet.parts.get(name) is not None and puppet.parts[name].hidden:
+            continue
+        if float(pose.confidences.get(name, 0.0)) < CONF_MIN or float(pose.scores.get(name, 0.0)) < SCORE_MIN:
+            out.append(name)
+            continue
+        if float(pose.overlap.get(name, 0.0)) > OVERLAP_MAX and float(pose.scores.get(name, 0.0)) < STACK_SCORE:
+            out.append(name)
+    return sorted(out)
+
+
+def pose_total(pose: Pose) -> float:
+    """Total fit score: the sum of the per-part scores."""
+    return float(sum(float(v) for v in pose.scores.values()))
+
+
+def fit_view_pose(
+    loaded: LoadedView,
+    drawing: NDArray[np.uint8],
+    samples: dict[str, PartSamples] | None = None,
+    features: DrawingFeatures | None = None,
+    *,
+    second_pass: bool = SECOND_PASS,
+) -> Pose:
+    """Full fit of one view: root, chains in tree order, second pass, z order."""
+    feat = features if features is not None else drawing_features(np.asarray(drawing, dtype=np.uint8))
+    own_samples = samples if samples is not None else extract_part_samples(loaded.puppet, loaded.images)
+    dh, dw = feat.line.shape
+    pose = Pose(view=loaded.name, canvas=[int(dw), int(dh)])
+    pose = fit_root(loaded.puppet, pose, feat.rgb, own_samples, feat)
+    order = chain_order(loaded.puppet)
+    for leaf in order:
+        pose = fit_chain(loaded.puppet, pose, leaf, feat.rgb, own_samples, feat)
+    if second_pass:
+        for leaf in order:
+            pose = fit_chain(loaded.puppet, pose, leaf, feat.rgb, own_samples, feat)
+    pose = resolve_z(loaded.puppet, pose, own_samples, feat)
+    tau = _tau_for(loaded.puppet, pose)
+    for name in loaded.puppet.parts:
+        if name not in pose.scores and name in own_samples:
+            mat = np.asarray(part_matrix3(loaded.puppet, pose, name)[:2], dtype=np.float64)
+            score = float(score_samples(own_samples[name], mat, feat, tau, None))
+            pose.scores[name] = score
+            if name == loaded.puppet.root:
+                pose.confidences[name] = 1.0 if score >= SCORE_MIN else 0.0
+            else:
+                pose.confidences.setdefault(name, 0.0)
+    pose.overlap = overlap_fraction(loaded.puppet, pose, own_samples, feat.line.shape)
+    return pose
+
+
+def _get_view(set_dir: Path, views: dict[str, LoadedView] | None, name: str) -> LoadedView:
+    if views is not None and name in views:
+        return views[name]
+    return load_view(Path(set_dir), name)
+
+
+def fit_pose(
+    set_dir: Path,
+    drawing: NDArray[np.uint8],
+    views: dict[str, LoadedView] | None = None,
+) -> tuple[Pose, dict[str, LoadedView], dict[str, float]]:
+    """Fit every view of the set, keep the best total score.
+
+    Views load one at a time (a built view is hundreds of MB); only the best
+    two root fits go on to full chain fits. Returns the winning pose, the
+    loaded winning views and each fully-fitted view's total score.
+    """
+    rgb = np.asarray(drawing, dtype=np.uint8)
+    feat = drawing_features(rgb)
+    if views is not None:
+        view_names = list(views)
+    else:
+        pset = load_set(Path(set_dir))
+        view_names = list(pset.views)
+    if not view_names:
+        raise ValueError("the set has no views to fit")
+    # Cheap root-only round first: full chain fits run on the best two views.
+    root_scores: dict[str, float] = {}
+    for name in view_names:
+        loaded = _get_view(Path(set_dir), views, name)
+        own = extract_part_samples(loaded.puppet, loaded.images)
+        dh, dw = feat.line.shape
+        root_pose = fit_root(loaded.puppet, Pose(view=name, canvas=[int(dw), int(dh)]), rgb, own, feat)
+        tau = _tau_for(loaded.puppet, root_pose)
+        mat = np.asarray(part_matrix3(loaded.puppet, root_pose, loaded.puppet.root)[:2], dtype=np.float64)
+        root_scores[name] = float(score_samples(own[loaded.puppet.root], mat, feat, tau, None))
+        del loaded
+        del own
+    ranked = sorted(root_scores, key=lambda n: root_scores[n], reverse=True)[:2]
+    best_pose: Pose | None = None
+    best_total = -math.inf
+    totals: dict[str, float] = {}
+    kept: dict[str, LoadedView] = {}
+    for name in ranked:
+        loaded = _get_view(Path(set_dir), views, name)
+        own = extract_part_samples(loaded.puppet, loaded.images)
+        pose = fit_view_pose(loaded, rgb, own, feat)
+        total = pose_total(pose)
+        totals[name] = total
+        kept[name] = loaded
+        if total > best_total:
+            best_total = total
+            best_pose = pose
+    assert best_pose is not None
+    return best_pose, kept, totals
+
+
+def _font(px: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    return ImageFont.load_default(size=px)
+
+
+def _label_cell(img: Image.Image, text: str) -> None:
+    draw = ImageDraw.Draw(img)
+    font = _font(20)
+    left, top, right, bottom = draw.textbbox((0, 0), text, font=font)
+    draw.rectangle([0, 0, right - left + 12, bottom - top + 8], fill=(255, 255, 255))
+    draw.text((6, 4), text, font=font, fill=(0, 0, 0))
+
+
+def explained_alpha(
+    puppet: Puppet,
+    pose: Pose,
+    images: dict[str, NDArray[np.uint8]],
+    shape: tuple[int, int],
+) -> NDArray[np.bool_]:
+    """Output pixels the posed puppet covers (render alpha, no resampling loss)."""
+    height, width = shape
+    rendered = render_pose(puppet, pose, images)
+    if rendered.shape[1] != width or rendered.shape[0] != height:
+        alpha = np.asarray(rendered[..., 3] > 127, dtype=np.uint8)
+        grown = cv2.resize(alpha, (width, height), interpolation=cv2.INTER_NEAREST) > 0
+        return np.asarray(grown, dtype=np.bool_)
+    return np.asarray(rendered[..., 3] > 127, dtype=np.bool_)
+
+
+def residual_mask(
+    feat: DrawingFeatures,
+    covered: NDArray[np.bool_],
+    line_width: float,
+) -> NDArray[np.bool_]:
+    """Drawing foreground no part explains: where the model changed the design."""
+    radius = max(2, int(round(float(line_width))))
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * radius + 1, 2 * radius + 1))
+    grown = np.asarray(cv2.dilate(covered.astype(np.uint8), kernel), dtype=np.uint8) > 0
+    foreground = np.asarray(~feat.paper, dtype=np.bool_)
+    return np.asarray(foreground & ~grown, dtype=np.bool_)
+
+
+def fit_report_dict(
+    loaded: LoadedView,
+    pose: Pose,
+    drawing_name: str,
+    totals: dict[str, float],
+    residual_px: int,
+) -> dict[str, Any]:
+    """JSON-able fit report: root, per part and per chain, residual, needs_human."""
+    names = chains(loaded.puppet)
+    part_of = {part: leaf for leaf, members in names.items() for part in members}
+    chain_scores: dict[str, float] = {}
+    for leaf, members in names.items():
+        chain_scores[leaf] = float(sum(float(pose.scores.get(m, 0.0)) for m in members))
+    return {
+        "drawing": drawing_name,
+        "view": pose.view,
+        "canvas": list(pose.canvas),
+        "root": {"tx": pose.tx, "ty": pose.ty, "rotation": pose.rotation, "scale": pose.scale},
+        "parts": {
+            name: {
+                "angle": float(pose.angles.get(name, 0.0)),
+                "score": float(pose.scores.get(name, 0.0)),
+                "confidence": float(pose.confidences.get(name, 0.0)),
+                "overlap": float(pose.overlap.get(name, 0.0)),
+                "z": int(pose.z_override.get(name, part.z)),
+                "chain": part_of.get(name),
+            }
+            for name, part in loaded.puppet.parts.items()
+        },
+        "chains": {leaf: {"parts": list(members), "score": chain_scores[leaf]} for leaf, members in names.items()},
+        "view_totals": {name: float(value) for name, value in totals.items()},
+        "total": float(pose_total(pose)),
+        "needs_human": needs_human(pose, loaded.puppet),
+        "residual_px": int(residual_px),
+    }
+
+
+def write_fit_outputs(
+    loaded: LoadedView,
+    pose: Pose,
+    drawing: NDArray[np.uint8],
+    out_dir: Path,
+    totals: dict[str, float],
+    samples: dict[str, PartSamples] | None = None,
+    features: DrawingFeatures | None = None,
+    drawing_name: str = "",
+) -> dict[str, Any]:
+    """Write ``fit_report.json`` + ``fit_sheet.png``; return the report dict."""
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    rgb = np.asarray(drawing, dtype=np.uint8)
+    feat = features if features is not None else drawing_features(rgb)
+    height, width = feat.line.shape
+    rendered = render_pose(loaded.puppet, pose, loaded.images)
+    if rendered.shape[1] != width or rendered.shape[0] != height:
+        fixed = np.zeros((height, width, 4), np.uint8)
+        fixed[..., :3] = np.asarray(
+            cv2.resize(rendered[..., :3], (width, height), interpolation=cv2.INTER_NEAREST), dtype=np.uint8
+        )
+        fixed[..., 3] = np.asarray(
+            cv2.resize(rendered[..., 3], (width, height), interpolation=cv2.INTER_NEAREST), dtype=np.uint8
+        )
+        rendered = fixed
+    own = samples if samples is not None else extract_part_samples(loaded.puppet, loaded.images)
+    covered = explained_alpha(loaded.puppet, pose, loaded.images, (height, width))
+    residual = residual_mask(feat, covered, float(loaded.puppet.line_width_px) * float(pose.scale))
+    residual_px = int(residual.sum())
+    report = fit_report_dict(loaded, pose, drawing_name or out.name, totals, residual_px)
+    (out / "fit_report.json").write_text(json.dumps(report, indent=1) + "\n", encoding="utf-8")
+    (out / "pose.json").write_text(pose.model_dump_json(indent=1) + "\n", encoding="utf-8")
+    Image.fromarray(np.asarray(rendered, dtype=np.uint8)).save(out / "render.png")
+    overlay = np.asarray(rgb.copy(), dtype=np.uint8)
+    for name, samp in own.items():
+        if len(samp.line_xy) == 0:
+            continue
+        mat = np.asarray(part_matrix3(loaded.puppet, pose, name)[:2], dtype=np.float64)
+        warped = _warp_points(samp.line_xy, mat)
+        xi = np.round(warped[:, 0]).astype(np.int64)
+        yi = np.round(warped[:, 1]).astype(np.int64)
+        valid = (xi >= 0) & (yi >= 0) & (xi < width) & (yi < height)
+        overlay[yi[valid], xi[valid]] = (255, 0, 0)
+    residual_img = np.full((height, width, 3), 255, np.uint8)
+    residual_img[residual] = rgb[residual]
+    panels = [
+        (Image.fromarray(rgb), "drawing"),
+        (Image.fromarray(np.asarray(_on_white(rendered), dtype=np.uint8)), f"puppet {pose.view}"),
+        (Image.fromarray(overlay), "overlay (puppet lines red)"),
+        (Image.fromarray(residual_img), f"residual {residual_px} px"),
+    ]
+    sheet = _grid_sheet(panels, columns=2)
+    sheet.save(out / "fit_sheet.png")
+    return report
+
+
+def _on_white(rgba: NDArray[np.uint8]) -> NDArray[np.uint8]:
+    out = np.full((rgba.shape[0], rgba.shape[1], 3), 255, np.uint8)
+    cover = np.asarray(rgba[..., 3] > 127, dtype=np.bool_)
+    out[cover] = np.asarray(rgba[..., :3], dtype=np.uint8)[cover]
+    return out
+
+
+def _grid_sheet(panels: list[tuple[Image.Image, str]], columns: int = 2) -> Image.Image:
+    labelled: list[Image.Image] = []
+    for img, text in panels:
+        cell = img.convert("RGB")
+        _label_cell(cell, text)
+        labelled.append(cell)
+    col_w = max(c.width for c in labelled)
+    row_h = max(c.height for c in labelled)
+    rows = (len(labelled) + columns - 1) // columns
+    sheet = Image.new("RGB", (columns * col_w, rows * row_h), (200, 200, 200))
+    for i, cell in enumerate(labelled):
+        sheet.paste(cell, ((i % columns) * col_w, (i // columns) * row_h))
+    return sheet
+
+
+def _wrap_delta(delta: float) -> float:
+    """Angle difference wrapped to [-180, 180]."""
+    return float((float(delta) + 180.0) % 360.0 - 180.0)
+
+
+def difference_locked(
+    puppet: Puppet,
+    pose_x: Pose,
+    rgb_x: NDArray[np.uint8],
+    rgb_y: NDArray[np.uint8],
+    samples: dict[str, PartSamples],
+) -> tuple[list[str], dict[str, dict[str, float]]]:
+    """Per-part X->Y difference map: which parts still match within tolerance.
+
+    The region is the part's X-fit mask grown by the line width (a
+    ``ctx``-style threshold from the puppet's own line width, never a bare
+    constant). Locked parts keep ``pose_X`` angles exactly, so they render
+    pixel-identical in every frame (no flicker by construction).
+    """
+    line_width = max(1.0, float(puppet.line_width_px))
+    per_part: dict[str, dict[str, float]] = {}
+    locked: list[str] = []
+    y = np.asarray(rgb_y, dtype=np.int16)
+    x = np.asarray(rgb_x, dtype=np.int16)
+    hx, wx = rgb_x.shape[:2]
+    hy, wy = rgb_y.shape[:2]
+    same_size = (hx == hy) and (wx == wy)
+    if not same_size:
+        pil_y = Image.fromarray(np.asarray(rgb_y, dtype=np.uint8)).resize((wx, hx), Image.Resampling.LANCZOS)
+        y = np.asarray(pil_y, dtype=np.int16)
+    y_for_lines: NDArray[np.uint8] = (
+        np.asarray(rgb_y, dtype=np.uint8) if same_size else np.asarray(pil_y, dtype=np.uint8)
+    )
+    line_y = np.asarray(line_mask(y_for_lines, LINE_LUMA), dtype=np.bool_)
+    if not same_size:
+        shrunk = np.asarray(Image.fromarray(line_y).resize((wx, hx), Image.Resampling.NEAREST))
+        line_y = np.asarray(shrunk, dtype=np.bool_)
+    dist_y = np.asarray(cv2.distanceTransform((~line_y).astype(np.uint8), cv2.DIST_L2, 3), dtype=np.float32)
+    for name, samp in samples.items():
+        if len(samp.flat_xy) == 0 and len(samp.line_xy) == 0:
+            continue
+        mat = np.asarray(part_matrix3(puppet, pose_x, name)[:2], dtype=np.float64)
+        pts = (
+            np.concatenate([samp.flat_xy, samp.line_xy])
+            if len(samp.flat_xy) and len(samp.line_xy)
+            else (samp.flat_xy if len(samp.flat_xy) else samp.line_xy)
+        )
+        warped = _warp_points(np.asarray(pts, dtype=np.float64), mat)
+        xi = np.round(warped[:, 0]).astype(np.int64)
+        yi = np.round(warped[:, 1]).astype(np.int64)
+        valid = (xi >= 0) & (yi >= 0) & (xi < wx) & (yi < hx)
+        if int(valid.sum()) < 20:
+            continue
+        xv, yv = xi[valid], yi[valid]
+        cd = float(np.mean(np.abs(y[yv, xv] - x[yv, xv])))
+        line_hit = 0.0
+        if len(samp.line_xy):
+            wl = _warp_points(samp.line_xy, mat)
+            xl = np.round(wl[:, 0]).astype(np.int64)
+            yl = np.round(wl[:, 1]).astype(np.int64)
+            ok = (xl >= 0) & (yl >= 0) & (xl < wx) & (yl < hx)
+            if int(ok.sum()):
+                line_hit = float(np.mean(np.asarray(dist_y[yl[ok], xl[ok]], dtype=np.float64)))
+        per_part[name] = {"colour_dist": cd, "line_shift": line_hit, "pixels": int(valid.sum())}
+        if cd < 6.0 + line_width and line_hit < line_width:
+            locked.append(name)
+    return sorted(locked), per_part
+
+
+def gate_split_needed(max_delta_deg: float) -> tuple[bool, int]:
+    """The rig interval gate's verdict on one X->Y angle span.
+
+    Uses the gate's own constants (imported from ``engine.rig.plan``, never
+    copied): a segment longer than ``DEVIATION_THRESHOLD`` of a half-turn
+    needs splitting (T-89: a large angle means a new intermediate pose); the
+    jump bar and scale limit pass for equal rigid segments; at most
+    ``MAX_EXTRA_KEYS`` intermediates are proposed.
+    """
+    _ = (JUMP_THRESHOLD, SCALE_LIMIT)
+    span_bar = float(DEVIATION_THRESHOLD) * 180.0
+    if max_delta_deg <= span_bar:
+        return False, 0
+    segments = int(math.ceil(max_delta_deg / span_bar))
+    need = max(1, min(segments - 1, int(MAX_EXTRA_KEYS)))
+    return True, need
+
+
+@dataclass
+class TransitionResult:
+    pose_x: Pose
+    pose_y: Pose
+    locked: list[str]
+    changed_chains: dict[str, dict[str, Any]]
+    decision: str
+    reason: str
+    scores: dict[str, float]
+
+
+def transition_from_poses(
+    loaded: LoadedView,
+    pose_x: Pose,
+    pose_y: Pose,
+    rgb_x: NDArray[np.uint8],
+    rgb_y: NDArray[np.uint8],
+    samples: dict[str, PartSamples] | None = None,
+) -> TransitionResult:
+    """X->Y without refitting from scratch: lock the still parts, pull the rest.
+
+    Changed chains start from their ``pose_X`` angles and are refined on Y's
+    lines and colours ("the hand is at Z in X and at ZX in Y: pull X's hand to
+    ZX"). The fit score decides first (``ret`` naming the chain and why when a
+    changed chain cannot reach Y — never forced); the interval gate then
+    decides ``split`` for large-but-clean motions, else ``rig`` (K-2
+    interpolates X->Y).
+    """
+    own = samples if samples is not None else extract_part_samples(loaded.puppet, loaded.images)
+    feat_y = drawing_features(np.asarray(rgb_y, dtype=np.uint8))
+    arr_x = np.asarray(rgb_x, dtype=np.uint8)
+    arr_y = np.asarray(rgb_y, dtype=np.uint8)
+    locked, _metrics = difference_locked(loaded.puppet, pose_x, arr_x, arr_y, own)
+    locked_set = set(locked)
+    names = chains(loaded.puppet)
+    changed = sorted(leaf for leaf, members in names.items() if any(m not in locked_set for m in members))
+    base = pose_y.model_copy(deep=True)
+    for name in locked:
+        if name in pose_x.angles:
+            base.angles[name] = float(pose_x.angles[name])
+        elif name in base.angles:
+            del base.angles[name]
+    for leaf in changed:
+        start = base.model_copy(deep=True)
+        anchor = {}
+        frozen = {}
+        for member in names[leaf]:
+            if member in pose_x.angles:
+                start.angles[member] = float(pose_x.angles[member])
+                anchor[member] = float(pose_x.angles[member])
+            if member in locked_set and member in pose_x.angles:
+                frozen[member] = float(pose_x.angles[member])
+        pulled = fit_chain(
+            loaded.puppet,
+            start,
+            leaf,
+            np.asarray(rgb_y, dtype=np.uint8),
+            own,
+            feat_y,
+            anchor=anchor,
+            local_deg=90.0,
+            frozen=frozen,
+        )
+        for member in names[leaf]:
+            base.angles[member] = float(pulled.angles.get(member, 0.0))
+            base.scores[member] = float(pulled.scores.get(member, 0.0))
+            base.confidences[member] = float(pulled.confidences.get(member, 0.0))
+    tau = _tau_for(loaded.puppet, base)
+    for name in locked:
+        if name in own:
+            score, gap = _part_confidence(loaded.puppet, base, name, own, feat_y, tau)
+            base.scores[name] = float(score)
+            base.confidences[name] = float(gap)
+    deltas: dict[str, dict[str, Any]] = {}
+    worst = 0.0
+    for leaf in changed:
+        parts = [m for m in names[leaf] if m in base.angles or m in pose_x.angles]
+        dd = {m: _wrap_delta(float(base.angles.get(m, 0.0)) - float(pose_x.angles.get(m, 0.0))) for m in parts}
+        top = max((abs(v) for v in dd.values()), default=0.0)
+        worst = max(worst, float(top))
+        deltas[leaf] = {"parts": parts, "delta": {m: float(v) for m, v in dd.items()}, "max_delta": float(top)}
+    split, need = gate_split_needed(float(worst))
+    scores = {name: float(base.scores.get(name, 0.0)) for name in loaded.puppet.parts}
+    bar = float(DEVIATION_THRESHOLD) * 180.0
+    # The fit score decides first: a chain that cannot reach Y (a new shape,
+    # foreshortening, a turn) is ret no matter how far it wandered trying.
+    # The gate's split only applies to large-but-clean motions.
+    bad: list[str] = []
+    for leaf in changed:
+        for member in names[leaf]:
+            part = loaded.puppet.parts[member]
+            if part.hidden:
+                continue
+            low_score = float(base.scores.get(member, 0.0)) < SCORE_MIN
+            low_conf = float(base.confidences.get(member, 0.0)) < CONF_MIN
+            if low_score or low_conf:
+                bad.append(f"{leaf}/{member}")
+    if bad:
+        return TransitionResult(
+            pose_x=pose_x,
+            pose_y=base,
+            locked=locked,
+            changed_chains=deltas,
+            decision="ret",
+            reason=(
+                f"chain(s) cannot reach Y ({'; '.join(sorted(set(bad)))}): "
+                "needs a substitution drawing (K-3) or the drawn in-between path"
+            ),
+            scores=scores,
+        )
+    if split:
+        where = [f"{(k + 1) / (need + 1):.2f}" for k in range(need)]
+        return TransitionResult(
+            pose_x=pose_x,
+            pose_y=base,
+            locked=locked,
+            changed_chains=deltas,
+            decision="split",
+            reason=(
+                f"interval gate: {worst:.1f}deg over {bar:.1f}deg per segment, "
+                f"{need} intermediate pose(s) at {', '.join(where)}"
+            ),
+            scores=scores,
+        )
+    return TransitionResult(
+        pose_x=pose_x,
+        pose_y=base,
+        locked=locked,
+        changed_chains=deltas,
+        decision="rig",
+        reason=f"every changed chain reaches Y (worst {worst:.1f}deg); K-2 interpolates X->Y",
+        scores=scores,
+    )
+
+
+def transition_dict(result: TransitionResult) -> dict[str, Any]:
+    """JSON-able ``transition.json``: poses, locks, deltas, decision, scores."""
+    return {
+        "pose_X": result.pose_x.model_dump(mode="json"),
+        "pose_Y": result.pose_y.model_dump(mode="json"),
+        "locked": list(result.locked),
+        "changed_chains": result.changed_chains,
+        "decision": result.decision,
+        "reason": result.reason,
+        "scores": {k: float(v) for k, v in result.scores.items()},
+    }
+
+
+def _thumb(img: Image.Image, height: int = 720) -> Image.Image:
+    if img.height <= height:
+        return img
+    scale = height / img.height
+    return img.resize((max(1, round(img.width * scale)), height), Image.Resampling.LANCZOS)
+
+
+def write_transition_outputs(
+    loaded: LoadedView,
+    result: TransitionResult,
+    rgb_x: NDArray[np.uint8],
+    rgb_y: NDArray[np.uint8],
+    out_dir: Path,
+    name_x: str = "X",
+    name_y: str = "Y",
+) -> dict[str, Any]:
+    """Write ``transition.json`` + ``transition_sheet.png``; return the dict."""
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    doc = transition_dict(result)
+    (out / "transition.json").write_text(json.dumps(doc, indent=1) + "\n", encoding="utf-8")
+    (out / "pose_X.json").write_text(result.pose_x.model_dump_json(indent=1) + "\n", encoding="utf-8")
+    (out / "pose_Y.json").write_text(result.pose_y.model_dump_json(indent=1) + "\n", encoding="utf-8")
+    rx = np.asarray(rgb_x, dtype=np.uint8)
+    ry = np.asarray(rgb_y, dtype=np.uint8)
+    if rx.shape != ry.shape:
+        small = Image.fromarray(ry).resize((rx.shape[1], rx.shape[0]), Image.Resampling.LANCZOS)
+        ry = np.asarray(small, dtype=np.uint8)
+    px = _on_white(render_pose(loaded.puppet, result.pose_x, loaded.images))
+    py = _on_white(render_pose(loaded.puppet, result.pose_y, loaded.images))
+    if px.shape != rx.shape:
+        px = np.asarray(
+            Image.fromarray(px).resize((rx.shape[1], rx.shape[0]), Image.Resampling.LANCZOS), dtype=np.uint8
+        )
+        py = np.asarray(
+            Image.fromarray(py).resize((rx.shape[1], rx.shape[0]), Image.Resampling.LANCZOS), dtype=np.uint8
+        )
+    diff = np.abs(rx.astype(np.int16) - ry.astype(np.int16)).mean(axis=2)
+    changed_map = np.full(rx.shape, 255, np.uint8)
+    region = diff > (6.0 + float(loaded.puppet.line_width_px))
+    changed_map[region] = (255, 120, 120)
+    overlay = np.asarray(ry.copy(), dtype=np.uint8)
+    own = extract_part_samples(loaded.puppet, loaded.images)
+    height, width = ry.shape[:2]
+    for _leaf, info in result.changed_chains.items():
+        for member in info.get("parts", []):
+            samp = own.get(member)
+            if samp is None or len(samp.line_xy) == 0:
+                continue
+            mat = np.asarray(part_matrix3(loaded.puppet, result.pose_y, member)[:2], dtype=np.float64)
+            warped = _warp_points(samp.line_xy, mat)
+            xi = np.round(warped[:, 0]).astype(np.int64)
+            yi = np.round(warped[:, 1]).astype(np.int64)
+            valid = (xi >= 0) & (yi >= 0) & (xi < width) & (yi < height)
+            overlay[yi[valid], xi[valid]] = (255, 0, 0)
+    panels = [
+        (_thumb(Image.fromarray(rx)), name_x),
+        (_thumb(Image.fromarray(ry)), name_y),
+        (_thumb(Image.fromarray(px)), "puppet at X"),
+        (_thumb(Image.fromarray(py)), "puppet at Y"),
+        (_thumb(Image.fromarray(np.asarray(changed_map, dtype=np.uint8))), "X->Y changed regions"),
+        (_thumb(Image.fromarray(overlay)), f"Y overlay ({result.decision})"),
+    ]
+    sheet = _grid_sheet(panels, columns=3)
+    sheet.save(out / "transition_sheet.png")
+    return doc
+
+
+def _fit_view_job(payload: dict[str, Any]) -> dict[str, Any]:
+    """Process-pool job: fit one view to one drawing; plain data in and out."""
+    loaded = load_view(Path(str(payload["set_dir"])), str(payload["view"]))
+    rgb = load_drawing(Path(str(payload["image"])))
+    pose = fit_view_pose(loaded, rgb)
+    return {
+        "image": str(payload["image"]),
+        "view": str(payload["view"]),
+        "pose": pose.model_dump(mode="json"),
+        "total": pose_total(pose),
+    }
+
+
+def _transition_job(payload: dict[str, Any]) -> dict[str, Any]:
+    """Process-pool job: one X->Y interval from already-fitted poses."""
+    loaded = load_view(Path(str(payload["set_dir"])), str(payload["view"]))
+    rgb_x = load_drawing(Path(str(payload["x"])))
+    rgb_y = load_drawing(Path(str(payload["y"])))
+    pose_x = Pose.model_validate(payload["pose_x"])
+    pose_y = Pose.model_validate(payload["pose_y"])
+    result = transition_from_poses(loaded, pose_x, pose_y, rgb_x, rgb_y)
+    out = Path(str(payload["out_dir"]))
+    x_name = Path(str(payload["x"])).name
+    y_name = Path(str(payload["y"])).name
+    doc = write_transition_outputs(loaded, result, rgb_x, rgb_y, out, x_name, y_name)
+    doc["from"] = str(payload["x"])
+    doc["to"] = str(payload["y"])
+    return doc
+
+
+def default_workers() -> int:
+    """Half the CPUs, at least one, at most four (one view is hundreds of MB)."""
+    import os
+
+    return max(1, min(4, max(1, (os.cpu_count() or 2) // 2)))
+
+
+def fit_chain_poses(
+    set_dir: Path,
+    images: list[Path],
+    out_dir: Path,
+    *,
+    workers: int | None = None,
+) -> dict[str, Any]:
+    """Fit every pose once, then every consecutive interval, in parallel.
+
+    A pose shared by two intervals is fitted once and reused; one pose's view
+    fits run as parallel jobs. Returns the chain summary dict and writes per
+    pose fit outputs plus per interval transition outputs under ``out_dir``.
+    """
+    base = Path(set_dir)
+    out = Path(out_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    pset = load_set(base)
+    view_names = list(pset.views)
+    jobs: list[dict[str, Any]] = []
+    for img in images:
+        for view in view_names:
+            jobs.append({"set_dir": str(base), "view": view, "image": str(img)})
+    won: dict[str, dict[str, Any]] = {}
+    n_workers = workers or default_workers()
+    with ProcessPoolExecutor(max_workers=max(1, n_workers)) as pool:
+        for got in pool.map(_fit_view_job, jobs):
+            key = str(got["image"])
+            if key not in won or float(got["total"]) > float(won[key]["total"]):
+                won[key] = got
+    poses: dict[str, Pose] = {}
+    pose_views: dict[str, str] = {}
+    for img in images:
+        key = str(img)
+        poses[key] = Pose.model_validate(won[key]["pose"])
+        pose_views[key] = str(won[key]["view"])
+    for img in images:
+        loaded = load_view(base, pose_views[str(img)])
+        rgb = load_drawing(Path(str(img)))
+        pose = poses[str(img)]
+        own = extract_part_samples(loaded.puppet, loaded.images)
+        feat = drawing_features(rgb)
+        totals = {pose_views[str(img)]: pose_total(pose)}
+        write_fit_outputs(loaded, pose, rgb, out / Path(str(img)).stem, totals, own, feat, str(img))
+        del loaded
+        del own
+    intervals: list[dict[str, Any]] = []
+    for left, right in zip(images, images[1:], strict=True):
+        key = f"{Path(str(left)).stem}__{Path(str(right)).stem}"
+        view = pose_views[str(left)] if pose_views[str(left)] == pose_views[str(right)] else pose_views[str(right)]
+        intervals.append(
+            {
+                "set_dir": str(base),
+                "view": view,
+                "x": str(left),
+                "y": str(right),
+                "pose_x": poses[str(left)].model_dump(mode="json"),
+                "pose_y": poses[str(right)].model_dump(mode="json"),
+                "out_dir": str(out / key),
+            }
+        )
+    results: list[dict[str, Any]] = []
+    if intervals:
+        with ProcessPoolExecutor(max_workers=max(1, n_workers)) as pool:
+            for doc in pool.map(_transition_job, intervals):
+                results.append(doc)
+    summary = {
+        "poses": {Path(k).name: {"view": pose_views[k], "pose": poses[k].model_dump(mode="json")} for k in poses},
+        "intervals": [
+            {"from": doc.get("from"), "to": doc.get("to"), "decision": doc.get("decision"), "reason": doc.get("reason")}
+            for doc in results
+        ],
+    }
+    (out / "chain_summary.json").write_text(json.dumps(summary, indent=1) + "\n", encoding="utf-8")
+    return summary
+
+
+def _coarse_angles(hint: float | None, window_deg: float) -> list[float]:
+    if hint is None:
+        start = -180.0
+        return [start + i * COARSE_STEP for i in range(int(360.0 / COARSE_STEP))]
+    half = float(window_deg) / 2.0
+    lo = float(hint) - half
+    n = max(1, int(round((2.0 * half) / COARSE_STEP)) + 1)
+    return [lo + i * COARSE_STEP for i in range(n)]
+
+
+def _ang_dist(a: float, b: float) -> float:
+    """Circular distance of two angles in degrees."""
+    d = abs(float(a) - float(b)) % 360.0
+    return float(min(d, 360.0 - d))
+
+
+def _second_peak_gap(scores: dict[float, float], best: float) -> float:
+    if not scores:
+        return 0.0
+    best_s = scores[best]
+    runner = None
+    for angle, value in scores.items():
+        if _ang_dist(float(angle), float(best)) < PEAK_SEP_DEG:
+            continue
+        if runner is None or value > runner:
+            runner = value
+    if runner is None:
+        return 0.0
+    return float(best_s - runner)
