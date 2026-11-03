@@ -149,7 +149,17 @@ def test_transition_sheet_and_json_written(
     loaded = synth_view(puppet, images)  # type: ignore[arg-type]
     out = tmp_path / "xy"
     doc = write_transition_outputs(loaded, moved, rgb_x, rgb_y, out, "X.png", "Y.png")  # type: ignore[arg-type]
-    assert set(doc) == {"pose_X", "pose_Y", "locked", "changed_chains", "decision", "reason", "scores"}
+    assert set(doc) == {
+        "pose_X",
+        "pose_Y",
+        "locked",
+        "changed_chains",
+        "decision",
+        "reason",
+        "scores",
+        "confidences",
+        "needs_human",
+    }
     assert (out / "transition.json").is_file()
     assert (out / "pose_X.json").is_file()
     assert (out / "pose_Y.json").is_file()
