@@ -511,6 +511,8 @@ def cmd_puppet(args: argparse.Namespace) -> int:
         return cmd_puppet_transition(args)
     if args.puppet_command == "repivot":
         return cmd_puppet_repivot(args)
+    if args.puppet_command == "inbetween":
+        return cmd_puppet_inbetween(args)
     raise ValueError(f"unknown puppet command: {args.puppet_command}")
 
 
@@ -588,6 +590,37 @@ def cmd_puppet_transition(args: argparse.Namespace) -> int:
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
+    return 0
+
+
+def cmd_puppet_inbetween(args: argparse.Namespace) -> int:
+    """Render one X->Y interval as inbetween frames (package K-2d)."""
+    from karagoz.engine.puppet.inbetween import inbetween
+
+    try:
+        result = inbetween(
+            Path(args.set_dir),
+            Path(args.transition),
+            int(args.frames),
+            Path(args.out_dir),
+            kind=str(args.ease),
+            follow_through=int(args.follow_through),
+            hold_from_puppet=bool(args.hold_from_puppet),
+        )
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"{len(result.frames)} frames ok={result.ok} -> {args.out_dir}")
+    rows = result.report.get("frames", [])
+    worst_locked = max((row["locked_change_px"] for row in rows), default=0)
+    worst_gap = max((row["joint_paper_gap_px"] for row in rows), default=0)
+    print(f"locked change max {worst_locked} px, joint gap max {worst_gap} px")
+    print(f"z switches at {result.report.get('z_switch_frames', [])}")
+    cut = result.report.get("cut")
+    if isinstance(cut, dict):
+        for side in ("start", "end"):
+            part = cut.get(side, {})
+            print(f"cut {side}: silhouette {part.get('silhouette_px')} px, line {part.get('line_shift_px')}")
     return 0
 
 
@@ -919,6 +952,16 @@ def build_parser() -> argparse.ArgumentParser:
     puppet_repivot = puppet_sub.add_parser("repivot", help="recompute a built set's pivots (no SAM, no image calls)")
     puppet_repivot.add_argument("set_dir", help="built set directory (set.json, views/, head_views/)")
     puppet_repivot.add_argument("out_dir", help="output directory (copy with refreshed pivots)")
+    puppet_inbetween = puppet_sub.add_parser("inbetween", help="render one X->Y interval as inbetween frames (K-2d)")
+    puppet_inbetween.add_argument("set_dir", help="built puppet set directory (set.json, views/)")
+    puppet_inbetween.add_argument("transition", help="K-1 transition.json (poses, locked, decision)")
+    puppet_inbetween.add_argument("out_dir", help="output directory (frames/, preview.mp4, inbetween_sheet.png)")
+    puppet_inbetween.add_argument("--frames", type=int, required=True, help="frame count including both ends")
+    puppet_inbetween.add_argument("--ease", default="inout", help="easing kind (inout, linear, in, out)")
+    puppet_inbetween.add_argument("--follow-through", type=int, default=0, help="child-joint lag in frames (K-2a)")
+    puppet_inbetween.add_argument(
+        "--hold-from-puppet", action="store_true", help="holds from the puppet, not the key drawings"
+    )
     puppet_p.set_defaults(func=cmd_puppet)
 
     strip_p = sub.add_parser("strip", help="write a contact sheet of a run of video frames")
