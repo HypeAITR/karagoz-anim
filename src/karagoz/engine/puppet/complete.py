@@ -605,6 +605,11 @@ def _coincident_run_ink(
         along = ((xx - x0) * vec[0] + (yy - y0) * vec[1]) / ln
         across = np.abs((xx - x0) * (-vec[1]) + (yy - y0) * vec[0]) / ln
         out |= np.asarray((across <= line_width) & (along >= 0.0) & (along <= ln), dtype=np.bool_)
+    # A shared-boundary stroke that never runs straight (a curving seam
+    # tail) escapes the Hough windows above but belongs to the cover just
+    # the same: the neighbour holds the very same pixels, so clearing the
+    # dome's copy changes nothing at rest and removes a ghost on rotation.
+    out |= np.asarray(np.asarray(dome_ink, dtype=np.bool_) & np.asarray(cover_ink, dtype=np.bool_), dtype=np.bool_)
     return out, near
 
 
@@ -993,6 +998,119 @@ def _dome_mouth(
     return mouth, entering[0]
 
 
+def _dome_mouth_tiebreak(
+    mask: NDArray[np.bool_],
+    out_masks: dict[str, NDArray[np.bool_]],
+    order: list[str],
+    z_of: dict[str, int],
+    name: str,
+    touch_k: NDArray[np.uint8],
+    line_width: float,
+    seam_plates: set[str] | None = None,
+) -> tuple[NDArray[np.bool_], str] | None:
+    """One deep entry where several lower parts touch the eye (K-0p).
+
+    The legacy mouth rule stays silent when more than one lower part
+    reaches the hull-bridged eye, so a dome a child enters under keeps
+    the child's notch open (a joint turning the child then reveals
+    paper). A seam plate merely rim-touches the eye where the seam
+    contact runs: it is not an entry and never vetoes the child.
+    Otherwise only a part reaching past the owner's contact rim counts
+    as entering - a knock the plate leaves on the rim is not a joint.
+    Exactly one survivor closes like a legacy mouth; anything else
+    stays silent exactly like the legacy rule.
+    """
+    mask_arr = np.asarray(mask, dtype=np.bool_)
+    unders = [
+        other
+        for other in order
+        if other != name
+        and z_of[other] < z_of[name]
+        and bool(
+            np.logical_and(
+                np.asarray(cv2.dilate(np.asarray(out_masks[other], dtype=np.uint8), touch_k), dtype=np.uint8) > 0,
+                mask_arr,
+            ).any()
+        )
+    ]
+    if len(unders) < 2:
+        return None
+    mouth_all = np.asarray(_hull_only(mask_arr) & ~mask_arr)
+    entering = [
+        other
+        for other in unders
+        if bool(
+            np.logical_and(
+                np.asarray(cv2.dilate(np.asarray(out_masks[other], dtype=np.uint8), touch_k), dtype=np.uint8) > 0,
+                mouth_all,
+            ).any()
+        )
+    ]
+    if len(entering) < 2:
+        return None
+    plates = seam_plates or set()
+    entering = [other for other in entering if other not in plates]
+    if len(entering) != 1:
+        dist = np.asarray(cv2.distanceTransform((~mask_arr).astype(np.uint8), cv2.DIST_L2, 3), dtype=np.float64)
+        far = np.asarray(mouth_all & (dist > line_width), dtype=np.bool_)
+        entering = [
+            other
+            for other in entering
+            if bool(
+                np.logical_and(
+                    np.asarray(cv2.dilate(np.asarray(out_masks[other], dtype=np.uint8), touch_k), dtype=np.uint8) > 0,
+                    far,
+                ).any()
+            )
+        ]
+        if len(entering) != 1:
+            return None
+    mouth = np.asarray(mouth_all & np.asarray(out_masks[entering[0]], dtype=np.bool_), dtype=np.bool_)
+    if not bool(mouth.any()):
+        return None
+    if int(mouth.sum()) >= MOUTH_MAX_FRAC * max(int(mask_arr.sum()), 1):
+        return None
+    return mouth, entering[0]
+
+
+def _mouth_extra(
+    mouth_all: NDArray[np.bool_],
+    mouth: NDArray[np.bool_],
+    owner_mask: NDArray[np.bool_],
+    winner: str,
+    out_masks: dict[str, NDArray[np.bool_]],
+    line: NDArray[np.bool_],
+) -> NDArray[np.bool_]:
+    """Rest-paper in the eye joined to the mouth (the sweep closure).
+
+    The child sweeps the whole hull-bridged eye when it turns, not only
+    the pixels it covers at rest: bare-paper gaps adjoining the mouth
+    would read as holes in the finished dome. Only pixels no part owns
+    and no line inks join, connected through paper to the mouth; seam
+    plates and any other part's pixels stay theirs.
+    """
+    pool = np.asarray(
+        np.asarray(mouth_all, dtype=np.bool_)
+        & ~np.asarray(owner_mask, dtype=np.bool_)
+        & ~np.asarray(line, dtype=np.bool_),
+        dtype=np.bool_,
+    )
+    for other, other_mask in out_masks.items():
+        if other != winner:
+            pool = np.asarray(pool & ~np.asarray(other_mask, dtype=np.bool_), dtype=np.bool_)
+    if not bool(pool.any()):
+        return pool
+    touch = np.asarray(cv2.dilate(np.asarray(mouth, dtype=np.uint8), np.ones((3, 3), np.uint8)), dtype=np.uint8) > 0
+    _n, lab_any = cv2.connectedComponents(np.asarray(pool, dtype=np.uint8), connectivity=8)
+    lab = np.asarray(lab_any, dtype=np.int32)
+    keep = np.zeros(pool.shape, np.bool_)
+    for cid in range(1, int(lab.max()) + 1):
+        cells = lab == cid
+        if bool((cells & touch).any()):
+            keep |= cells
+    return np.asarray(keep, dtype=np.bool_)
+
+
 def _merge_slivers(
     out_masks: dict[str, NDArray[np.bool_]],
     canvases: dict[str, NDArray[np.uint8]],
@@ -1143,6 +1261,9 @@ def _mouth_fill(
     touch_k: NDArray[np.uint8],
     drawn: dict[str, NDArray[np.bool_]],
     line_width: float,
+    extra: NDArray[np.bool_] | None = None,
+    win_out: list[NDArray[np.bool_]] | None = None,
+    cover_close: bool = False,
 ) -> tuple[int, str, list[float] | None]:
     """Paint one mouthful without covering drawn art; report paint and source.
 
@@ -1152,7 +1273,16 @@ def _mouth_fill(
     the tip: the tube side continues the tube, the disc side takes the owner's
     flat. For mirror pairs the tube side uses the tube colour (longest band
     run, K-0d item 8) where it matches the reference, so both legs end the
-    same way; single parts keep the legacy owner fill.
+    single parts keep the legacy owner fill. ``extra`` is rest-paper
+    in the same eye joined to the mouth (the child's sweep closure): it
+    always takes the owner's flat, and ``win_out`` collects the painted
+    zone (fill plus rim) so the caller can keep the entering child's
+    rest priority over it. Both default off, leaving legacy calls
+    byte-identical. ``cover_close`` closes a cover's mouth (the entering
+    part is the owner's child: a joint turns about the cover, so the mouth
+    is cover surface): the whole mouth takes the owner's flat with no tube
+    side and no inner rim, trusting the cover's own outline like a seam
+    disc. Tube mouths (the part ends there) keep the pair rule.
     """
     under_drawn = np.asarray(drawn[under_name], dtype=np.bool_)
     line_arr = np.asarray(line, dtype=np.bool_)
@@ -1166,6 +1296,12 @@ def _mouth_fill(
     under_mask_now = np.asarray(out_masks[under_name], dtype=np.bool_)
     tip_lines = np.asarray((mouth_arr | adj) & under_mask_now & line_arr, dtype=np.bool_)
     fill = mouth_arr & ~mouth_lines
+    xfill = np.zeros(fill.shape, np.bool_)
+    if extra is not None and owner_flat is not None:
+        xfill = np.asarray(
+            np.asarray(extra, dtype=np.bool_) & ~mouth_lines & ~fill,
+            dtype=np.bool_,
+        )
     twin: str | None = None
     if under_name.endswith(("_l", "_r")):
         cand = under_name[:-2] + ("_r" if under_name.endswith("_l") else "_l")
@@ -1236,6 +1372,10 @@ def _mouth_fill(
         keep |= np.asarray(shaft & match, dtype=np.bool_)
     elif tube is not None and not pair:
         keep |= shaft
+    if bool(xfill.any()):
+        keep = np.asarray(keep | xfill, dtype=np.bool_)
+    if cover_close and owner_flat is not None:
+        keep = np.asarray(fill | xfill, dtype=np.bool_)
     tip_xy: list[float] | None = None
     if tip is not None and frame is not None:
         axis, _cross, centre, _half = frame
@@ -1247,15 +1387,19 @@ def _mouth_fill(
     if owner_flat is not None and bool(disc.any()):
         paint[np.asarray(disc & keep, dtype=np.bool_)] = owner_flat
     shaft_keep = np.asarray(keep & ~disc, dtype=np.bool_)
-    shaft_colour = tube if pair and tube is not None else owner_flat
+    shaft_colour = owner_flat if cover_close else (tube if pair and tube is not None else owner_flat)
     if shaft_colour is not None and bool(shaft_keep.any()):
         paint[shaft_keep] = shaft_colour
+    if bool(xfill.any()) and owner_flat is not None:
+        paint[np.asarray(xfill, dtype=np.bool_)] = owner_flat
     under_mask = np.asarray(out_masks[under_name], dtype=np.bool_)
     inner = np.asarray(cv2.dilate(np.asarray(keep, dtype=np.uint8), touch_k), dtype=np.uint8) > 0
     rim = np.asarray(
         inner & under_mask & ~keep & ~mask & ~under_drawn,
         dtype=np.bool_,
     )
+    if cover_close and owner_flat is not None:
+        rim = np.zeros(rim.shape, np.bool_)
     paint[rim] = ink
     mask[rim] = True
     mask[keep] = True
@@ -1264,6 +1408,12 @@ def _mouth_fill(
         label = "tube"
     if tip is not None and shaft_side is not None:
         label += "+tip"
+    if cover_close and owner_flat is not None:
+        label = "own"
+    if bool(xfill.any()):
+        label += "+eye"
+    if win_out is not None:
+        win_out.append(np.asarray(np.asarray(keep, dtype=np.bool_) | rim, dtype=np.bool_))
     return int(keep.sum()), label, tip_xy
 
 
@@ -1419,6 +1569,11 @@ def complete_parts(
     # drawn-only paint: completion ink must never seed the detector.
     dome_chord_list = dome_chords(out_masks, canvases, z_of, line_width)
     dome_fronts = seam_fronts(out_masks, dome_chord_list, line_width)
+    seam_of = {
+        entry: set(dome_fronts.get(entry, ()))
+        | {chord.other for chord in dome_chord_list if chord.part == entry and chord.kind == "contact"}
+        for entry in order
+    }
     # Drawn art is sacred: completion may add backing but never repaints split
     # pixels (reference colours). The snapshot below is what mouth paint and
     # rims must leave alone.
@@ -1427,6 +1582,7 @@ def complete_parts(
     notes: dict[str, str] = {}
     conts: dict[str, NDArray[np.bool_]] = {}
     tips: dict[str, list[float]] = {}
+    mouth_wins: dict[str, NDArray[np.bool_]] = {}
 
     image_calls = 0
 
@@ -1458,6 +1614,7 @@ def complete_parts(
             if found is not None:
                 mouth, under_name = found
                 mouth_flat = _flat_colour(rgb, own)
+                cover_close = mouth_flat is not None and config.by_name[under_name].parent == name
                 painted, source, tip_xy = _mouth_fill(
                     rgb,
                     line,
@@ -1471,12 +1628,49 @@ def complete_parts(
                     touch_k,
                     drawn,
                     line_width,
+                    cover_close=cover_close,
                 )
                 if tip_xy is not None:
                     tips[under_name] = tip_xy
                 if painted:
                     methods[name].append("geometric")
                     notes[name] = f"convex mouth close of {painted} px over {under_name} ({source})"
+            else:
+                tied = _dome_mouth_tiebreak(mask, out_masks, order, z_of, name, touch_k, line_width, seam_of[name])
+                if tied is not None:
+                    mouth, under_name = tied
+                    cover_close = config.by_name[under_name].parent == name
+                    eye = np.asarray(_hull_only(np.asarray(mask, dtype=np.bool_)) & ~np.asarray(mask, dtype=np.bool_))
+                    extra = _mouth_extra(eye, mouth, mask, under_name, out_masks, line)
+                    tie_won: list[NDArray[np.bool_]] = []
+                    mouth_flat = _flat_colour(rgb, own)
+                    painted, source, tip_xy = _mouth_fill(
+                        rgb,
+                        line,
+                        canvas,
+                        mask,
+                        mouth,
+                        out_masks,
+                        under_name,
+                        mouth_flat,
+                        ink,
+                        touch_k,
+                        drawn,
+                        line_width,
+                        extra=extra,
+                        win_out=tie_won,
+                        cover_close=cover_close,
+                    )
+                    if tip_xy is not None:
+                        tips[under_name] = tip_xy
+                    if painted:
+                        methods[name].append("geometric")
+                        notes[name] = f"convex mouth close of {painted} px over {under_name} ({source})"
+                    if tie_won:
+                        prev_win = mouth_wins.get(under_name)
+                        mouth_wins[under_name] = (
+                            tie_won[0] if prev_win is None else np.asarray(prev_win | tie_won[0], dtype=np.bool_)
+                        )
             rgba = canvases[name]
             rgba[..., :3][mask] = canvas[mask]
             rgba[..., 3][mask] = 255
@@ -1562,6 +1756,7 @@ def complete_parts(
         if mouth_found is not None:
             mouth, under_name = mouth_found
             mouth_flat = _flat_colour(rgb, own)
+            cover_close = mouth_flat is not None and config.by_name[under_name].parent == name
             painted, source, tip_xy = _mouth_fill(
                 rgb,
                 line,
@@ -1575,6 +1770,7 @@ def complete_parts(
                 touch_k,
                 drawn,
                 line_width,
+                cover_close=cover_close,
             )
             if tip_xy is not None:
                 tips[under_name] = tip_xy
@@ -1583,6 +1779,42 @@ def complete_parts(
                     methods[name].append("geometric")
                 note = f"convex mouth close of {painted} px over {under_name} ({source})"
                 notes[name] = f"{notes[name]}; {note}" if name in notes else note
+        else:
+            tied = _dome_mouth_tiebreak(mask, out_masks, order, z_of, name, touch_k, line_width, seam_of[name])
+            if tied is not None:
+                mouth, under_name = tied
+                cover_close = config.by_name[under_name].parent == name
+                eye = np.asarray(_hull_only(np.asarray(mask, dtype=np.bool_)) & ~np.asarray(mask, dtype=np.bool_))
+                extra = _mouth_extra(eye, mouth, mask, under_name, out_masks, line)
+                tied_won: list[NDArray[np.bool_]] = []
+                mouth_flat = _flat_colour(rgb, own)
+                painted, source, tip_xy = _mouth_fill(
+                    rgb,
+                    line,
+                    canvas,
+                    mask,
+                    mouth,
+                    out_masks,
+                    under_name,
+                    mouth_flat,
+                    ink,
+                    touch_k,
+                    drawn,
+                    line_width,
+                    extra=extra,
+                    win_out=tied_won,
+                    cover_close=cover_close,
+                )
+                if tip_xy is not None:
+                    tips[under_name] = tip_xy
+                if painted:
+                    methods[name].append("geometric")
+                    notes[name] = f"convex mouth close of {painted} px over {under_name} ({source})"
+                if tied_won:
+                    prev_win = mouth_wins.get(under_name)
+                    mouth_wins[under_name] = (
+                        tied_won[0] if prev_win is None else np.asarray(prev_win | tied_won[0], dtype=np.bool_)
+                    )
         for chord in dome_chord_list:
             # Occluded dome ends (K-0e item 3b) continue under their cover as
             # a hidden disc cap: invisible at rest, finished in rotation.
@@ -1611,6 +1843,9 @@ def complete_parts(
     seam_wins = _seam_extensions(
         out_masks, canvases, conts, methods, notes, dome_chord_list, dome_fronts, rgb, line, line_width
     )
+    for under_name, zone in mouth_wins.items():
+        prev = seam_wins.get(under_name)
+        seam_wins[under_name] = zone if prev is None else np.asarray(prev | zone, dtype=np.bool_)
     seam_cover = {name: sorted(dome_fronts[name]) for name in order if name in dome_fronts}
     slivers = _merge_slivers(out_masks, canvases, line_width, inks)
     for name, px in slivers.items():

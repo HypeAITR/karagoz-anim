@@ -446,3 +446,20 @@ def test_swept_cut_counts_rotated_chord() -> None:
     still = swept_cut_px(masks, canvases, [], pivots, line, moving, 3.0)
     assert still["joint"]["+45"] == 0
     assert still["joint"]["-45"] == 0
+def test_coincident_curved_stroke_belongs_to_cover() -> None:
+    """A shared-boundary stroke that never runs straight still belongs to the cover."""
+    from karagoz.engine.puppet.complete import _coincident_run_ink
+
+    img = Image.new("RGB", (200, 160), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    draw.arc([92, 62, 128, 98], start=200, end=350, fill=BLACK, width=3)
+    arc = np.asarray(img, dtype=np.uint8).astype(int).sum(axis=2) < 180
+    assert 30 < int(arc.sum()) < 200
+    dome = np.zeros((160, 200, 4), np.uint8)
+    cover = np.zeros((160, 200, 4), np.uint8)
+    dome[..., :3][arc] = (0, 0, 0)
+    dome[..., 3][arc] = 255
+    cover[..., :3][arc] = (0, 0, 0)
+    cover[..., 3][arc] = 255
+    run, _near = _coincident_run_ink(dome, cover, 3.0)
+    assert float(np.asarray(run & arc).sum()) / float(arc.sum()) > 0.9

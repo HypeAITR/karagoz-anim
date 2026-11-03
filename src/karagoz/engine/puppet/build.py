@@ -745,6 +745,11 @@ def build_puppet(
         for other in full.seam_cover.get(name, []):
             if other in all_masks:
                 over |= np.asarray(all_masks[other], dtype=np.bool_)
+        for winner_zone in full.seam_wins.values():
+            # A mouth fill the entering child wins at rest is rest-covered
+            # by construction (the win redraws the child over the fill),
+            # so its border is not a cut.
+            over |= np.asarray(winner_zone, dtype=np.bool_)
         touch = np.asarray(cv2.dilate(over.astype(np.uint8), cover_k), dtype=np.uint8) > 0
         eroded = np.asarray(cv2.erode(mask.astype(np.uint8), erode_k), dtype=np.uint8) > 0
         border = np.asarray(mask & ~eroded, dtype=np.bool_)
