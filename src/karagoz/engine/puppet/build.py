@@ -58,6 +58,17 @@ SHEET_BG = (200, 200, 200)
 # Outline islands within this many pixels of the merged mass count as one
 # (line-art crumbs); farther islands stay separate.
 CRUMB_GAP_PX = 3
+# Pair-end check (K-0e item 4): mirror windows match when the mean per-channel
+# histogram L1 distance stays below this and the outline-shape IoU above this.
+PAIR_HIST_T = 0.30
+PAIR_IOU_T = 0.75
+# End-band window geometry: WIN_UP_PX above and WIN_DOWN_PX below the drawn
+# end; shape is compared on the tip strip only (TIP_STRIP_UP above the tip,
+# TIP_STRIP_DOWN below it).
+WIN_UP_PX = 40
+WIN_DOWN_PX = 16
+TIP_STRIP_UP = 12
+TIP_STRIP_DOWN = 8
 
 
 @dataclass
@@ -74,6 +85,87 @@ def estimate_line_width(line: NDArray[np.bool_]) -> float:
     dist = np.asarray(cv2.distanceTransform(np.asarray(line, dtype=np.uint8), cv2.DIST_L2, 3))
     inside = np.asarray(dist[line], dtype=np.float64)
     return float(max(1.0, round(float(np.percentile(inside, 90)) * 2, 1)))
+
+
+def _pair_end_scores(
+    left: NDArray[np.uint8],
+    right: NDArray[np.uint8],
+    img_l: NDArray[np.uint8] | None = None,
+    img_r: NDArray[np.uint8] | None = None,
+    drw_l: NDArray[np.bool_] | None = None,
+    drw_r: NDArray[np.bool_] | None = None,
+) -> tuple[float, float]:
+    """Mirror-window agreement: colour histogram L1 and outline-shape IoU.
+
+    The right windows are mirrored, so mirror-symmetric ends score (0.0, 1.0).
+    Colour uses 8 bins per channel on normalized histograms (mean L1 over the
+    channels) on the recomposed crops. Shape compares true-ink pixels
+    (brightest channel below 40, so maroon and grey flats never count as
+    outline) on the members' own part images when given (their ink only, never
+    the cover's design), restricted to the members' drawn masks when given
+    (completion rims back hidden regions and may legitimately differ). Shape
+    is compared on the tip strip (the end band proper): design above the tip
+    must not count as an ending mismatch. Windows extend WIN_DOWN_PX below
+    the drawn end, so the tip sits at row h - WIN_DOWN_PX.
+    """
+    r = np.fliplr(np.asarray(right))
+    l = np.asarray(left)
+    h = min(l.shape[0], r.shape[0])
+    w = min(l.shape[1], r.shape[1])
+    if h == 0 or w == 0:
+        return 1.0, 0.0
+    # Bottom-anchored: stance height differences align at the members' ends.
+    l = l[l.shape[0] - h :, (l.shape[1] - w) // 2 : (l.shape[1] - w) // 2 + w]
+    r = r[r.shape[0] - h :, (r.shape[1] - w) // 2 : (r.shape[1] - w) // 2 + w]
+    tip = h - WIN_DOWN_PX
+    s0, s1 = max(0, tip - TIP_STRIP_UP), min(h, tip + TIP_STRIP_DOWN)
+    if img_l is not None and img_r is not None:
+        il = np.asarray(img_l)
+        ir = np.fliplr(np.asarray(img_r))
+        ih = min(il.shape[0], ir.shape[0])
+        iw = min(il.shape[1], ir.shape[1])
+        if ih == 0 or iw == 0:
+            return 1.0, 0.0
+        il = il[il.shape[0] - ih :, (il.shape[1] - iw) // 2 : (il.shape[1] - iw) // 2 + iw]
+        ir = ir[ir.shape[0] - ih :, (ir.shape[1] - iw) // 2 : (ir.shape[1] - iw) // 2 + iw]
+        dl = np.asarray(drw_l, dtype=np.bool_) if drw_l is not None else np.ones(il.shape[:2], np.bool_)
+        dr = np.fliplr(np.asarray(drw_r, dtype=np.bool_) if drw_r is not None else np.ones(ir.shape[:2], np.bool_))
+        dh = min(dl.shape[0], dr.shape[0])
+        dw = min(dl.shape[1], dr.shape[1])
+        dl = dl[dl.shape[0] - dh :, (dl.shape[1] - dw) // 2 : (dl.shape[1] - dw) // 2 + dw]
+        dr = dr[dr.shape[0] - dh :, (dr.shape[1] - dw) // 2 : (dr.shape[1] - dw) // 2 + dw]
+        itip = ih - WIN_DOWN_PX
+        is0, is1 = max(0, itip - TIP_STRIP_UP), min(ih, itip + TIP_STRIP_DOWN)
+        ds0, ds1 = max(0, (dh - WIN_DOWN_PX) - TIP_STRIP_UP), min(dh, (dh - WIN_DOWN_PX) + TIP_STRIP_DOWN)
+        dark_l = (
+            (il[is0:is1, ..., :3].max(axis=2) < 40)
+            & (il[is0:is1, ..., 3] > 127)
+            & dl[ds0:ds1, (dl.shape[1] - iw) // 2 : (dl.shape[1] - iw) // 2 + iw]
+        )
+        dark_r = (
+            (ir[is0:is1, ..., :3].max(axis=2) < 40)
+            & (ir[is0:is1, ..., 3] > 127)
+            & dr[ds0:ds1, (dr.shape[1] - iw) // 2 : (dr.shape[1] - iw) // 2 + iw]
+        )
+    else:
+        dark_l = l[s0:s1].max(axis=2) < 40
+        dark_r = r[s0:s1].max(axis=2) < 40
+    hist_l1 = 0.0
+    n = max(h * w, 1)
+    for c in range(3):
+        hl, _ = np.histogram(l[..., c], bins=8, range=(0, 256))
+        hr, _ = np.histogram(r[..., c], bins=8, range=(0, 256))
+        hist_l1 += float(np.abs(hl / n - hr / n).sum()) / 2.0
+    hist_l1 /= 3.0
+    # Stroke tolerance: shared boundary ownership can jitter an outline by a
+    # pixel per side, so dilate before overlap. Missing walls (a covered tube)
+    # span many pixels and still fail.
+    dil_k = np.ones((3, 3), np.uint8)
+    dl_dil = np.asarray(cv2.dilate(dark_l.astype(np.uint8), dil_k), dtype=np.bool_)
+    dr_dil = np.asarray(cv2.dilate(dark_r.astype(np.uint8), dil_k), dtype=np.bool_)
+    union = int(np.logical_or(dl_dil, dr_dil).sum())
+    iou = float(np.logical_and(dl_dil, dr_dil).sum() / union) if union else 1.0
+    return hist_l1, iou
 
 
 def recompose(images: dict[str, NDArray[np.uint8]], order: list[str]) -> NDArray[np.uint8]:
@@ -509,6 +601,93 @@ def build_puppet(
         border = np.asarray(mask & ~eroded, dtype=np.bool_)
         straight[name] = int(np.logical_and(border, np.logical_and(~band, ~touch)).sum())
 
+    # K-0e item 1: a pixel painted by completion that is not under a higher
+    # part must match the reference (completion backs hidden regions; it must
+    # never recolour drawn art). Added pixels under higher parts, or where the
+    # reference is paper (intentional gap fills), are not counted.
+    exposed: dict[str, int] = {}
+    shadow_zone = (
+        np.asarray(split.shadow, dtype=np.bool_)
+        if split.shadow is not None
+        else np.zeros((height, width), np.bool_)
+    )
+    ref_rgb = np.asarray(rgb, dtype=np.int32)
+    ref_drawn = np.asarray(rgb.min(axis=2) < PAPER_MIN, dtype=np.bool_)
+    for name in split.order:
+        higher: NDArray[np.bool_] = np.zeros((height, width), np.bool_)
+        for other, z in z_of.items():
+            if z > z_of[name]:
+                higher |= np.asarray(all_masks[other], dtype=np.bool_)
+        added = np.asarray(
+            np.asarray(all_masks[name], dtype=np.bool_)
+            & ~np.asarray(split.part_masks[name], dtype=np.bool_)
+            & ~higher
+            & ~shadow_zone
+            & ref_drawn,
+            dtype=np.bool_,
+        )
+        if not bool(added.any()):
+            exposed[name] = 0
+            continue
+        painted = np.asarray(done.images[name][..., :3], dtype=np.int32)
+        mismatch = np.abs(painted - ref_rgb).max(axis=2) > RECOMP_DIFF
+        exposed[name] = int(np.logical_and(added, mismatch).sum())
+
+    # K-0e item 4: per mirror pair, the ends must match. Colour comes from the
+    # recomposed image (where a wrong disc or tongue shows); outline shape
+    # comes from each member's own part image (where only its own ink shows,
+    # never the cover's design). Windows anchor at the drawn tube tip when
+    # completion found one (stance-tolerant and immune to split bleed, which
+    # is flat and tipless), else at the drawn mask bottom; their width follows
+    # the tube so cuff design stays out.
+    recomp_rgb = np.asarray(recomp[..., :3], dtype=np.uint8)
+    pair_ends: dict[str, dict[str, Any]] = {}
+    pair_ok = True
+    for stem, pr in sorted(sides.items()):
+        if "l" not in pr or "r" not in pr:
+            continue
+        draws = {}
+        ok_members = True
+        for side in ("l", "r"):
+            member = pr[side]
+            dm = np.asarray(split.part_masks[member], dtype=np.bool_)
+            if not bool(dm.any()):
+                ok_members = False
+                break
+            tip_xy = full.tips.get(member)
+            if tip_xy is not None:
+                cx, brow = int(round(tip_xy[0])), int(round(tip_xy[1])) + 2
+            else:
+                rows = np.nonzero(dm.any(axis=1))[0]
+                brow = int(rows.max())
+                xs = np.nonzero(dm[brow, :])[0]
+                if len(xs) == 0:
+                    xs = np.nonzero(dm[max(0, brow - 2) :, :].any(axis=0))[0]
+                cx = int(np.median(xs))
+            wrow = min(max(brow, 0), height - 1)
+            wx = np.nonzero(dm[wrow, :])[0]
+            tube_w = int(wx.max() - wx.min() + 1) if len(wx) else 32
+            win_w = int(min(96, max(32, tube_w + 16)))
+            draws[side] = (cx, brow, win_w)
+        if not ok_members:
+            pair_ends[stem] = {"status": "skipped"}
+            continue
+        (xl, bl, wl) = draws["l"]
+        (xr, br, wr) = draws["r"]
+        win_w, win_up, win_down = max(wl, wr), WIN_UP_PX, WIN_DOWN_PX
+        yl0, yl1 = max(0, bl - win_up), min(height, bl + win_down)
+        yr0, yr1 = max(0, br - win_up), min(height, br + win_down)
+        crop_l = recomp_rgb[yl0:yl1, max(0, xl - win_w // 2) : xl + win_w // 2]
+        crop_r = recomp_rgb[yr0:yr1, max(0, xr - win_w // 2) : xr + win_w // 2]
+        img_l = np.asarray(part_images[pr["l"]][yl0:yl1, max(0, xl - win_w // 2) : xl + win_w // 2])
+        img_r = np.asarray(part_images[pr["r"]][yr0:yr1, max(0, xr - win_w // 2) : xr + win_w // 2])
+        drw_l = np.asarray(split.part_masks[pr["l"]][yl0:yl1, max(0, xl - win_w // 2) : xl + win_w // 2])
+        drw_r = np.asarray(split.part_masks[pr["r"]][yr0:yr1, max(0, xr - win_w // 2) : xr + win_w // 2])
+        hist_l1, shape_iou = _pair_end_scores(crop_l, crop_r, img_l, img_r, drw_l, drw_r)
+        ok = bool(hist_l1 <= PAIR_HIST_T and shape_iou >= PAIR_IOU_T)
+        pair_ends[stem] = {"status": "ok" if ok else "mismatch", "hist_l1": hist_l1, "shape_iou": shape_iou}
+        pair_ok = pair_ok and ok
+
     joints: dict[str, dict[str, Any]] = {}
     rotated: dict[str, dict[float, NDArray[np.uint8]]] = {}
     pre_covered = np.zeros((height, width), np.bool_)
@@ -565,6 +744,9 @@ def build_puppet(
         "symmetry_ok": sym_ok,
         "foreign_share": foreign,
         "straight_cut_px": straight,
+        "exposed_completion_px": exposed,
+        "pair_ends": pair_ends,
+        "pair_ends_ok": pair_ok,
         "joints": joints,
         "completed": {name: list(done.methods.get(name, [])) for name in split.order},
         "completion_notes": {
