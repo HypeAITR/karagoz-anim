@@ -58,6 +58,7 @@ A scene is a stack of layers, each with one behaviour managed by the engine: **h
 | `src/karagoz/engine/puppet/pose.py` | puppet poses: joint angles, root similarity, chains from the tree, z-order render with the shadow layer |
 | `src/karagoz/engine/puppet/interp.py` | joint timing and angle interpolation: ease curves, shortest-path angles, follow-through sequences |
 | `src/karagoz/engine/puppet/fit.py` | fit the puppet to a key drawing: single-part snap, limb chains, X->Y transitions, fit and transition reports; joint limits on every search path, unexplained-pixel decay, multi-start pull |
+| `src/karagoz/engine/puppet/render_aa.py` | fast anti-aliased puppet renderer: cropped premultiplied parts, destination-box bilinear warps, over compositing |
 | `src/karagoz/engine/camera.py` | camera track: framing names into a crop box per frame |
 | `src/karagoz/engine/compose.py` | compositor: cut out drawings, place characters, composite frames |
 | `src/karagoz/engine/framing.py` | per-frame camera target boxes from the drawing on screen at each frame |
