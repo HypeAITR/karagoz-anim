@@ -19,6 +19,7 @@ import json
 import math
 from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path
 from typing import Any
 
@@ -81,6 +82,19 @@ class DrawingFeatures:
     line: NDArray[np.bool_]
     dist: NDArray[np.float32]
     paper: NDArray[np.bool_]
+
+    # float64 views for scoring, converted once per drawing (not per score call)
+    @cached_property
+    def dist_f(self) -> NDArray[np.float64]:
+        return np.asarray(self.dist, dtype=np.float64)
+
+    @cached_property
+    def paper_f(self) -> NDArray[np.float64]:
+        return np.asarray(self.paper.astype(np.float64), dtype=np.float64)
+
+    @cached_property
+    def rgb_f(self) -> NDArray[np.float64]:
+        return np.asarray(self.rgb.astype(np.float64), dtype=np.float64)
 
 
 @dataclass
@@ -216,9 +230,9 @@ def batch_scores(
     mats = np.asarray(mats, dtype=np.float64).reshape(-1, 2, 3)
     total = np.zeros(mats.shape[0], np.float64)
     height, width = feat.line.shape
-    dist_f = np.asarray(feat.dist, dtype=np.float64)
-    paper_f = np.asarray(feat.paper.astype(np.float64), dtype=np.float64)
-    rgb_f = np.asarray(feat.rgb.astype(np.float64), dtype=np.float64)
+    dist_f = feat.dist_f
+    paper_f = feat.paper_f
+    rgb_f = feat.rgb_f
     if len(samp.line_xy):
         coords = _warp_batch(samp.line_xy, mats).reshape(-1, 2)
         dist = _bilinear(dist_f, coords[:, 0], coords[:, 1], 50.0).reshape(mats.shape[0], -1)
@@ -266,9 +280,9 @@ def score_samples(
     unexplained rest).
     """
     height, width = feat.line.shape
-    dist_f = np.asarray(feat.dist, dtype=np.float64)
-    paper_f = np.asarray(feat.paper.astype(np.float64), dtype=np.float64)
-    rgb_f = np.asarray(feat.rgb.astype(np.float64), dtype=np.float64)
+    dist_f = feat.dist_f
+    paper_f = feat.paper_f
+    rgb_f = feat.rgb_f
     total = 0.0
     weight = 0.0
     if len(samp.line_xy):
@@ -481,9 +495,9 @@ def exclusive_total(
     samples but no owned pixels left score ``-STACK_PENALTY``.
     """
     height, width = feat.line.shape
-    dist_f = np.asarray(feat.dist, dtype=np.float64)
-    paper_f = np.asarray(feat.paper.astype(np.float64), dtype=np.float64)
-    rgb_f = np.asarray(feat.rgb.astype(np.float64), dtype=np.float64)
+    dist_f = feat.dist_f
+    paper_f = feat.paper_f
+    rgb_f = feat.rgb_f
     members = [m for m in reversed(z_order(puppet, pose)) if m in chain and m in samples]
     coords: dict[str, tuple[NDArray[np.float64], NDArray[np.float64]]] = {}
     for name in members:
@@ -1009,7 +1023,7 @@ def resolve_z(
         mat = np.asarray(part_matrix3(puppet, work, name)[:2], dtype=np.float64)
         warped[name] = _warp_points(samples[name].flat_xy, mat)
     height, width = feat.line.shape
-    drew = np.asarray(feat.rgb.astype(np.float64))
+    drew = feat.rgb_f
 
     def agree_idx(name: str, idx: NDArray[np.int64], xs: NDArray[np.int64], ys: NDArray[np.int64]) -> float:
         own = np.asarray(samples[name].flat_rgb[idx].astype(np.float64))
