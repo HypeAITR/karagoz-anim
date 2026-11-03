@@ -128,6 +128,10 @@ def repivot_view(view_dir: Path) -> dict[str, dict[str, Any]]:
     for name in order:
         pre_covered = np.asarray(pre_covered | finished[name], dtype=np.bool_)
     joints: dict[str, Any] = report.get("joints", {})
+    ring_parts = set(result.rings.values())
+    for limited, lim in result.limits.items():
+        if limited in joints:
+            joints[limited]["limits"] = [float(lim[0]), float(lim[1])]
     changes: dict[str, dict[str, Any]] = {}
     for name, part in puppet.parts.items():
         if part.parent is None or part.hidden:
@@ -135,7 +139,7 @@ def repivot_view(view_dir: Path) -> dict[str, dict[str, Any]]:
         old = [float(part.pivot[0]), float(part.pivot[1])]
         entry: dict[str, Any] = joints.get(name, {})
         built_paper = dict(entry.get("paper_px", {}))
-        if name in result.domes:
+        if name in result.domes or name in result.rings or name in ring_parts:
             new = [float(result.pivots[name][0]), float(result.pivots[name][1])]
             part.pivot = [new[0], new[1]]
             part.estimated = False
@@ -146,10 +150,16 @@ def repivot_view(view_dir: Path) -> dict[str, dict[str, Any]]:
                     "radius": float(result.radii[name]),
                 }
             )
-            changes[name] = {"old": old, "new": new, "moved": True, "dome": result.domes[name]}
+            changes[name] = {
+                "old": old,
+                "new": new,
+                "moved": True,
+                "dome": result.domes.get(name),
+                "ring": result.rings.get(name, name if name in ring_parts else None),
+            }
         else:
             new = old
-            changes[name] = {"old": old, "new": new, "moved": False, "dome": None}
+            changes[name] = {"old": old, "new": new, "moved": False, "dome": None, "ring": None}
         pivot = (float(new[0]), float(new[1]))
         moving = build_subtree_names(cfg, name)
         sweep_r = sweep_radius(pivot, {n: finished[n] for n in moving}, line_width)
@@ -169,6 +179,7 @@ def repivot_view(view_dir: Path) -> dict[str, dict[str, Any]]:
         changes[name]["paper_built"] = built_paper
         changes[name]["paper_new"] = dict(paper)
         changes[name]["own_px"] = entry.get("own_px")
+        changes[name]["limited"] = name in result.limits
     report["joints"] = joints
     (view_dir / "puppet.json").write_text(puppet.model_dump_json(indent=1) + "\n", encoding="utf-8")
     (view_dir / "report.json").write_text(json.dumps(report, indent=1) + "\n", encoding="utf-8")

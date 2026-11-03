@@ -587,7 +587,11 @@ def cmd_puppet_repivot(args: argparse.Namespace) -> int:
                 old = change["old"]
                 new = change["new"]
                 print(f"{view}/{name}: ({old[0]:.1f}, {old[1]:.1f}) -> ({new[0]:.1f}, {new[1]:.1f})")
-                print(f"  dome {change['dome']}")
+                print(f"  dome {change['dome']} ring {change['ring']}")
+    for view, joints in changes.items():
+        limited = sorted(name for name, change in joints.items() if change.get("limited"))
+        if limited:
+            print(f"{view} limits +-10: {', '.join(limited)}")
     print(f"views {len(changes)} joints {n_joints} moved {n_moved} -> {args.out_dir}")
     return 0
 

@@ -31,6 +31,15 @@ DOME_MIN_SPAN = 2.4
 # A child is projected onto its own long axis only when that axis is clear:
 # a principal-value ratio above this means a near-square part with no axis.
 AXIS_ISOTROPIC = 0.75
+# Ring gates (K-0p round 2): a ring joint is a short part between a parent
+# tube and a child tube, in front of its child at the joint. The ring is no
+# longer than ~1.5x its width along the chain axis; both tubes read clearly
+# (parent strictly) and run the same way.
+RING_MAX_ASPECT = 1.5
+RING_PARENT_MAX_RATIO = 0.5
+RING_MIN_ALIGNMENT = 0.9
+# Narrow rotation limit written as data for ring joints and dome joints.
+RING_LIMIT_DEG = 10.0
 
 
 @dataclass
@@ -42,6 +51,10 @@ class PivotResult:
     estimated: dict[str, bool] = field(default_factory=dict)
     # Joint to covering dome part name, only where the K-0p dome rule fired.
     domes: dict[str, str] = field(default_factory=dict)
+    # Ring child joint to its ring part, only where the ring rule fired.
+    rings: dict[str, str] = field(default_factory=dict)
+    # Joints with a narrow rotation limit (+/-10 deg): ring parts and domes.
+    limits: dict[str, list[float]] = field(default_factory=dict)
 
 
 def _tube_axis(mask: NDArray[np.bool_]) -> tuple[NDArray[np.float64], NDArray[np.float64], bool]:
@@ -239,6 +252,74 @@ def compute_pivots(
     domes: dict[str, str] = {}
     touch = max(3, int(round(line_width)))
     touch_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * touch + 1, 2 * touch + 1))
+    shapes: dict[str, tuple[NDArray[np.float64], NDArray[np.float64], float]] = {}
+
+    def _shape(name: str) -> tuple[NDArray[np.float64], NDArray[np.float64], float] | None:
+        if name in shapes:
+            return shapes[name]
+        smask = np.asarray(masks.get(name, np.zeros(0, dtype=np.bool_)), dtype=np.bool_)
+        syy, sxx = np.nonzero(smask)
+        if len(sxx) < MIN_FIT_POINTS:
+            return None
+        spts = np.stack([sxx.astype(np.float64), syy.astype(np.float64)], axis=1)
+        scentre = spts.mean(axis=0)
+        svals, svecs = np.linalg.eigh(np.cov((spts - scentre).T))
+        shapes[name] = (
+            scentre,
+            np.asarray(svecs[:, 1], dtype=np.float64),
+            float(svals[0]) / max(float(svals[1]), 1e-9),
+        )
+        return shapes[name]
+
+    # Ring pre-pass (K-0p round 2): a short part between a parent tube and a
+    # child tube, in front of the child. No outline fit: the role decides.
+    ring_of: dict[str, str] = {}
+    ring_aux: dict[str, tuple[str, float, NDArray[np.float64], NDArray[np.float64]]] = {}
+    for part in config.parts:
+        if part.hidden or part.parent is None:
+            continue
+        rmask = np.asarray(masks[part.name], dtype=np.bool_)
+        if not bool(rmask.any()):
+            continue
+        kids = [
+            q
+            for q in config.parts
+            if q.parent == part.name and not q.hidden and bool(np.asarray(masks[q.name], dtype=np.bool_).any())
+        ]
+        if not kids:
+            continue
+        pshape = _shape(part.parent)
+        if pshape is None or pshape[2] > RING_PARENT_MAX_RATIO:
+            continue
+        _, p_axis, _ = pshape
+        grown_p = np.asarray(cv2.dilate(np.asarray(masks[part.parent], dtype=np.uint8), touch_k), dtype=np.uint8) > 0
+        if not bool(np.logical_and(rmask, grown_p).any()):
+            continue
+        grown_r = np.asarray(cv2.dilate(rmask.astype(np.uint8), touch_k), dtype=np.uint8) > 0
+        rys, rxs = np.nonzero(rmask)
+        rpts = np.stack([rxs.astype(np.float64), rys.astype(np.float64)], axis=1)
+        for child in kids:
+            if z_of[child.name] >= z_of[part.name]:
+                continue
+            kshape = _shape(child.name)
+            if kshape is None:
+                continue
+            k_centre, k_axis, k_ratio = kshape
+            if k_ratio > AXIS_ISOTROPIC:
+                continue
+            if abs(float(p_axis @ k_axis)) < RING_MIN_ALIGNMENT:
+                continue
+            proj = (rpts - k_centre) @ k_axis
+            extent = float(proj.max() - proj.min())
+            side = np.array([-k_axis[1], k_axis[0]])
+            across = (rpts - k_centre) @ side
+            width = float(across.max() - across.min())
+            if extent > RING_MAX_ASPECT * width:
+                continue
+            if not bool(np.logical_and(np.asarray(masks[child.name], dtype=np.bool_), grown_r).any()):
+                continue
+            ring_of[child.name] = part.name
+            ring_aux.setdefault(part.name, (child.name, width / 2.0, rpts.mean(axis=0), k_axis))
     for part in config.parts:
         mask = masks[part.name]
         if part.hidden:
@@ -321,6 +402,21 @@ def compute_pivots(
                 pivots[part.name] = (float(centre[0] + axis[0] * along), float(centre[1] + axis[1] * along))
             radii[part.name] = float(dr)
             continue
+        if part.name in ring_of:
+            rname = ring_of[part.name]
+            _, across_half, rcen, kax = ring_aux[rname]
+            kcen, _, _ = shapes[part.name]
+            shift = float((rcen - kcen) @ kax)
+            pivots[part.name] = (float(kcen[0] + kax[0] * shift), float(kcen[1] + kax[1] * shift))
+            radii[part.name] = max(base_r, float(across_half))
+            continue
+        if part.name in ring_aux:
+            kid, across_half, rcen, kax = ring_aux[part.name]
+            kcen, _, _ = shapes[kid]
+            shift = float((rcen - kcen) @ kax)
+            pivots[part.name] = (float(kcen[0] + kax[0] * shift), float(kcen[1] + kax[1] * shift))
+            radii[part.name] = max(base_r, float(across_half))
+            continue
         max_rmse = max(1.0, 0.5 * line_width)
         clean_fits: list[tuple[float, float, float, float]] = []
         full_fits: list[tuple[float, float, float, float]] = []
@@ -369,4 +465,9 @@ def compute_pivots(
         raise ValueError(f"no pivots for {void}")
     for name in by_name:
         estimated.setdefault(name, False)
-    return PivotResult(pivots=pivots, radii=radii, estimated=estimated, domes=domes)
+    limits: dict[str, list[float]] = {}
+    for rname in ring_aux:
+        limits[rname] = [-RING_LIMIT_DEG, RING_LIMIT_DEG]
+    for dname in set(domes.values()):
+        limits.setdefault(dname, [-RING_LIMIT_DEG, RING_LIMIT_DEG])
+    return PivotResult(pivots=pivots, radii=radii, estimated=estimated, domes=domes, rings=ring_of, limits=limits)
