@@ -37,7 +37,11 @@ class Pose(_Strict):
     ``[0, 0]`` means the puppet's own canvas. ``scores`` / ``confidences``
     are per-part fit quality, filled by ``fit``; ``overlap`` is the fraction
     of each part's pixels another part also covers (order-free); ``view``
-    names the set view.
+    names the set view. ``offset`` maps part name -> [dx, dy] joint slack
+    in reference pixels (default empty = every joint on its modelled
+    pivot; K-2 interpolates it like the angles). ``chain_notes`` maps
+    chain leaf name -> reviewer note (e.g. why an unseated chain was
+    kept unfolded).
     """
 
     view: str = ""
@@ -47,6 +51,8 @@ class Pose(_Strict):
     rotation: float = 0.0
     scale: float = 1.0
     z_override: dict[str, int] = Field(default_factory=dict)
+    offset: dict[str, list[float]] = Field(default_factory=dict)
+    chain_notes: dict[str, str] = Field(default_factory=dict)
     scores: dict[str, float] = Field(default_factory=dict)
     confidences: dict[str, float] = Field(default_factory=dict)
     overlap: dict[str, float] = Field(default_factory=dict)
@@ -150,20 +156,41 @@ def root_matrix3(puppet: Puppet, pose: Pose) -> NDArray[np.float64]:
     return _trans3(pose.tx, pose.ty) @ inner
 
 
+def _offset_of(pose: Pose, part: str) -> tuple[float, float]:
+    """Joint slack offset of ``part`` in reference pixels (default origin).
+
+    The offset slides the joint: the part and everything below it move
+    with it, ancestors are unaffected.
+    """
+    value = pose.offset.get(part)
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        return (float(value[0]), float(value[1]))
+    return (0.0, 0.0)
+
+
 def part_matrix3(puppet: Puppet, pose: Pose, part: str) -> NDArray[np.float64]:
     """Total 3x3 matrix for ``part`` (reference -> output pixels).
 
     The part's own rotation applies first, then each ancestor's rotation
     from the parent up to the root's child, then the root similarity.
+    A part's slack offset translates its joint in the parent frame, so
+    the part and everything below it shift with it. Empty offsets take
+    the exact old code path.
     """
     mat = _rot3(
         float(puppet.parts[part].pivot[0]),
         float(puppet.parts[part].pivot[1]),
         float(pose.angles.get(part, 0.0)),
     )
+    ox, oy = _offset_of(pose, part)
+    if ox or oy:
+        mat = _trans3(ox, oy) @ mat
     for anc in reversed(ancestors_of(puppet, part)):
         piv = puppet.parts[anc].pivot
         mat = _rot3(float(piv[0]), float(piv[1]), float(pose.angles.get(anc, 0.0))) @ mat
+        ox, oy = _offset_of(pose, anc)
+        if ox or oy:
+            mat = _trans3(ox, oy) @ mat
     return root_matrix3(puppet, pose) @ mat
 
 
@@ -196,6 +223,8 @@ def render_pose(
     ``images`` maps part name -> RGBA in reference pixels (plus optional
     ``"_shadow"`` floor layer, warped by the root similarity only and drawn
     first). Parts missing from ``images`` (hidden parts) are skipped.
+    Per-part slack offsets (``Pose.offset``) shift joints through
+    :func:`part_matrix3`, so rendering follows fitted offsets exactly.
     """
     if images is None:
         raise ValueError("render_pose needs part images (name -> RGBA); the puppet.json has no pixels")

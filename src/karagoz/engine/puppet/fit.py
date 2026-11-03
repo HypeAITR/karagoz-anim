@@ -68,6 +68,14 @@ SCORE_MIN = 0.25
 # True placements stay under 0.3 overlap (seams); clean scores clear 1.1.
 OVERLAP_MAX = 0.5
 STACK_SCORE = 1.0
+# Slack-joint offset search: prior per reference pixel toward the modelled
+# pivot, same scale as the rest prior per degree (a degree moves a 100 px
+# limb about as far as a pixel slides its joint).
+OFFSET_PRIOR = 0.0005
+# Reason recorded in ``Pose.chain_notes`` when the fit keeps a chain
+# unfolded because no feasible placement seats it (reviewer acceptance rule:
+# the engine must not produce an absurd pose).
+NEVER_FIT_REASON = "puppet does not fit this drawing"
 SECOND_PASS = True
 
 
@@ -858,6 +866,229 @@ def _greedy_from(
     return best, chain_objective(puppet, trial, chain, samples, feat, tau, center, blocked, explained)
 
 
+def _offset_disc(slack: float, tau: float) -> list[tuple[float, float]]:
+    """Coarse search points inside the slack disc: centre plus rim rings.
+
+    Ring spacing follows the chamfer basin (``3 * tau``) so the grid always
+    lands a point inside the optimum's basin; the rim ring is always present
+    so a joint slid all the way out is reachable.
+    """
+    pts = [(0.0, 0.0)]
+    if slack <= 0.0:
+        return pts
+    spacing = max(2.0, min(float(slack) / 3.0, 3.0 * max(float(tau), 1.0)))
+    radius = spacing
+    while radius < slack - 1e-9:
+        count = max(6, int(round(2.0 * math.pi * radius / spacing)))
+        for k in range(count):
+            ang = 2.0 * math.pi * float(k) / float(count)
+            pts.append((radius * math.cos(ang), radius * math.sin(ang)))
+        radius += spacing
+    count = max(6, int(round(2.0 * math.pi * slack / spacing)))
+    for k in range(count):
+        ang = 2.0 * math.pi * float(k) / float(count)
+        pts.append((slack * math.cos(ang), slack * math.sin(ang)))
+    return pts
+
+
+def _trial_offset(work: Pose, name: str, dx: float, dy: float) -> Pose:
+    """Copy of ``work`` with ``name``'s slack offset set (zero entries dropped)."""
+    offsets = dict(work.offset)
+    if dx * dx + dy * dy < 1e-18:
+        offsets.pop(name, None)
+    else:
+        offsets[name] = [float(dx), float(dy)]
+    return work.model_copy(update={"offset": offsets})
+
+
+def _offset_value(
+    puppet: Puppet,
+    trial: Pose,
+    chain: list[str],
+    samples: dict[str, PartSamples],
+    feat: DrawingFeatures,
+    tau: float,
+    center: dict[str, float],
+    blocked: NDArray[np.bool_] | None,
+    explained: NDArray[np.bool_] | None,
+) -> float:
+    """Chain objective with the small prior toward zero offset.
+
+    The angle prior terms are constant while offsets move, so offset
+    candidates compete on their own agreement minus the pull to the modelled
+    pivot; a joint that explains nothing extra stays exactly on its pivot.
+    """
+    total = chain_objective(puppet, trial, chain, samples, feat, tau, center, blocked, explained)
+    for name in chain:
+        off = trial.offset.get(name)
+        if isinstance(off, (list, tuple)) and len(off) == 2:
+            total -= OFFSET_PRIOR * math.hypot(float(off[0]), float(off[1]))
+    return total
+
+
+def _resnap_leaf(
+    puppet: Puppet,
+    work: Pose,
+    chain: list[str],
+    samples: dict[str, PartSamples],
+    feat: DrawingFeatures,
+    tau: float,
+    center: dict[str, float],
+    blocked: NDArray[np.bool_] | None,
+    explained: NDArray[np.bool_] | None,
+    frozen: dict[str, float],
+) -> None:
+    """Re-snap the chain's leaf member with exclusive scoring, in place.
+
+    Full-circle coarse sweep plus fine refinement, scored with the joint
+    exclusive objective (stolen pixels discounted, seams excluded from
+    feasibility) at the current upstream angles and offsets; the feasible
+    gated value keeps the re-snap only on improvement. Catches what the
+    stacking-blind baseline folds (a claw parked on its own tube) and what
+    the local descent cannot walk out of. No-op without a slack member in
+    the chain, so slack-0 fits keep today's path exactly.
+    """
+    if not chain or chain[-1] in frozen:
+        return
+    slack_here = False
+    for m in chain:
+        part = puppet.parts.get(m)
+        if part is not None and float(part.slack_px) > 0.0:
+            slack_here = True
+            break
+    if not slack_here:
+        return
+    leaf = chain[-1]
+    lim = _limits_of(puppet, leaf)
+    cur = float(work.angles.get(leaf, 0.0))
+
+    def trial_value(angle: float) -> tuple[bool, float]:
+        trial = work.model_copy(update={"angles": {**work.angles, leaf: float(angle)}})
+        feas, _ = chain_feasible(puppet, trial, chain, samples, feat.line.shape)
+        if not feas:
+            return False, -math.inf
+        return True, _offset_value(puppet, trial, chain, samples, feat, tau, center, blocked, explained)
+
+    _, best_total = trial_value(cur)
+    best_angle = cur
+    angle = 0.0
+    while angle < 360.0:
+        for cand in _clip_cands([angle], lim):
+            feas, value = trial_value(cand)
+            if feas and value > best_total:
+                best_total, best_angle = value, float(cand)
+        angle += COARSE_STEP
+    angle = best_angle - FINE_RANGE
+    while angle <= best_angle + FINE_RANGE + 1e-9:
+        for cand in _clip_cands([angle], lim):
+            feas, value = trial_value(cand)
+            if feas and value > best_total:
+                best_total, best_angle = value, float(cand)
+        angle += FINE_STEP
+    if best_angle != cur:
+        work.angles[leaf] = float(best_angle)
+
+
+def _fit_offsets(
+    puppet: Puppet,
+    work: Pose,
+    chain: list[str],
+    samples: dict[str, PartSamples],
+    feat: DrawingFeatures,
+    tau: float,
+    center: dict[str, float],
+    blocked: NDArray[np.bool_] | None,
+    explained: NDArray[np.bool_] | None,
+    frozen: dict[str, float],
+    *,
+    coarse: bool,
+    refine: bool,
+) -> None:
+    """Search slack-joint offsets in place: coarse disc grid, then descent.
+
+    Parent-first, one member at a time (a parent's slide moves everything
+    below it, so it settles first). Members without slack and frozen members
+    take today's code path untouched: only a non-zero offset that beats the
+    objective is recorded, so a slack-0 fit leaves ``pose.offset`` empty
+    exactly.
+    """
+    for name in chain:
+        if name in frozen:
+            continue
+        part = puppet.parts.get(name)
+        slack = float(part.slack_px) if part is not None else 0.0
+        if slack <= 0.0:
+            continue
+        cur = work.offset.get(name)
+        if isinstance(cur, (list, tuple)) and len(cur) == 2:
+            best_dx, best_dy = float(cur[0]), float(cur[1])
+        else:
+            best_dx, best_dy = 0.0, 0.0
+        best = _offset_value(
+            puppet,
+            _trial_offset(work, name, best_dx, best_dy),
+            chain,
+            samples,
+            feat,
+            tau,
+            center,
+            blocked,
+            explained,
+        )
+        if coarse:
+            for dx, dy in _offset_disc(slack, tau):
+                if dx * dx + dy * dy > slack * slack + 1e-9:
+                    continue
+                value = _offset_value(
+                    puppet,
+                    _trial_offset(work, name, dx, dy),
+                    chain,
+                    samples,
+                    feat,
+                    tau,
+                    center,
+                    blocked,
+                    explained,
+                )
+                if value > best:
+                    best, best_dx, best_dy = value, float(dx), float(dy)
+        if refine:
+            for step in (2.0, 1.0, 0.5):
+                moved = True
+                sweeps = 0
+                while moved and sweeps < 6:
+                    moved = False
+                    sweeps += 1
+                    neighbours = (
+                        (best_dx + step, best_dy),
+                        (best_dx - step, best_dy),
+                        (best_dx, best_dy + step),
+                        (best_dx, best_dy - step),
+                        (0.0, 0.0),
+                    )
+                    for dx, dy in neighbours:
+                        if dx * dx + dy * dy > slack * slack + 1e-9:
+                            continue
+                        value = _offset_value(
+                            puppet,
+                            _trial_offset(work, name, dx, dy),
+                            chain,
+                            samples,
+                            feat,
+                            tau,
+                            center,
+                            blocked,
+                            explained,
+                        )
+                        if value > best:
+                            best, best_dx, best_dy = value, float(dx), float(dy)
+                            moved = True
+        if best_dx * best_dx + best_dy * best_dy < 1e-18:
+            work.offset.pop(name, None)
+        else:
+            work.offset[name] = [float(best_dx), float(best_dy)]
+
+
 def fit_chain(
     puppet: Puppet,
     pose: Pose,
@@ -886,7 +1117,14 @@ def fit_chain(
     angle through the baseline, the greedy and the descent, so the pull only
     moves what the difference map unlocked. Declared joint limits
     (``PuppetPart.limits``) clip every other candidate on every search path;
-    ``frozen`` still pins exactly.
+    ``frozen`` still pins exactly. Slack joints (``PuppetPart.slack_px``
+    above 0) search an offset inside the slack disc together with the angles
+    (coarse grid then descent, small prior to 0); only a non-zero offset
+    that beats the objective is recorded. A winner that folds a member onto
+    its own chain (see :func:`chain_feasible`) loses to the best feasible
+    candidate (the straight continuation always runs); a chain kept unfolded
+    without a seating fit is flagged in ``pose.chain_notes`` with the
+    never-fit reason.
     """
     feat = features if features is not None else drawing_features(np.asarray(drawing, dtype=np.uint8))
     if samples is None:
@@ -901,26 +1139,53 @@ def fit_chain(
     work = pose.model_copy(deep=True)
     for name, angle in stay.items():
         work.angles[name] = float(angle)
-    # Baseline: part by part in tree order.
-    for name in chain:
-        if name in stay:
-            continue
-        if local_deg is None:
-            res = snap_part(puppet, work, name, feat.rgb, samples, feat)
-        else:
-            res = snap_part(
-                puppet,
-                work,
-                name,
-                feat.rgb,
-                samples,
-                feat,
-                hint_deg=float(work.angles.get(name, 0.0)),
-                window_deg=float(local_deg),
-            )
-        work.angles[name] = float(res.angle)
-        work.scores[name] = float(res.score)
-        work.confidences[name] = float(res.confidence)
+    # Candidate offsets from the input pose. A straight input already sits
+    # in the offset basin; a raw input far from truth (T-pose for a raised
+    # arm) may drag them onto dense lines instead, so they only ever seed
+    # baseline B below, never the fit directly.
+    _fit_offsets(puppet, work, chain, samples, feat, tau, center, None, None, stay, coarse=True, refine=True)
+    offsets_b = {m: list(work.offset[m]) for m in chain if m in work.offset}
+    for m in chain:
+        work.offset.pop(m, None)
+
+    def snap_baseline() -> None:
+        for name in chain:
+            if name in stay:
+                continue
+            if local_deg is None:
+                res = snap_part(puppet, work, name, feat.rgb, samples, feat)
+            else:
+                res = snap_part(
+                    puppet,
+                    work,
+                    name,
+                    feat.rgb,
+                    samples,
+                    feat,
+                    hint_deg=float(work.angles.get(name, 0.0)),
+                    window_deg=float(local_deg),
+                )
+            work.angles[name] = float(res.angle)
+            work.scores[name] = float(res.score)
+            work.confidences[name] = float(res.confidence)
+
+    # Baseline A: part by part in tree order, zero offsets (today's path).
+    snap_baseline()
+    angles_a = {m: float(work.angles.get(m, 0.0)) for m in chain}
+    angles_b: dict[str, float] = {}
+    if offsets_b:
+        # Baseline B: same snaps with the input-pose offsets in place. Its
+        # angles only seed the B offset hypothesis below; the hypotheses meet
+        # at the greedy level, where each gets a full restart.
+        for m in chain:
+            if m in offsets_b:
+                work.offset[m] = list(offsets_b[m])
+        snap_baseline()
+        angles_b = {m: float(work.angles.get(m, 0.0)) for m in chain}
+    # A is today's default: reset the work pose to it for the context fields.
+    for m in chain:
+        work.angles[m] = float(angles_a[m])
+        work.offset.pop(m, None)
     blocked = context_blocked(puppet, work, chain, samples, feat.line.shape)
     # Pixels other placed parts explain (dilated cover, robust to the sparse
     # striding of large parts): agreement there decays, so the chain prefers
@@ -929,57 +1194,112 @@ def fit_chain(
     explained = explained_mask(
         puppet, work, samples, feat.line.shape, skip=set(chain), line_radius=_explain_line_radius(puppet, work)
     )
-    best_angles = dict(work.angles)
-    best_total = chain_objective(
-        puppet,
-        work.model_copy(update={"angles": dict(best_angles)}),
-        chain,
-        samples,
-        feat,
-        tau,
-        center,
-        blocked,
-        explained,
-    )
+    # HA: offsets at the A baseline (coarse grid then descent, like angles).
+    _fit_offsets(puppet, work, chain, samples, feat, tau, center, blocked, explained, stay, coarse=True, refine=True)
+    offsets_a = {m: list(work.offset[m]) for m in chain if m in work.offset}
+    if anchor is None:
+        # The partwise baseline is stacking-blind (own score only): a claw
+        # snapped onto its own tube's dense lines beats the open claw, and
+        # everything downstream then keeps the fold. Re-snapping the leaf
+        # with the joint exclusive objective at settled upstream angles and
+        # offsets finds the open claw when it seats (a full-circle sweep, not
+        # a local walk). Slack arm chains only; skipped under a transition
+        # pull (locality) and with frozen leaves.
+        _resnap_leaf(puppet, work, chain, samples, feat, tau, center, blocked, explained, stay)
+    baseline_angles = dict(work.angles)
+    # The re-snap may have moved the leaf: refresh the baseline snapshot so
+    # the floor below evaluates the re-snapped placement, not the blind snap.
+    angles_a = {m: float(work.angles.get(m, 0.0)) for m in chain}
+    floor_a = work.model_copy(update={"angles": {**work.angles, **angles_a}, "offset": dict(offsets_a)})
+    feas_floor, _ = chain_feasible(puppet, floor_a, chain, samples, feat.line.shape)
+    best_total = _offset_value(puppet, floor_a, chain, samples, feat, tau, center, blocked, explained)
+    if not feas_floor:
+        best_total = -math.inf
+    best_angles = dict(angles_a)
+    best_offsets = dict(offsets_a)
     if anchor is None:
         # From scratch the partwise baseline can inherit one wild carrier
         # joint (an elbow ring) that its descendants then compensate, so the
         # global greedy restarts from rest zeros with the pair grid on.
-        zeros = {m: 0.0 for m in chain}
-        greedy, value = _greedy_from(
-            puppet,
-            work,
-            chain,
-            zeros,
-            samples,
-            feat,
-            tau,
-            center,
-            local_deg,
-            blocked,
-            pair_grid=True,
-            frozen=stay,
-            explained=explained,
-        )
+        from_angles = {m: 0.0 for m in chain}
+        pair_grid = True
     else:
         # A transition pull stays near X: greedy restarts from the baseline
         # with the narrow local window.
-        greedy, value = _greedy_from(
+        from_angles = dict(best_angles)
+        pair_grid = False
+    # Greedy under the A offsets (today's restart).
+    for m in chain:
+        if m in offsets_a:
+            work.offset[m] = list(offsets_a[m])
+        else:
+            work.offset.pop(m, None)
+    greedy_a, _ = _greedy_from(
+        puppet,
+        work,
+        chain,
+        from_angles,
+        samples,
+        feat,
+        tau,
+        center,
+        local_deg,
+        blocked,
+        pair_grid=pair_grid,
+        frozen=stay,
+        explained=explained,
+    )
+    trial_ga = work.model_copy(update={"angles": {**work.angles, **greedy_a}, "offset": dict(offsets_a)})
+    feas_ga, _ = chain_feasible(puppet, trial_ga, chain, samples, feat.line.shape)
+    value_ga = _offset_value(puppet, trial_ga, chain, samples, feat, tau, center, blocked, explained)
+    if feas_ga and value_ga > best_total:
+        best_total, best_angles, best_offsets = value_ga, dict(greedy_a), dict(offsets_a)
+    if offsets_b:
+        # HB: the input-pose offsets refined at the B baseline, then the same
+        # restart under them; the feasibility-gated value picks the hypothesis.
+        for m in chain:
+            work.angles[m] = float(angles_b[m])
+            if m in offsets_b:
+                work.offset[m] = list(offsets_b[m])
+            else:
+                work.offset.pop(m, None)
+        _fit_offsets(
+            puppet, work, chain, samples, feat, tau, center, blocked, explained, stay, coarse=False, refine=True
+        )
+        offsets_hb = {m: list(work.offset[m]) for m in chain if m in work.offset}
+        for m in chain:
+            if m in offsets_hb:
+                work.offset[m] = list(offsets_hb[m])
+            else:
+                work.offset.pop(m, None)
+        greedy_b, _ = _greedy_from(
             puppet,
             work,
             chain,
-            best_angles,
+            from_angles,
             samples,
             feat,
             tau,
             center,
             local_deg,
             blocked,
+            pair_grid=pair_grid,
             frozen=stay,
             explained=explained,
         )
-    if value > best_total:
-        best_total, best_angles = value, greedy
+        trial_gb = work.model_copy(update={"angles": {**work.angles, **greedy_b}, "offset": dict(offsets_hb)})
+        feas_gb, _ = chain_feasible(puppet, trial_gb, chain, samples, feat.line.shape)
+        value_gb = _offset_value(puppet, trial_gb, chain, samples, feat, tau, center, blocked, explained)
+        if feas_gb and value_gb > best_total:
+            best_total, best_angles, best_offsets = value_gb, dict(greedy_b), dict(offsets_hb)
+    # Restore the winner into work for the descent below.
+    for m in chain:
+        work.angles[m] = float(best_angles[m])
+    for m in chain:
+        if m in best_offsets:
+            work.offset[m] = list(best_offsets[m])
+        else:
+            work.offset.pop(m, None)
     # Coordinate descent on the joint objective. Turning one joint only moves
     # its downstream members, so candidates re-score just those (cached plain
     # sums for the rest); only the turned joint's prior term changes.
@@ -1029,6 +1349,40 @@ def fit_chain(
         best_angles = dict(pre_descent)
     for name in chain:
         work.angles[name] = float(best_angles[name])
+    _fit_offsets(puppet, work, chain, samples, feat, tau, center, blocked, explained, stay, coarse=True, refine=True)
+    # Never fold: an infeasible winner (a member stacked on its own chain
+    # past OVERLAP_MAX, seams excluded) loses to the best feasible
+    # candidate. The straight continuation (rest, or X under a transition
+    # pull) always runs, so a chain the puppet cannot seat stays unfolded
+    # and flagged instead of folding onto dense lines.
+    shape = feat.line.shape
+    feasible_win, _ = chain_feasible(puppet, work, chain, samples, shape)
+    if not feasible_win:
+        options = [
+            ("fit", {m: float(work.angles.get(m, 0.0)) for m in chain}),
+            ("baseline", {m: float(baseline_angles.get(m, 0.0)) for m in chain}),
+            ("continuation", {m: float(center.get(m, 0.0)) for m in chain}),
+        ]
+        scored = []
+        for _label, ang in options:
+            trial = work.model_copy(update={"angles": {**work.angles, **ang}})
+            feas, _ = chain_feasible(puppet, trial, chain, samples, shape)
+            total = chain_objective(puppet, trial, chain, samples, feat, tau, center, blocked, explained)
+            scored.append((ang, feas, total))
+        feasible_opts = [s for s in scored if s[1]]
+        kept = max(feasible_opts, key=lambda s: s[2]) if feasible_opts else max(scored, key=lambda s: s[2])
+        for name in chain:
+            work.angles[name] = float(kept[0][name])
+        seated = True
+        for member in chain:
+            if member not in samples:
+                continue
+            mat = np.asarray(part_matrix3(puppet, work, member)[:2], dtype=np.float64)
+            if score_samples(samples[member], mat, feat, tau, None) < SCORE_MIN:
+                seated = False
+                break
+        if not feasible_opts or not seated:
+            work.chain_notes[chain_name] = NEVER_FIT_REASON
     for name in chain:
         score, gap = _part_confidence(puppet, work, name, samples, feat, tau)
         work.scores[name] = float(score)
@@ -1320,6 +1674,71 @@ def overlap_fraction(
     return out
 
 
+def chain_feasible(
+    puppet: Puppet,
+    pose: Pose,
+    chain: list[str],
+    samples: dict[str, PartSamples],
+    shape: tuple[int, int],
+) -> tuple[bool, dict[str, float]]:
+    """Whether a chain placement folds a member onto its own chain.
+
+    Per member, the fraction of its in-bounds pixels another member of the
+    same chain also covers; past ``OVERLAP_MAX`` the placement is infeasible,
+    whatever its score. Pixels near a shared joint (the seam where two tubes
+    legitimately meet) count for neither side: each in-chain joint
+    contributes a disc around the pivot warped by both frames (they disagree
+    under slack), sized from the puppet's own line width and the pose scale.
+    Members with no pixels outside the seams count 0 (a ring is nearly all
+    seam).
+    """
+    height, width = shape
+    members = [m for m in chain if m in samples]
+    mats = {name: np.asarray(part_matrix3(puppet, pose, name), dtype=np.float64) for name in members}
+    keys: dict[str, NDArray[np.int64]] = {}
+    for name in members:
+        samp = samples[name]
+        merged: list[NDArray[np.int64]] = []
+        flat = np.asarray(mats[name][:2], dtype=np.float64)
+        for pts in (samp.line_xy, samp.flat_xy):
+            if len(pts):
+                keyed = _pixel_keys(_warp_points(pts, flat), height, width)
+                merged.append(keyed[keyed >= 0])
+        keys[name] = np.concatenate(merged) if merged else np.zeros(0, np.int64)
+    scale = float(pose.scale)
+    radius = max(4.0, 3.0 * float(puppet.line_width_px) * (scale if scale > 0.0 else 1.0))
+    seam = np.zeros(height * width, np.bool_)
+    for name in members:
+        parent = puppet.parts[name].parent
+        if parent is None or parent not in mats:
+            continue
+        pivot = np.array(
+            [float(puppet.parts[name].pivot[0]), float(puppet.parts[name].pivot[1]), 1.0],
+            dtype=np.float64,
+        )
+        for mat in (mats[name], mats[parent]):
+            cx, cy = float(mat[0] @ pivot), float(mat[1] @ pivot)
+            x0 = max(0, int(math.floor(cx - radius)))
+            x1 = min(width, int(math.ceil(cx + radius)) + 1)
+            y0 = max(0, int(math.floor(cy - radius)))
+            y1 = min(height, int(math.ceil(cy + radius)) + 1)
+            if x0 >= x1 or y0 >= y1:
+                continue
+            ys, xs = np.mgrid[y0:y1, x0:x1]
+            inside = (xs - cx) ** 2 + (ys - cy) ** 2 <= radius * radius
+            seam[(ys * width + xs)[inside]] = True
+    count = np.zeros(height * width, np.int16)
+    for name in members:
+        if len(keys[name]):
+            count[keys[name]] += 1
+    fracs: dict[str, float] = {}
+    for name in members:
+        keyed = keys[name]
+        use = keyed[~seam[keyed]] if len(keyed) else keyed
+        fracs[name] = float(np.mean(count[use] > 1)) if len(use) else 0.0
+    return all(f <= OVERLAP_MAX for f in fracs.values()), fracs
+
+
 def needs_human(pose: Pose, puppet: Puppet | None = None) -> list[str]:
     """Parts with low confidence, low score or heavy overlap: the review asks a human.
 
@@ -1334,7 +1753,16 @@ def needs_human(pose: Pose, puppet: Puppet | None = None) -> list[str]:
             continue
         if float(pose.overlap.get(name, 0.0)) > OVERLAP_MAX and float(pose.scores.get(name, 0.0)) < STACK_SCORE:
             out.append(name)
-    return sorted(out)
+    if puppet is not None:
+        leaves = chains(puppet)
+        for leaf, note in (pose.chain_notes or {}).items():
+            if note == NEVER_FIT_REASON and leaf in leaves:
+                for member in leaves[leaf]:
+                    part = puppet.parts.get(member)
+                    if part is not None and part.hidden:
+                        continue
+                    out.append(member)
+    return sorted(set(out))
 
 
 def pose_total(pose: Pose) -> float:
@@ -1501,12 +1929,14 @@ def fit_report_dict(
                 "score": float(pose.scores.get(name, 0.0)),
                 "confidence": float(pose.confidences.get(name, 0.0)),
                 "overlap": float(pose.overlap.get(name, 0.0)),
+                "offset": [float(x) for x in (pose.offset.get(name) or [0.0, 0.0])],
                 "z": int(pose.z_override.get(name, part.z)),
                 "chain": part_of.get(name),
             }
             for name, part in loaded.puppet.parts.items()
         },
         "chains": {leaf: {"parts": list(members), "score": chain_scores[leaf]} for leaf, members in names.items()},
+        "chain_notes": dict(pose.chain_notes or {}),
         "view_totals": {name: float(value) for name, value in totals.items()},
         "total": float(pose_total(pose)),
         "needs_human": needs_human(pose, loaded.puppet),

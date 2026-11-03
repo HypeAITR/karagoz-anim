@@ -242,6 +242,11 @@ class PuppetPart(_Strict):
     # Optional joint rotation limits [lo, hi] in degrees, relative to rest
     # (see PartSpec.limits); the fit search clips every candidate into range.
     limits: list[float] | None = None
+    # Optional joint slack in reference pixels: how far the joint may slide
+    # from its modelled pivot (the animator nudging a shoulder). The chain
+    # fit searches an offset inside this radius; default 0 disables the
+    # search exactly.
+    slack_px: float = 0.0
     completed: list[str] = Field(default_factory=list)
     approved: bool = False
     # Hidden in this view: not drawn here (a head variant renders instead),
@@ -262,6 +267,18 @@ class PuppetPart(_Strict):
         if not pair[0] <= pair[1]:
             raise ValueError(f"limits need lo <= hi, got {pair}")
         return pair
+
+    @field_validator("slack_px", mode="before")
+    @classmethod
+    def _slack_nonnegative(cls, value: object) -> object:
+        if value is None:
+            return 0.0
+        if not isinstance(value, (int, float, str)):
+            raise ValueError("slack_px must be a number")
+        number = float(value)
+        if number < 0.0:
+            raise ValueError("slack_px must be non-negative")
+        return number
 
 
 class Puppet(_Strict):
