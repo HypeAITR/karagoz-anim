@@ -3,7 +3,10 @@
 For each child the pivot is the centre of its overlap with the parent. For a
 ring/cap joint the pivot is instead the centre of the ring/cap circle fitted
 to the joint outline (whichever nearby outline is more circular, the parent's
-or the child's). Stored as float. The root's pivot is its centre of mass.
+or the child's). A child whose joint end disappears under a covering dome
+(the parent or a part in front of it with a circular outline near the joint,
+K-0p) instead turns about the dome's centre projected onto the child's axis.
+Stored as float. The root's pivot is its centre of mass.
 """
 
 from __future__ import annotations
@@ -14,10 +17,29 @@ import cv2
 import numpy as np
 from numpy.typing import NDArray
 
-from karagoz.engine.puppet.model import PuppetConfig
+from karagoz.engine.puppet.model import PartSpec, PuppetConfig
 
 MIN_FIT_POINTS = 8
 REL_RMSE_BACKSTOP = 0.35
+# Dome gates (K-0p): a covering dome reads as a dome at the drawing's scale,
+# same yardstick as the dome detector in complete.py. Smaller arcs are corner
+# fillets and ticks, never domes closing a part.
+DOME_MIN_R_LW = 5.0
+DOME_MAX_RMS_PX = 1.5
+DOME_MAX_RMS_FRAC = 0.10
+DOME_MIN_SPAN = 2.4
+# A child is projected onto its own long axis only when that axis is clear:
+# a principal-value ratio above this means a near-square part with no axis.
+AXIS_ISOTROPIC = 0.75
+# Ring gates (K-0p round 2): a ring joint is a short part between a parent
+# tube and a child tube, in front of its child at the joint. The ring is no
+# longer than ~1.5x its width along the chain axis; both tubes read clearly
+# (parent strictly) and run the same way.
+RING_MAX_ASPECT = 1.5
+RING_PARENT_MAX_RATIO = 0.5
+RING_MIN_ALIGNMENT = 0.9
+# Narrow rotation limit written as data for ring joints and dome joints.
+RING_LIMIT_DEG = 10.0
 
 
 @dataclass
@@ -27,6 +49,96 @@ class PivotResult:
     # True where the pivot was projected onto the parent boundary because a
     # third part hides the joint (no visible touch to measure).
     estimated: dict[str, bool] = field(default_factory=dict)
+    # Joint to covering dome part name, only where the K-0p dome rule fired.
+    domes: dict[str, str] = field(default_factory=dict)
+    # Ring child joint to its ring part, only where the ring rule fired.
+    rings: dict[str, str] = field(default_factory=dict)
+    # Joints with a narrow rotation limit (+/-10 deg): ring parts and domes.
+    limits: dict[str, list[float]] = field(default_factory=dict)
+
+
+def _tube_axis(mask: NDArray[np.bool_]) -> tuple[NDArray[np.float64], NDArray[np.float64], bool]:
+    """Centroid, long axis and isotropy of a child mask (K-0p).
+
+    The long axis is the principal axis of the mask pixels. A near-square
+    mask has no meaningful axis (isotropic) and the dome centre is used
+    as-is; a tube-like mask projects the dome centre onto its centreline.
+    """
+    ys, xs = np.nonzero(np.asarray(mask, dtype=np.bool_))
+    pts = np.stack([xs.astype(np.float64), ys.astype(np.float64)], axis=1)
+    centre = pts.mean(axis=0)
+    if len(xs) < MIN_FIT_POINTS:
+        return centre, np.asarray([1.0, 0.0], dtype=np.float64), True
+    _vals, vecs = np.linalg.eigh(np.cov((pts - centre).T))
+    vals = np.asarray(_vals, dtype=np.float64)
+    isotropic = bool(float(vals[0]) / max(float(vals[1]), 1e-9) > AXIS_ISOTROPIC)
+    return centre, np.asarray(vecs[:, 1], dtype=np.float64), isotropic
+
+
+def _covering_dome(
+    child: str,
+    parent: str,
+    masks: dict[str, NDArray[np.bool_]],
+    by_name: dict[str, PartSpec],
+    z_of: dict[str, int],
+    own_outline: dict[str, NDArray[np.bool_]],
+    win: NDArray[np.bool_],
+    line_width: float,
+) -> tuple[str, float, float, float] | None:
+    """Centre and radius of the dome covering a child's joint end (K-0p).
+
+    Candidates are the parent and any part strictly in front of the child
+    whose mask reaches the joint window. A candidate counts as a dome when
+    its one-owner outline fits a circle at the drawing's scale (radius at
+    least five line widths, residual within a tenth of the radius, arc past
+    a quarter turn). Returns the dome's name with its mask centroid and the fitted radius;
+    None when no candidate is dome-like, so the caller keeps today's pivot
+    exactly. The centroid is the dome's visual centre: for a circular dome
+    it is the fitted-circle centre, and it stays on the centre when the dome
+    foreshortens into an ellipse while a circle fit would slide off along
+    the view direction.
+    """
+    child_z = z_of[child]
+    names: list[str] = [parent]
+    for name, z in z_of.items():
+        if name != parent and name != child and z > child_z:
+            other = np.asarray(masks.get(name, np.zeros(0, dtype=np.bool_)), dtype=np.bool_)
+            if other.shape == win.shape and bool(np.logical_and(other, win).any()):
+                names.append(name)
+    # The parent always counts when it reaches the window (it is the joint
+    # the child hangs off); front parts only when they cover the window.
+    parent_mask = np.asarray(masks[parent], dtype=np.bool_)
+    if parent_mask.shape != win.shape or not bool(np.logical_and(parent_mask, win).any()):
+        names = names[1:]
+    scored: list[tuple[float, str, float]] = []
+    for name in names:
+        spec = by_name.get(name)
+        if isinstance(spec, PartSpec) and bool(spec.hidden):
+            continue
+        use = np.asarray(own_outline.get(name, np.zeros_like(win, dtype=np.bool_)), dtype=np.bool_)
+        sy, sx = np.nonzero(use)
+        if len(sx) < MIN_FIT_POINTS:
+            continue
+        fit = _kasa_fit(sx.astype(np.float64), sy.astype(np.float64))
+        if fit is None:
+            continue
+        cx, cy, r, rmse = fit
+        if r < DOME_MIN_R_LW * line_width:
+            continue
+        if rmse > max(DOME_MAX_RMS_PX, DOME_MAX_RMS_FRAC * r):
+            continue
+        if _circle_span(sx.astype(np.float64), sy.astype(np.float64), cx, cy) < DOME_MIN_SPAN:
+            continue
+        scored.append((rmse, name, r))
+    if not scored:
+        return None
+    scored.sort(key=lambda t: (t[0], t[0] / max(t[2], 1e-6)))
+    _rmse, dome_name, dome_r = scored[0]
+    dmask = np.asarray(masks[dome_name], dtype=np.bool_)
+    dys, dxs = np.nonzero(dmask)
+    if len(dxs) == 0:
+        return None
+    return (dome_name, float(dxs.mean()), float(dys.mean()), float(dome_r))
 
 
 def _circle_span(xs: NDArray[np.float64], ys: NDArray[np.float64], cx: float, cy: float) -> float:
@@ -136,8 +248,78 @@ def compute_pivots(
     radii: dict[str, float] = {}
     estimated: dict[str, bool] = {}
     by_name = config.by_name
+    z_of = {p.name: p.z for p in config.parts}
+    domes: dict[str, str] = {}
     touch = max(3, int(round(line_width)))
     touch_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * touch + 1, 2 * touch + 1))
+    shapes: dict[str, tuple[NDArray[np.float64], NDArray[np.float64], float]] = {}
+
+    def _shape(name: str) -> tuple[NDArray[np.float64], NDArray[np.float64], float] | None:
+        if name in shapes:
+            return shapes[name]
+        smask = np.asarray(masks.get(name, np.zeros(0, dtype=np.bool_)), dtype=np.bool_)
+        syy, sxx = np.nonzero(smask)
+        if len(sxx) < MIN_FIT_POINTS:
+            return None
+        spts = np.stack([sxx.astype(np.float64), syy.astype(np.float64)], axis=1)
+        scentre = spts.mean(axis=0)
+        svals, svecs = np.linalg.eigh(np.cov((spts - scentre).T))
+        shapes[name] = (
+            scentre,
+            np.asarray(svecs[:, 1], dtype=np.float64),
+            float(svals[0]) / max(float(svals[1]), 1e-9),
+        )
+        return shapes[name]
+
+    # Ring pre-pass (K-0p round 2): a short part between a parent tube and a
+    # child tube, in front of the child. No outline fit: the role decides.
+    ring_of: dict[str, str] = {}
+    ring_aux: dict[str, tuple[str, float, NDArray[np.float64], NDArray[np.float64]]] = {}
+    for part in config.parts:
+        if part.hidden or part.parent is None:
+            continue
+        rmask = np.asarray(masks[part.name], dtype=np.bool_)
+        if not bool(rmask.any()):
+            continue
+        kids = [
+            q
+            for q in config.parts
+            if q.parent == part.name and not q.hidden and bool(np.asarray(masks[q.name], dtype=np.bool_).any())
+        ]
+        if not kids:
+            continue
+        pshape = _shape(part.parent)
+        if pshape is None or pshape[2] > RING_PARENT_MAX_RATIO:
+            continue
+        _, p_axis, _ = pshape
+        grown_p = np.asarray(cv2.dilate(np.asarray(masks[part.parent], dtype=np.uint8), touch_k), dtype=np.uint8) > 0
+        if not bool(np.logical_and(rmask, grown_p).any()):
+            continue
+        grown_r = np.asarray(cv2.dilate(rmask.astype(np.uint8), touch_k), dtype=np.uint8) > 0
+        rys, rxs = np.nonzero(rmask)
+        rpts = np.stack([rxs.astype(np.float64), rys.astype(np.float64)], axis=1)
+        for child in kids:
+            if z_of[child.name] >= z_of[part.name]:
+                continue
+            kshape = _shape(child.name)
+            if kshape is None:
+                continue
+            k_centre, k_axis, k_ratio = kshape
+            if k_ratio > AXIS_ISOTROPIC:
+                continue
+            if abs(float(p_axis @ k_axis)) < RING_MIN_ALIGNMENT:
+                continue
+            proj = (rpts - k_centre) @ k_axis
+            extent = float(proj.max() - proj.min())
+            side = np.array([-k_axis[1], k_axis[0]])
+            across = (rpts - k_centre) @ side
+            width = float(across.max() - across.min())
+            if extent > RING_MAX_ASPECT * width:
+                continue
+            if not bool(np.logical_and(np.asarray(masks[child.name], dtype=np.bool_), grown_r).any()):
+                continue
+            ring_of[child.name] = part.name
+            ring_aux.setdefault(part.name, (child.name, width / 2.0, rpts.mean(axis=0), k_axis))
     for part in config.parts:
         mask = masks[part.name]
         if part.hidden:
@@ -203,6 +385,38 @@ def compute_pivots(
         own_outline = {
             name: np.asarray(line & grown & ~interface, dtype=np.bool_) for name, grown in dilated_fills.items()
         }
+        # K-0p: a child entering under a covering dome turns about the dome's
+        # centre projected onto the child's axis. No dome: fall through to
+        # today's pivot exactly (the code below this block is untouched).
+        wy, wx = np.ogrid[:height, :width]
+        win_disk = np.asarray((wx - guess[0]) ** 2 + (wy - guess[1]) ** 2 <= win * win, dtype=np.bool_)
+        dome = _covering_dome(part.name, part.parent, masks, by_name, z_of, own_outline, win_disk, line_width)
+        if dome is not None:
+            dome_name, dx, dy, dr = dome
+            domes[part.name] = dome_name
+            centre, axis, isotropic = _tube_axis(mask)
+            if isotropic:
+                pivots[part.name] = (float(dx), float(dy))
+            else:
+                along = (dx - float(centre[0])) * float(axis[0]) + (dy - float(centre[1])) * float(axis[1])
+                pivots[part.name] = (float(centre[0] + axis[0] * along), float(centre[1] + axis[1] * along))
+            radii[part.name] = float(dr)
+            continue
+        if part.name in ring_of:
+            rname = ring_of[part.name]
+            _, across_half, rcen, kax = ring_aux[rname]
+            kcen, _, _ = shapes[part.name]
+            shift = float((rcen - kcen) @ kax)
+            pivots[part.name] = (float(kcen[0] + kax[0] * shift), float(kcen[1] + kax[1] * shift))
+            radii[part.name] = max(base_r, float(across_half))
+            continue
+        if part.name in ring_aux:
+            kid, across_half, rcen, kax = ring_aux[part.name]
+            kcen, _, _ = shapes[kid]
+            shift = float((rcen - kcen) @ kax)
+            pivots[part.name] = (float(kcen[0] + kax[0] * shift), float(kcen[1] + kax[1] * shift))
+            radii[part.name] = max(base_r, float(across_half))
+            continue
         max_rmse = max(1.0, 0.5 * line_width)
         clean_fits: list[tuple[float, float, float, float]] = []
         full_fits: list[tuple[float, float, float, float]] = []
@@ -251,4 +465,9 @@ def compute_pivots(
         raise ValueError(f"no pivots for {void}")
     for name in by_name:
         estimated.setdefault(name, False)
-    return PivotResult(pivots=pivots, radii=radii, estimated=estimated)
+    limits: dict[str, list[float]] = {}
+    for rname in ring_aux:
+        limits[rname] = [-RING_LIMIT_DEG, RING_LIMIT_DEG]
+    for dname in set(domes.values()):
+        limits.setdefault(dname, [-RING_LIMIT_DEG, RING_LIMIT_DEG])
+    return PivotResult(pivots=pivots, radii=radii, estimated=estimated, domes=domes, rings=ring_of, limits=limits)

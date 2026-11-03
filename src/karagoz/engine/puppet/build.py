@@ -19,7 +19,7 @@ import numpy as np
 from numpy.typing import NDArray
 from PIL import Image, ImageDraw, ImageFont
 
-from karagoz.engine.puppet.complete import CompletionResult, complete_parts
+from karagoz.engine.puppet.complete import CompletionResult, DomeChord, _coincident_run_ink, complete_parts, dome_chords
 from karagoz.engine.puppet.model import (
     Puppet,
     PuppetConfig,
@@ -58,6 +58,17 @@ SHEET_BG = (200, 200, 200)
 # Outline islands within this many pixels of the merged mass count as one
 # (line-art crumbs); farther islands stay separate.
 CRUMB_GAP_PX = 3
+# Pair-end check (K-0e item 4): mirror windows match when the mean per-channel
+# histogram L1 distance stays below this and the outline-shape IoU above this.
+PAIR_HIST_T = 0.30
+PAIR_IOU_T = 0.75
+# End-band window geometry: WIN_UP_PX above and WIN_DOWN_PX below the drawn
+# end; shape is compared on the tip strip only (TIP_STRIP_UP above the tip,
+# TIP_STRIP_DOWN below it).
+WIN_UP_PX = 40
+WIN_DOWN_PX = 16
+TIP_STRIP_UP = 12
+TIP_STRIP_DOWN = 8
 
 
 @dataclass
@@ -76,8 +87,98 @@ def estimate_line_width(line: NDArray[np.bool_]) -> float:
     return float(max(1.0, round(float(np.percentile(inside, 90)) * 2, 1)))
 
 
-def recompose(images: dict[str, NDArray[np.uint8]], order: list[str]) -> NDArray[np.uint8]:
-    """Draw the part RGBA images in ``order`` (low first) onto white paper."""
+def _pair_end_scores(
+    left: NDArray[np.uint8],
+    right: NDArray[np.uint8],
+    img_l: NDArray[np.uint8] | None = None,
+    img_r: NDArray[np.uint8] | None = None,
+    drw_l: NDArray[np.bool_] | None = None,
+    drw_r: NDArray[np.bool_] | None = None,
+) -> tuple[float, float]:
+    """Mirror-window agreement: colour histogram L1 and outline-shape IoU.
+
+    The right windows are mirrored, so mirror-symmetric ends score (0.0, 1.0).
+    Colour uses 8 bins per channel on normalized histograms (mean L1 over the
+    channels) on the recomposed crops. Shape compares true-ink pixels
+    (brightest channel below 40, so maroon and grey flats never count as
+    outline) on the members' own part images when given (their ink only, never
+    the cover's design), restricted to the members' drawn masks when given
+    (completion rims back hidden regions and may legitimately differ). Shape
+    is compared on the tip strip (the end band proper): design above the tip
+    must not count as an ending mismatch. Windows extend WIN_DOWN_PX below
+    the drawn end, so the tip sits at row h - WIN_DOWN_PX.
+    """
+    r = np.fliplr(np.asarray(right))
+    ll = np.asarray(left)
+    h = min(ll.shape[0], r.shape[0])
+    w = min(ll.shape[1], r.shape[1])
+    if h == 0 or w == 0:
+        return 1.0, 0.0
+    # Bottom-anchored: stance height differences align at the members' ends.
+    ll = ll[ll.shape[0] - h :, (ll.shape[1] - w) // 2 : (ll.shape[1] - w) // 2 + w]
+    r = r[r.shape[0] - h :, (r.shape[1] - w) // 2 : (r.shape[1] - w) // 2 + w]
+    tip = h - WIN_DOWN_PX
+    s0, s1 = max(0, tip - TIP_STRIP_UP), min(h, tip + TIP_STRIP_DOWN)
+    if img_l is not None and img_r is not None:
+        il = np.asarray(img_l)
+        ir = np.fliplr(np.asarray(img_r))
+        ih = min(il.shape[0], ir.shape[0])
+        iw = min(il.shape[1], ir.shape[1])
+        if ih == 0 or iw == 0:
+            return 1.0, 0.0
+        il = il[il.shape[0] - ih :, (il.shape[1] - iw) // 2 : (il.shape[1] - iw) // 2 + iw]
+        ir = ir[ir.shape[0] - ih :, (ir.shape[1] - iw) // 2 : (ir.shape[1] - iw) // 2 + iw]
+        dl = np.asarray(drw_l, dtype=np.bool_) if drw_l is not None else np.ones(il.shape[:2], np.bool_)
+        dr = np.fliplr(np.asarray(drw_r, dtype=np.bool_) if drw_r is not None else np.ones(ir.shape[:2], np.bool_))
+        dh = min(dl.shape[0], dr.shape[0])
+        dw = min(dl.shape[1], dr.shape[1])
+        dl = dl[dl.shape[0] - dh :, (dl.shape[1] - dw) // 2 : (dl.shape[1] - dw) // 2 + dw]
+        dr = dr[dr.shape[0] - dh :, (dr.shape[1] - dw) // 2 : (dr.shape[1] - dw) // 2 + dw]
+        itip = ih - WIN_DOWN_PX
+        is0, is1 = max(0, itip - TIP_STRIP_UP), min(ih, itip + TIP_STRIP_DOWN)
+        ds0, ds1 = max(0, (dh - WIN_DOWN_PX) - TIP_STRIP_UP), min(dh, (dh - WIN_DOWN_PX) + TIP_STRIP_DOWN)
+        dark_l = (
+            (il[is0:is1, ..., :3].max(axis=2) < 40)
+            & (il[is0:is1, ..., 3] > 127)
+            & dl[ds0:ds1, (dl.shape[1] - iw) // 2 : (dl.shape[1] - iw) // 2 + iw]
+        )
+        dark_r = (
+            (ir[is0:is1, ..., :3].max(axis=2) < 40)
+            & (ir[is0:is1, ..., 3] > 127)
+            & dr[ds0:ds1, (dr.shape[1] - iw) // 2 : (dr.shape[1] - iw) // 2 + iw]
+        )
+    else:
+        dark_l = ll[s0:s1].max(axis=2) < 40
+        dark_r = r[s0:s1].max(axis=2) < 40
+    hist_l1 = 0.0
+    n = max(h * w, 1)
+    for c in range(3):
+        hl, _ = np.histogram(ll[..., c], bins=8, range=(0, 256))
+        hr, _ = np.histogram(r[..., c], bins=8, range=(0, 256))
+        hist_l1 += float(np.abs(hl / n - hr / n).sum()) / 2.0
+    hist_l1 /= 3.0
+    # Stroke tolerance: shared boundary ownership can jitter an outline by a
+    # pixel per side, so dilate before overlap. Missing walls (a covered tube)
+    # span many pixels and still fail.
+    dil_k = np.ones((3, 3), np.uint8)
+    dl_dil = np.asarray(cv2.dilate(dark_l.astype(np.uint8), dil_k), dtype=np.bool_)
+    dr_dil = np.asarray(cv2.dilate(dark_r.astype(np.uint8), dil_k), dtype=np.bool_)
+    union = int(np.logical_or(dl_dil, dr_dil).sum())
+    iou = float(np.logical_and(dl_dil, dr_dil).sum() / union) if union else 1.0
+    return hist_l1, iou
+
+
+def recompose(
+    images: dict[str, NDArray[np.uint8]],
+    order: list[str],
+    wins: dict[str, NDArray[np.bool_]] | None = None,
+) -> NDArray[np.uint8]:
+    """Draw the part RGBA images in ``order`` (low first) onto white paper.
+
+    ``wins`` optionally maps a covering part to pixels where it draws over
+    everything (a seam-occluded dome's hidden disc at rest; rotation derives
+    visibility by motion and never passes it).
+    """
     first = next(iter(images.values()))
     height, width = first.shape[:2]
     canvas = np.full((height, width, 3), 255, np.uint8)
@@ -85,7 +186,29 @@ def recompose(images: dict[str, NDArray[np.uint8]], order: list[str]) -> NDArray
         img = images[name]
         cover = np.asarray(img[..., 3] > 127, dtype=np.bool_)
         canvas[cover] = img[..., :3][cover]
+    if wins:
+        for cover_name, zone in wins.items():
+            wimg = images[cover_name]
+            win = np.asarray(zone, dtype=np.bool_) & np.asarray(wimg[..., 3] > 127, dtype=np.bool_)
+            canvas[win] = wimg[..., :3][win]
     return canvas
+
+
+def sweep_radius(
+    pivot: tuple[float, float], masks: dict[str, NDArray[np.bool_]], line_width: float
+) -> float:
+    """Swept radius of a moving subtree about a joint pivot (K-0e C1).
+
+    The farthest rest pixel any moving part claims, plus a line-width
+    margin: rotating the subtree can newly reveal paper anywhere inside.
+    """
+    union = np.zeros_like(next(iter(masks.values())), dtype=np.bool_) if masks else np.zeros((0, 0), np.bool_)
+    for mask in masks.values():
+        union |= np.asarray(mask, dtype=np.bool_)
+    ys, xs = np.nonzero(union)
+    if len(xs) == 0:
+        return 0.0
+    return float(np.hypot(xs - pivot[0], ys - pivot[1]).max()) + 2.0 * line_width
 
 
 def rotation_zone(
@@ -119,6 +242,120 @@ def _own_uncovered(
     disk = (xx - pivot[0]) ** 2 + (yy - pivot[1]) ** 2 <= (radius * 2) ** 2
     zone = np.asarray(disk & cont & ~pre & pre_covered, dtype=np.bool_)
     return int(np.logical_and(zone, ~np.asarray(post_covered, dtype=np.bool_)).sum())
+
+
+def swept_cut_px(
+    masks: dict[str, NDArray[np.bool_]],
+    canvases: dict[str, NDArray[np.uint8]],
+    chords: list[DomeChord],
+    pivots: dict[str, tuple[float, float]],
+    line: NDArray[np.bool_],
+    moving: dict[str, set[str]],
+    line_width: float,
+) -> dict[str, dict[str, int]]:
+    """Chord ink a ±45° joint rotation would displace (K-0e item 3b).
+
+    A general rotation guard with no part names: for each joint, every
+    contact chord whose dome moves with the subtree while its plate stays
+    contributes the dome's own ink from the chord's middle (the arc
+    junctions at either end excluded) rotated about the joint pivot — the
+    same pivot and rotation the joints loop renders with. Rotated ink over
+    un-inked surface counts: toward the plate it is a straight cut the
+    rotation would expose; away from it the ink lands on background or the
+    dome's own flat. Either way displaced chord ink proves the dome is
+    unfinished. An occluded chord's ink is a real mouth boundary, never a
+    cut, so only contact chords count. A finished dome owns no chord ink,
+    so it reads 0.
+    """
+    band_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * BAND_PX + 1, 2 * BAND_PX + 1))
+    band = np.asarray(cv2.dilate(np.asarray(line, dtype=np.uint8), band_k), dtype=np.uint8) > 0
+
+    out: dict[str, dict[str, int]] = {}
+    for joint, pivot in pivots.items():
+        below = set(moving.get(joint, ()))
+        counts: dict[str, int] = {}
+        for angle in (-45.0, 45.0):
+            total = 0
+            matrix = cv2.getRotationMatrix2D((float(pivot[0]), float(pivot[1])), float(angle), 1.0)
+            for chord in chords:
+                if chord.kind != "contact":
+                    continue
+                if chord.part not in below or chord.other in below:
+                    continue
+                if chord.part not in canvases or chord.part not in masks or chord.other not in masks:
+                    continue
+                if not bool(np.asarray(masks[chord.part], dtype=np.bool_).any()):
+                    continue
+                (x0, y0), (x1, y1) = chord.seg
+                vec = np.array([x1 - x0, y1 - y0], dtype=np.float64)
+                length = max(float(np.linalg.norm(vec)), 1e-9)
+                if length < 4.0 * line_width:
+                    continue
+                canvas = np.asarray(canvases[chord.part])
+                on = np.ones(canvas.shape[:2], np.bool_) if canvas.shape[2] < 4 else canvas[..., 3] > 127
+                # True ink only (the pair check's yardstick): shaded flats never count.
+                ink = np.asarray(on & (canvas[..., :3].max(axis=2) < 40), dtype=np.bool_)
+                height, width = ink.shape
+                yy, xx = np.mgrid[0:height, 0:width].astype(np.float64)
+                along = ((xx - x0) * vec[0] + (yy - y0) * vec[1]) / length
+                across = np.abs((xx - x0) * (-vec[1]) + (yy - y0) * vec[0]) / length
+                lo, hi = 2.0 * line_width, length - 2.0 * line_width
+                half = max(1.0, round(line_width / 2.0))
+                sel = np.asarray(ink & (across <= half) & (along >= lo) & (along <= hi), dtype=np.bool_)
+                if not bool(sel.any()):
+                    continue
+                turned = (
+                    np.asarray(
+                        cv2.warpAffine(
+                            np.asarray(sel, dtype=np.uint8) * 255,
+                            matrix,
+                            (width, height),
+                            flags=cv2.INTER_NEAREST,
+                        ),
+                        dtype=np.uint8,
+                    )
+                    > 0
+                )
+                land = np.asarray(~band, dtype=np.bool_)
+                total += int(np.logical_and(turned, land).sum())
+            counts[f"{angle:+.0f}"] = total
+        out[joint] = counts
+    return out
+
+
+def covered_run_px(
+    masks: dict[str, NDArray[np.bool_]],
+    canvases: dict[str, NDArray[np.uint8]],
+    chords: list[DomeChord],
+    fronts: dict[str, set[str]],
+    line_width: float,
+) -> dict[str, int]:
+    """True ink a seam-occluded dome still owns on its covered run (K-0e C1).
+
+    A rotation-proof yardstick for the interior line: runs detected in the
+    finished canvas that coincide with the cover's outline must be empty —
+    the cover draws that stroke. Counts coincident-run true-ink pixels per
+    dome; a finished dome reads 0.
+    """
+    counts: dict[str, int] = {}
+    for chord in chords:
+        if chord.kind != "contact":
+            continue
+        if chord.part not in fronts or chord.other not in fronts[chord.part]:
+            continue
+        if chord.part not in canvases or chord.other not in canvases:
+            continue
+        dome = np.asarray(canvases[chord.part])
+        run, near = _coincident_run_ink(dome, np.asarray(canvases[chord.other]), line_width)
+        if not bool(run.any()):
+            continue
+        sel = np.asarray(
+            (dome[..., 3] > 127) & (dome[..., :3].max(axis=2) < 40) & run & near,
+            dtype=np.bool_,
+        )
+        if bool(sel.any()):
+            counts[chord.part] = counts.get(chord.part, 0) + int(sel.sum())
+    return counts
 
 
 def rotate_rgba(image: NDArray[np.uint8], pivot: tuple[float, float], angle_deg: float) -> NDArray[np.uint8]:
@@ -361,7 +598,7 @@ def build_puppet(
     )
     (out_dir / "puppet.json").write_text(puppet.model_dump_json(indent=1) + "\n", encoding="utf-8")
 
-    recomp = recompose({n: part_images[n] for n in order}, order)
+    recomp = recompose({n: part_images[n] for n in order}, order, full.seam_wins)
     luma_ref = np.asarray(rgb.astype(np.float32) @ LUMA, dtype=np.float64)
     luma_new = np.asarray(recomp.astype(np.float32) @ LUMA, dtype=np.float64)
     # The floor shadow is its own layer: excluded from the recomposition
@@ -446,7 +683,8 @@ def build_puppet(
     # parts must not hold a neighbour's region). `straight_cut_px` counts
     # completed-border pixels that are neither on a drawn line nor hidden
     # under the parent or a higher part (~0: no straight cuts through flat
-    # colour, only along drawn lines).
+    # colour, only along drawn lines), plus true ink a seam-occluded dome
+    # still owns on its covered run (the cover draws that stroke; ~0 too).
     symmetry: dict[str, dict[str, float]] = {}
     sides: dict[str, dict[str, str]] = {}
     for name in split.order:
@@ -504,13 +742,107 @@ def build_puppet(
         for other, z in z_of.items():
             if z > z_of[name]:
                 over |= np.asarray(all_masks[other], dtype=np.bool_)
+        for other in full.seam_cover.get(name, []):
+            if other in all_masks:
+                over |= np.asarray(all_masks[other], dtype=np.bool_)
         touch = np.asarray(cv2.dilate(over.astype(np.uint8), cover_k), dtype=np.uint8) > 0
         eroded = np.asarray(cv2.erode(mask.astype(np.uint8), erode_k), dtype=np.uint8) > 0
         border = np.asarray(mask & ~eroded, dtype=np.bool_)
         straight[name] = int(np.logical_and(border, np.logical_and(~band, ~touch)).sum())
 
+    # K-0e item 1: a pixel painted by completion that is not under a higher
+    # part must match the reference (completion backs hidden regions; it must
+    # never recolour drawn art). Added pixels under higher parts, or where the
+    # reference is paper (intentional gap fills), are not counted.
+    exposed: dict[str, int] = {}
+    shadow_zone = (
+        np.asarray(split.shadow, dtype=np.bool_) if split.shadow is not None else np.zeros((height, width), np.bool_)
+    )
+    ref_rgb = np.asarray(rgb, dtype=np.int32)
+    ref_drawn = np.asarray(rgb.min(axis=2) < PAPER_MIN, dtype=np.bool_)
+    for name in split.order:
+        higher: NDArray[np.bool_] = np.zeros((height, width), np.bool_)
+        for other, z in z_of.items():
+            if z > z_of[name]:
+                higher |= np.asarray(all_masks[other], dtype=np.bool_)
+        for other in full.seam_cover.get(name, []):
+            if other in all_masks:
+                higher |= np.asarray(all_masks[other], dtype=np.bool_)
+        added = np.asarray(
+            np.asarray(all_masks[name], dtype=np.bool_)
+            & ~np.asarray(split.part_masks[name], dtype=np.bool_)
+            & ~higher
+            & ~shadow_zone
+            & ref_drawn,
+            dtype=np.bool_,
+        )
+        if not bool(added.any()):
+            exposed[name] = 0
+            continue
+        painted = np.asarray(done.images[name][..., :3], dtype=np.int32)
+        mismatch = np.abs(painted - ref_rgb).max(axis=2) > RECOMP_DIFF
+        exposed[name] = int(np.logical_and(added, mismatch).sum())
+
+    # K-0e item 4: per mirror pair, the ends must match. Colour comes from the
+    # recomposed image (where a wrong disc or tongue shows); outline shape
+    # comes from each member's own part image (where only its own ink shows,
+    # never the cover's design). Windows anchor at the drawn tube tip when
+    # completion found one (stance-tolerant and immune to split bleed, which
+    # is flat and tipless), else at the drawn mask bottom; their width follows
+    # the tube so cuff design stays out.
+    recomp_rgb = np.asarray(recomp[..., :3], dtype=np.uint8)
+    pair_ends: dict[str, dict[str, Any]] = {}
+    pair_ok = True
+    for stem, pr in sorted(sides.items()):
+        if "l" not in pr or "r" not in pr:
+            continue
+        draws = {}
+        ok_members = True
+        for side in ("l", "r"):
+            member = pr[side]
+            dm = np.asarray(split.part_masks[member], dtype=np.bool_)
+            if not bool(dm.any()):
+                ok_members = False
+                break
+            tip_xy = full.tips.get(member)
+            if tip_xy is not None:
+                cx, brow = int(round(tip_xy[0])), int(round(tip_xy[1])) + 2
+            else:
+                rows = np.nonzero(dm.any(axis=1))[0]
+                brow = int(rows.max())
+                xs = np.nonzero(dm[brow, :])[0]
+                if len(xs) == 0:
+                    xs = np.nonzero(dm[max(0, brow - 2) :, :].any(axis=0))[0]
+                cx = int(np.median(xs))
+            wrow = min(max(brow, 0), height - 1)
+            wx = np.nonzero(dm[wrow, :])[0]
+            tube_w = int(wx.max() - wx.min() + 1) if len(wx) else 32
+            win_w = int(min(96, max(32, tube_w + 16)))
+            draws[side] = (cx, brow, win_w)
+        if not ok_members:
+            pair_ends[stem] = {"status": "skipped"}
+            continue
+        (xl, bl, wl) = draws["l"]
+        (xr, br, wr) = draws["r"]
+        win_w, win_up, win_down = max(wl, wr), WIN_UP_PX, WIN_DOWN_PX
+        yl0, yl1 = max(0, bl - win_up), min(height, bl + win_down)
+        yr0, yr1 = max(0, br - win_up), min(height, br + win_down)
+        crop_l = recomp_rgb[yl0:yl1, max(0, xl - win_w // 2) : xl + win_w // 2]
+        crop_r = recomp_rgb[yr0:yr1, max(0, xr - win_w // 2) : xr + win_w // 2]
+        img_l = np.asarray(part_images[pr["l"]][yl0:yl1, max(0, xl - win_w // 2) : xl + win_w // 2])
+        img_r = np.asarray(part_images[pr["r"]][yr0:yr1, max(0, xr - win_w // 2) : xr + win_w // 2])
+        drw_l = np.asarray(split.part_masks[pr["l"]][yl0:yl1, max(0, xl - win_w // 2) : xl + win_w // 2])
+        drw_r = np.asarray(split.part_masks[pr["r"]][yr0:yr1, max(0, xr - win_w // 2) : xr + win_w // 2])
+        hist_l1, shape_iou = _pair_end_scores(crop_l, crop_r, img_l, img_r, drw_l, drw_r)
+        ok = bool(hist_l1 <= PAIR_HIST_T and shape_iou >= PAIR_IOU_T)
+        pair_ends[stem] = {"status": "ok" if ok else "mismatch", "hist_l1": hist_l1, "shape_iou": shape_iou}
+        pair_ok = pair_ok and ok
+
     joints: dict[str, dict[str, Any]] = {}
     rotated: dict[str, dict[float, NDArray[np.uint8]]] = {}
+    joint_pivots: dict[str, tuple[float, float]] = {}
+    joint_moving: dict[str, set[str]] = {}
+    white_rest = np.asarray(recomp[..., :3].min(axis=2) >= PAPER_MIN, dtype=np.bool_)
     pre_covered = np.zeros((height, width), np.bool_)
     for n in order:
         pre_covered |= np.asarray(part_images[n][..., 3] > 127, dtype=np.bool_)
@@ -520,11 +852,17 @@ def build_puppet(
         pivot = (float(pivots.pivots[part.name][0]), float(pivots.pivots[part.name][1]))
         radius = max(float(pivots.radii[part.name]), 4.0)
         moving = subtree_names(cfg, part.name)
+        joint_pivots[part.name] = pivot
+        joint_moving[part.name] = set(moving)
+        sweep_r = sweep_radius(pivot, {n: full.masks[n] for n in moving}, line_width)
         static = np.zeros((height, width), np.bool_)
         for other in split.order:
             if other not in moving:
                 static |= full.masks[other]
-        zone = rotation_zone((height, width), pivot, radius, static)
+        # The disk spans the whole swept subtree (the fixed joint radius only
+        # reaches the pivot's neighbourhood); the static requirement keeps
+        # limbs swinging through air out of the count.
+        zone = rotation_zone((height, width), pivot, sweep_r / 2.0, static)
         own_pre = np.asarray(full.masks[part.name], dtype=np.bool_)
         own_cont = np.asarray(full.conts.get(part.name, full.masks[part.name]), dtype=np.bool_)
         paper: dict[str, int] = {}
@@ -534,11 +872,13 @@ def build_puppet(
             turned = {n: (rotate_rgba(part_images[n], pivot, angle) if n in moving else part_images[n]) for n in order}
             back = recompose(turned, order)
             white = np.asarray(back[..., :3].min(axis=2) >= PAPER_MIN, dtype=np.bool_)
-            paper[f"{angle:+.0f}"] = int(np.logical_and(white, zone).sum())
+            paper[f"{angle:+.0f}"] = int(np.logical_and(white, np.logical_and(zone, ~white_rest)).sum())
             post_covered = np.zeros((height, width), np.bool_)
             for n in order:
                 post_covered |= np.asarray(turned[n][..., 3] > 127, dtype=np.bool_)
-            own_counts[f"{angle:+.0f}"] = _own_uncovered(own_pre, own_cont, pre_covered, post_covered, pivot, radius)
+            own_counts[f"{angle:+.0f}"] = _own_uncovered(
+                own_pre, own_cont, pre_covered, post_covered, pivot, sweep_r / 2.0
+            )
             if angle in (-45.0, 45.0):
                 rotated[part.name][angle] = back
         joints[part.name] = {
@@ -549,6 +889,38 @@ def build_puppet(
             "own_px": own_counts,
         }
 
+    # K-0e item 3b: contact chords are found on the drawn geometry (split
+    # masks with reference ink, so completion paint never seeds detection)
+    # and counted on the shipped art (finished masks and canvases, where a
+    # moved strip has left the dome). A finished dome owns no chord ink.
+    drawn_canvases = {
+        name: part_rgba_image(rgb, np.asarray(split.part_masks[name], dtype=np.bool_)) for name in split.order
+    }
+    split_masks = {name: np.asarray(split.part_masks[name], dtype=np.bool_) for name in split.order}
+    finished_masks = {name: np.asarray(done.masks[name], dtype=np.bool_) for name in split.order}
+    dome_list = dome_chords(split_masks, drawn_canvases, z_of, line_width)
+    for dome_name, px in covered_run_px(
+        finished_masks,
+        part_images,
+        dome_list,
+        {name: set(plates) for name, plates in full.seam_cover.items()},
+        line_width,
+    ).items():
+        straight[dome_name] = straight.get(dome_name, 0) + px
+    swept = swept_cut_px(
+        finished_masks,
+        part_images,
+        dome_list,
+        joint_pivots,
+        np.asarray(split.line, dtype=np.bool_),
+        joint_moving,
+        line_width,
+    )
+    seam_win_files: dict[str, dict[str, Any]] = {}
+    for plate, zone in full.seam_wins.items():
+        win_path = out_dir / f"seam_win_{plate}.png"
+        Image.fromarray((np.asarray(zone, dtype=np.bool_) * 255).astype(np.uint8)).save(win_path)
+        seam_win_files[plate] = {"file": win_path.name, "px": int(np.asarray(zone, dtype=np.bool_).sum())}
     report: dict[str, Any] = {
         "reference": reference.name,
         "canvas": [width, height],
@@ -565,6 +937,12 @@ def build_puppet(
         "symmetry_ok": sym_ok,
         "foreign_share": foreign,
         "straight_cut_px": straight,
+        "exposed_completion_px": exposed,
+        "pair_ends": pair_ends,
+        "pair_ends_ok": pair_ok,
+        "swept_cut_px": swept,
+        "seam_cover": {name: list(plates) for name, plates in full.seam_cover.items()},
+        "seam_wins": seam_win_files,
         "joints": joints,
         "completed": {name: list(done.methods.get(name, [])) for name in split.order},
         "completion_notes": {
