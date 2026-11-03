@@ -60,6 +60,7 @@ A scene is a stack of layers, each with one behaviour managed by the engine: **h
 | `src/karagoz/engine/puppet/fit.py` | fit the puppet to a key drawing: single-part snap, limb chains, X->Y transitions, fit and transition reports; joint limits on every search path, unexplained-pixel decay, multi-start pull |
 | `src/karagoz/engine/puppet/render_aa.py` | fast anti-aliased puppet renderer: cropped premultiplied parts, destination-box bilinear warps, over compositing |
 | `src/karagoz/engine/puppet/frame_checks.py` | per-frame inbetween measures: locked change, swept joint region and paper gap, key-vs-puppet cut |
+| `src/karagoz/engine/puppet/inbetween.py` | K-2d inbetween run: poses, z-switch frames, holds, measures, preview and sheet |
 | `src/karagoz/engine/camera.py` | camera track: framing names into a crop box per frame |
 | `src/karagoz/engine/compose.py` | compositor: cut out drawings, place characters, composite frames |
 | `src/karagoz/engine/framing.py` | per-frame camera target boxes from the drawing on screen at each frame |

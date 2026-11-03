@@ -54,24 +54,43 @@ def _shortest_delta(ax: float, ay: float) -> float:
 def _offsets_of(pose: Pose) -> dict[str, tuple[float, float]]:
     """Per-part joint offsets, tolerant of the field missing (pre-K-1 Pose).
 
-    Reads ``pose.offsets`` when K-1 has added it; missing parts mean (0, 0).
+    Reads ``pose.offset`` (the name K-1 settled on) first, then ``pose.offsets``
+    (the earlier draft); missing parts mean (0, 0).
     """
-    raw = getattr(pose, "offsets", None) or {}
+    raw = getattr(pose, "offset", None)
+    if raw is None:
+        raw = getattr(pose, "offsets", None)
+    raw = raw or {}
     return {str(k): (float(v[0]), float(v[1])) for k, v in raw.items()}
+
+
+def _offsets_name(pose: Pose) -> str:
+    """Which offset attribute ``pose`` carries (K-2d: write the same name back)."""
+    fields = type(pose).model_fields
+    if "offset" in fields:
+        return "offset"
+    if "offsets" in fields:
+        return "offsets"
+    if getattr(pose, "offset", None) is not None:
+        return "offset"
+    if getattr(pose, "offsets", None) is not None:
+        return "offsets"
+    return "offset"
 
 
 def _with_offsets(pose: Pose, offsets: dict[str, tuple[float, float]]) -> Pose:
     """Return ``pose`` carrying ``offsets``; empty offsets leave it untouched.
 
-    Works before K-1 adds ``Pose.offsets`` (plain attribute, invisible to
-    ``model_dump`` and ``==``) and after (a real field value).
+    Works before K-1 adds ``Pose.offset`` (plain attribute, invisible to
+    ``model_dump`` and ``==``) and after (a real field value, written as lists).
     """
     if not offsets:
         return pose
-    if "offsets" in type(pose).model_fields:
-        return pose.model_copy(update={"offsets": dict(offsets)})
+    name = _offsets_name(pose)
+    if name in type(pose).model_fields:
+        return pose.model_copy(update={name: {k: [float(v[0]), float(v[1])] for k, v in offsets.items()}})
     out = pose.model_copy()
-    object.__setattr__(out, "offsets", dict(offsets))
+    object.__setattr__(out, name, dict(offsets))
     return out
 
 
