@@ -122,7 +122,7 @@ def repivot_view(view_dir: Path) -> dict[str, dict[str, Any]]:
     line = np.asarray(line_mask(np.asarray(rest[..., :3], dtype=np.uint8)), dtype=np.bool_)
     visible = _visible_masks(puppet, finished, wins, report.get("seam_cover", {}))
     cfg = _repivot_config(puppet)
-    result = compute_pivots(visible, cfg, line, line_width)
+    result = compute_pivots(visible, cfg, line, line_width, finished)
     white_rest = np.asarray(rest[..., :3].min(axis=2) >= PAPER_MIN, dtype=np.bool_)
     pre_covered = np.zeros((height, width), dtype=np.bool_)
     for name in order:

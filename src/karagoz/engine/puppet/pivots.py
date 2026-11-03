@@ -84,6 +84,7 @@ def _covering_dome(
     own_outline: dict[str, NDArray[np.bool_]],
     win: NDArray[np.bool_],
     line_width: float,
+    hidden_block: NDArray[np.bool_] | None = None,
 ) -> tuple[str, float, float, float] | None:
     """Centre and radius of the dome covering a child's joint end (K-0p).
 
@@ -91,7 +92,9 @@ def _covering_dome(
     whose mask reaches the joint window. A candidate counts as a dome when
     its one-owner outline fits a circle at the drawing's scale (radius at
     least five line widths, residual within a tenth of the radius, arc past
-    a quarter turn). Returns the dome's name with its mask centroid and the fitted radius;
+    a quarter turn). Outline on completed-then-covered paint (finished but
+    not visible) is completion ink, never the dome edge, and is excluded.
+    Returns the dome's name with its mask centroid and the fitted radius;
     None when no candidate is dome-like, so the caller keeps today's pivot
     exactly. The centroid is the dome's visual centre: for a circular dome
     it is the fitted-circle centre, and it stays on the centre when the dome
@@ -116,6 +119,8 @@ def _covering_dome(
         if isinstance(spec, PartSpec) and bool(spec.hidden):
             continue
         use = np.asarray(own_outline.get(name, np.zeros_like(win, dtype=np.bool_)), dtype=np.bool_)
+        if hidden_block is not None and hidden_block.shape == win.shape:
+            use = np.asarray(use & ~hidden_block, dtype=np.bool_)
         sy, sx = np.nonzero(use)
         if len(sx) < MIN_FIT_POINTS:
             continue
@@ -242,8 +247,14 @@ def compute_pivots(
     config: PuppetConfig,
     line: NDArray[np.bool_],
     line_width: float,
+    finished: dict[str, NDArray[np.bool_]] | None = None,
 ) -> PivotResult:
-    """Suggest a pivot (and joint radius) per part."""
+    """Suggest a pivot (and joint radius) per part.
+
+    finished (repivot) is the shipped finished art: outline on
+    completed-then-covered paint is completion ink and stays out of the
+    dome fit. None keeps today's pivots bit-identically.
+    """
     pivots: dict[str, tuple[float, float]] = {}
     radii: dict[str, float] = {}
     estimated: dict[str, bool] = {}
@@ -252,6 +263,21 @@ def compute_pivots(
     domes: dict[str, str] = {}
     touch = max(3, int(round(line_width)))
     touch_k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * touch + 1, 2 * touch + 1))
+    # Completed-then-covered paint (K-0f mouth closing): finished but not
+    # visible. Ink there is completion ink, never the dome edge.
+    hidden_block: NDArray[np.bool_] | None = None
+    if finished is not None:
+        for fname, fmask in finished.items():
+            f = np.asarray(fmask, dtype=np.bool_)
+            v = np.asarray(masks.get(fname, np.zeros_like(f, dtype=np.bool_)), dtype=np.bool_)
+            if v.shape != f.shape:
+                continue
+            hid = np.asarray(cv2.dilate(np.asarray(f & ~v, dtype=np.uint8), touch_k), dtype=np.uint8) > 0
+            hidden_block = (
+                np.asarray(hid, dtype=np.bool_)
+                if hidden_block is None
+                else np.asarray(hidden_block | hid, dtype=np.bool_)
+            )
     shapes: dict[str, tuple[NDArray[np.float64], NDArray[np.float64], float]] = {}
 
     def _shape(name: str) -> tuple[NDArray[np.float64], NDArray[np.float64], float] | None:
@@ -390,8 +416,12 @@ def compute_pivots(
         # today's pivot exactly (the code below this block is untouched).
         wy, wx = np.ogrid[:height, :width]
         win_disk = np.asarray((wx - guess[0]) ** 2 + (wy - guess[1]) ** 2 <= win * win, dtype=np.bool_)
-        dome = _covering_dome(part.name, part.parent, masks, by_name, z_of, own_outline, win_disk, line_width)
-        if dome is not None:
+        dome = _covering_dome(
+            part.name, part.parent, masks, by_name, z_of, own_outline, win_disk, line_width, hidden_block
+        )
+        # A part the ring role claims never takes the dome — the ring loop is
+        # circular too, and the role (no outline fit) owns it. Role beats circle.
+        if dome is not None and part.name not in ring_of and part.name not in ring_aux:
             dome_name, dx, dy, dr = dome
             domes[part.name] = dome_name
             centre, axis, isotropic = _tube_axis(mask)
