@@ -503,6 +503,8 @@ def cmd_puppet(args: argparse.Namespace) -> int:
         return cmd_puppet_build(args)
     if args.puppet_command == "build-set":
         return cmd_puppet_build_set(args)
+    if args.puppet_command == "repivot":
+        return cmd_puppet_repivot(args)
     raise ValueError(f"unknown puppet command: {args.puppet_command}")
 
 
@@ -563,6 +565,30 @@ def cmd_puppet_build(args: argparse.Namespace) -> int:
         problems.append("regions need a human decision")
     for problem in problems:
         print(f"warn: {problem}")
+    return 0
+
+
+def cmd_puppet_repivot(args: argparse.Namespace) -> int:
+    """Recompute a built set's pivots with the current rule (no paid calls)."""
+    from karagoz.engine.puppet.repivot import repivot_set
+
+    try:
+        changes = repivot_set(Path(args.set_dir), Path(args.out_dir))
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    n_joints = 0
+    n_moved = 0
+    for view, joints in changes.items():
+        for name, change in joints.items():
+            n_joints += 1
+            if change["moved"]:
+                n_moved += 1
+                old = change["old"]
+                new = change["new"]
+                print(f"{view}/{name}: ({old[0]:.1f}, {old[1]:.1f}) -> ({new[0]:.1f}, {new[1]:.1f})")
+                print(f"  dome {change['dome']}")
+    print(f"views {len(changes)} joints {n_joints} moved {n_moved} -> {args.out_dir}")
     return 0
 
 
@@ -790,6 +816,9 @@ def build_parser() -> argparse.ArgumentParser:
     puppet_set.add_argument("--workers", type=int, default=None, help="parallel view workers (default: half the CPUs)")
     puppet_set.add_argument("--no-sam", action="store_true", help="skip SAM, decide by seed points alone")
     puppet_set.add_argument("--max-image-calls", type=int, default=3, help="most Muse Image fills (default 3)")
+    puppet_repivot = puppet_sub.add_parser("repivot", help="recompute a built set's pivots (no SAM, no image calls)")
+    puppet_repivot.add_argument("set_dir", help="built set directory (set.json, views/, head_views/)")
+    puppet_repivot.add_argument("out_dir", help="output directory (copy with refreshed pivots)")
     puppet_p.set_defaults(func=cmd_puppet)
 
     strip_p = sub.add_parser("strip", help="write a contact sheet of a run of video frames")
