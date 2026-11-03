@@ -154,13 +154,21 @@ def extract_part_samples(
                 cover_xy=np.zeros((0, 2), np.float64),
             )
             continue
-        alpha = np.asarray(img[..., 3] > 127, dtype=np.bool_)
-        rgb = np.asarray(img[..., :3], dtype=np.uint8)
+        # part images are full-canvas; work inside the alpha box (same points, same order)
+        full_alpha = np.asarray(img[..., 3] > 127, dtype=np.bool_)
+        rows = np.flatnonzero(full_alpha.any(axis=1))
+        cols = np.flatnonzero(full_alpha.any(axis=0))
+        y0, x0 = (int(rows[0]), int(cols[0])) if len(rows) else (0, 0)
+        y1, x1 = (int(rows[-1]) + 1, int(cols[-1]) + 1) if len(rows) else (0, 0)
+        alpha = full_alpha[y0:y1, x0:x1]
+        rgb = np.asarray(img[y0:y1, x0:x1, :3], dtype=np.uint8)
         ink = np.asarray(line_mask(np.asarray(rgb, dtype=np.uint8), LINE_LUMA) & alpha, dtype=np.bool_)
         flat = np.asarray(alpha & ~ink, dtype=np.bool_)
         lys, lxs = np.nonzero(ink)
         fys, fxs = np.nonzero(flat)
         ays, axs = np.nonzero(alpha)
+        lys, lxs, fys, fxs, ays, axs = lys + y0, lxs + x0, fys + y0, fxs + x0, ays + y0, axs + x0
+        rgb = np.asarray(img[..., :3], dtype=np.uint8)
         st = _stride(len(lxs), max_line)
         ft = _stride(len(fxs), max_flat)
         ct = _stride(len(axs), MAX_COVER_PTS)
@@ -214,6 +222,29 @@ def _bilinear(
     return np.asarray(np.where(valid, val, outside), dtype=np.float64)
 
 
+def _bilinear_rgb(
+    field: NDArray[np.float64], x: NDArray[np.float64], y: NDArray[np.float64], outside: float
+) -> NDArray[np.float64]:
+    """``_bilinear`` of the three channels of an (H, W, 3) field in one gather: (N, 3), same values."""
+    height, width = field.shape[:2]
+    x0 = np.floor(x).astype(np.int64)
+    y0 = np.floor(y).astype(np.int64)
+    fx = (x - x0)[:, None]
+    fy = (y - y0)[:, None]
+    valid = (x0 >= 0) & (y0 >= 0) & (x0 + 1 < width) & (y0 + 1 < height)
+    xs = np.clip(x0, 0, width - 1)
+    ys = np.clip(y0, 0, height - 1)
+    xn = np.minimum(xs + 1, width - 1)
+    yn = np.minimum(ys + 1, height - 1)
+    val = (
+        (1.0 - fx) * (1.0 - fy) * field[ys, xs]
+        + fx * (1.0 - fy) * field[ys, xn]
+        + (1.0 - fx) * fy * field[yn, xs]
+        + fx * fy * field[yn, xn]
+    )
+    return np.asarray(np.where(valid[:, None], val, outside), dtype=np.float64)
+
+
 def _warp_batch(xy: NDArray[np.float64], mats: NDArray[np.float64]) -> NDArray[np.float64]:
     """Warp points by a stack of 2x3 matrices: (N, 2) and (K, 2, 3) -> (K, N, 2)."""
     homo = np.concatenate([np.asarray(xy, dtype=np.float64), np.ones((len(xy), 1), np.float64)], axis=1)
@@ -253,7 +284,7 @@ def batch_scores(
     if len(samp.flat_xy):
         coords = _warp_batch(samp.flat_xy, mats).reshape(-1, 2)
         x, y = coords[:, 0], coords[:, 1]
-        drawn = np.stack([_bilinear(rgb_f[..., c], x, y, 255.0) for c in range(3)], axis=1)
+        drawn = _bilinear_rgb(rgb_f, x, y, 255.0)
         drawn = drawn.reshape(mats.shape[0], -1, 3)
         own = np.asarray(samp.flat_rgb.astype(np.float64))
         cd = np.mean(np.abs(drawn - own[None, :, :]), axis=2)
@@ -307,10 +338,7 @@ def score_samples(
     if len(samp.flat_xy):
         warped = _warp_points(samp.flat_xy, mat2x3)
         x, y = warped[:, 0], warped[:, 1]
-        drawn = np.stack(
-            [_bilinear(rgb_f[..., c], x, y, 255.0) for c in range(3)],
-            axis=1,
-        )
+        drawn = _bilinear_rgb(rgb_f, x, y, 255.0)
         own = np.asarray(samp.flat_rgb.astype(np.float64))
         cd = np.mean(np.abs(drawn - own), axis=1)
         agree = np.exp(-cd / COLOUR_TAU)
@@ -588,7 +616,7 @@ def exclusive_total(
         if int(owned_flat.sum()):
             own_xy = flat_xy[owned_flat]
             keep = _decay_at(explained, own_xy)
-            drawn = np.stack([_bilinear(rgb_f[..., c], own_xy[:, 0], own_xy[:, 1], 255.0) for c in range(3)], axis=1)
+            drawn = _bilinear_rgb(rgb_f, own_xy[:, 0], own_xy[:, 1], 255.0)
             own = np.asarray(samp.flat_rgb[owned_flat].astype(np.float64))
             cd = np.mean(np.abs(drawn - own), axis=1)
             paper_hit = _bilinear(paper_f, own_xy[:, 0], own_xy[:, 1], 1.0)
@@ -1296,9 +1324,11 @@ def fit_pose(
         raise ValueError("the set has no views to fit")
     # Cheap root-only round first: full chain fits run on the best two views.
     root_scores: dict[str, float] = {}
+    samples_of: dict[str, dict[str, PartSamples]] = {}  # small; reused by the full fits below
     for name in view_names:
         loaded = _get_view(Path(set_dir), views, name)
         own = extract_part_samples(loaded.puppet, loaded.images)
+        samples_of[name] = own
         dh, dw = feat.line.shape
         root_pose = fit_root(loaded.puppet, Pose(view=name, canvas=[int(dw), int(dh)]), rgb, own, feat)
         tau = _tau_for(loaded.puppet, root_pose)
@@ -1313,7 +1343,7 @@ def fit_pose(
     kept: dict[str, LoadedView] = {}
     for name in ranked:
         loaded = _get_view(Path(set_dir), views, name)
-        own = extract_part_samples(loaded.puppet, loaded.images)
+        own = samples_of[name]
         pose = fit_view_pose(loaded, rgb, own, feat)
         total = pose_total(pose)
         totals[name] = total
