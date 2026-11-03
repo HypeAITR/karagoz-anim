@@ -108,6 +108,9 @@ class PartSamples:
     flat_xy: NDArray[np.float64]
     flat_rgb: NDArray[np.uint8]
     cover_xy: NDArray[np.float64]
+    # Every line pixel of the part (capped at MAX_COVER_PTS) for the
+    # explanation cover; scoring warps the sparsely strided line_xy.
+    line_cover_xy: NDArray[np.float64] = field(default_factory=lambda: np.zeros((0, 2), np.float64))
 
 
 def load_drawing(path: Path) -> NDArray[np.uint8]:
@@ -152,6 +155,7 @@ def extract_part_samples(
                 flat_xy=np.zeros((0, 2), np.float64),
                 flat_rgb=np.zeros((0, 3), np.uint8),
                 cover_xy=np.zeros((0, 2), np.float64),
+                line_cover_xy=np.zeros((0, 2), np.float64),
             )
             continue
         # part images are full-canvas; work inside the alpha box (same points, same order)
@@ -176,6 +180,11 @@ def extract_part_samples(
             line_xy = np.stack([lxs[::st].astype(np.float64), lys[::st].astype(np.float64)], axis=1)
         else:
             line_xy = np.zeros((0, 2), np.float64)
+        lt = _stride(len(lxs), MAX_COVER_PTS)
+        if len(lxs):
+            line_cover_xy = np.stack([lxs[::lt].astype(np.float64), lys[::lt].astype(np.float64)], axis=1)
+        else:
+            line_cover_xy = np.zeros((0, 2), np.float64)
         if len(fxs):
             flat_xy = np.stack([fxs[::ft].astype(np.float64), fys[::ft].astype(np.float64)], axis=1)
             flat_rgb = np.asarray(rgb[fys[::ft], fxs[::ft]], dtype=np.uint8)
@@ -186,7 +195,9 @@ def extract_part_samples(
             cover_xy = np.stack([axs[::ct].astype(np.float64), ays[::ct].astype(np.float64)], axis=1)
         else:
             cover_xy = np.zeros((0, 2), np.float64)
-        out[name] = PartSamples(line_xy=line_xy, flat_xy=flat_xy, flat_rgb=flat_rgb, cover_xy=cover_xy)
+        out[name] = PartSamples(
+            line_xy=line_xy, flat_xy=flat_xy, flat_rgb=flat_rgb, cover_xy=cover_xy, line_cover_xy=line_cover_xy
+        )
     return out
 
 
@@ -459,7 +470,13 @@ def explained_mask(
     shape: tuple[int, int],
     skip: str | Collection[str] | None = None,
 ) -> NDArray[np.bool_]:
-    """Drawing pixels some placed part (except ``skip``) covers."""
+    """Drawing pixels some placed part (except ``skip``) covers.
+
+    Line cover follows every line pixel of the part (dense, capped at
+    ``MAX_COVER_PTS``), not the sparsely strided scoring samples, so a
+    limb stacked on dense panel lines cannot hide in the stride gaps;
+    scoring still uses the sparse samples (speed).
+    """
     skipped = {skip} if isinstance(skip, str) else set(skip or ())
     height, width = shape
     cover = np.zeros((height, width), np.bool_)
@@ -474,10 +491,10 @@ def explained_mask(
         cover[yi[valid], xi[valid]] = True
     line_cover = np.zeros((height, width), np.bool_)
     for name, samp in samples.items():
-        if name in skipped or len(samp.line_xy) == 0:
+        if name in skipped or len(samp.line_cover_xy) == 0:
             continue
         mat = np.asarray(part_matrix3(puppet, pose, name)[:2], dtype=np.float64)
-        warped = _warp_points(samp.line_xy, mat)
+        warped = _warp_points(samp.line_cover_xy, mat)
         xi = np.round(warped[:, 0]).astype(np.int64)
         yi = np.round(warped[:, 1]).astype(np.int64)
         valid = (xi >= 0) & (yi >= 0) & (xi < width) & (yi < height)
@@ -561,6 +578,24 @@ def _decay_at(expl: NDArray[np.bool_] | None, xy: NDArray[np.float64]) -> NDArra
     return np.asarray(1.0 - EXPLAIN_DECAY * hit, dtype=np.float64)
 
 
+def _stack_discount(
+    keep: NDArray[np.float64], idx_owned: NDArray[np.int64], cover_count: NDArray[np.int16]
+) -> NDArray[np.float64]:
+    """Discount agreement stacked on a sibling member's pixels.
+
+    ``idx_owned`` are the member's owned in-canvas pixel keys, ``cover_count``
+    how many members of the same chain cover each drawing pixel
+    (candidate-relative): samples sharing their pixel with another member
+    keep ``1 - EXPLAIN_DECAY`` of their agreement, like context-explained
+    pixels. A limb folded onto its own tube then scores its exclusive
+    pixels only, while a clean placement keeps nearly everything.
+    """
+    if len(keep) == 0:
+        return np.asarray(keep, dtype=np.float64)
+    stacked = np.asarray(cover_count[np.asarray(idx_owned, dtype=np.int64)] > 1, dtype=np.float64)
+    return np.asarray(keep * (1.0 - EXPLAIN_DECAY * stacked), dtype=np.float64)
+
+
 def exclusive_total(
     puppet: Puppet,
     pose: Pose,
@@ -579,7 +614,9 @@ def exclusive_total(
     samples but no owned pixels left score ``-STACK_PENALTY``. Line and
     colour agreement on pixels other placed parts already explain (``explained``)
     decays, so a limb on unexplained drawing pixels beats one lying on the
-    face or belly.
+    face or belly. Agreement stacked on a sibling member's pixels (same
+    chain, same candidate) decays the same way, so a limb folded onto its
+    own tube scores its exclusive pixels only.
     """
     height, width = feat.line.shape
     dist_f = feat.dist_f
@@ -591,6 +628,16 @@ def exclusive_total(
         samp = samples[name]
         mat = np.asarray(part_matrix3(puppet, pose, name)[:2], dtype=np.float64)
         coords[name] = (_warp_points(samp.line_xy, mat), _warp_points(samp.flat_xy, mat))
+    key_of: dict[str, tuple[NDArray[np.int64], NDArray[np.int64]]] = {}
+    cover_count = np.zeros(height * width, np.int16)
+    for name in members:
+        line_idx0 = _pixel_keys(coords[name][0], height, width)
+        flat_idx0 = _pixel_keys(coords[name][1], height, width)
+        key_of[name] = (line_idx0, flat_idx0)
+        if int((line_idx0 >= 0).sum()):
+            cover_count[line_idx0[line_idx0 >= 0]] += 1
+        if int((flat_idx0 >= 0).sum()):
+            cover_count[flat_idx0[flat_idx0 >= 0]] += 1
     owner = np.zeros(height * width, np.int8)
     if blocked is not None:
         owner[np.asarray(blocked, dtype=np.bool_)] = 1
@@ -598,8 +645,7 @@ def exclusive_total(
     for name in members:
         samp = samples[name]
         line_xy, flat_xy = coords[name]
-        line_idx = _pixel_keys(line_xy, height, width)
-        flat_idx = _pixel_keys(flat_xy, height, width)
+        line_idx, flat_idx = key_of[name]
         owned_line = line_idx >= 0
         owned_flat = flat_idx >= 0
         owned_line[owned_line] = owner[line_idx[owned_line]] == 0
@@ -611,11 +657,13 @@ def exclusive_total(
             continue
         if int(owned_line.sum()):
             keep = _decay_at(explained, line_xy[owned_line])
+            keep = _stack_discount(keep, line_idx[owned_line], cover_count)
             dist = _bilinear(dist_f, line_xy[owned_line, 0], line_xy[owned_line, 1], 50.0)
             total += W_LINE * float(np.mean(keep * np.exp(-dist / max(tau, 1e-6))))
         if int(owned_flat.sum()):
             own_xy = flat_xy[owned_flat]
             keep = _decay_at(explained, own_xy)
+            keep = _stack_discount(keep, flat_idx[owned_flat], cover_count)
             drawn = _bilinear_rgb(rgb_f, own_xy[:, 0], own_xy[:, 1], 255.0)
             own = np.asarray(samp.flat_rgb[owned_flat].astype(np.float64))
             cd = np.mean(np.abs(drawn - own), axis=1)
