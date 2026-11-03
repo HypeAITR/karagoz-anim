@@ -452,14 +452,35 @@ def snap_part(
     return SnapResult(angle=best_angle, score=best_score, confidence=gap, scores=scores)
 
 
+def _explain_line_radius(puppet: Puppet, pose: Pose) -> int:
+    """Radius (px) around explained lines that still counts as explained.
+
+    Line agreement rewards samples within chamfer ``tau`` (line width times
+    scale) of any drawing line, so a fold lying a few pixels next to dense
+    already-explained lines would score almost like a clean placement while
+    escaping the exact-pixel decay. Growing the explained lines by the same
+    line-width radius closes that gap; the radius derives from the puppet's
+    own line width and the pose scale like ``tau``.
+    """
+    return max(2, int(round(float(puppet.line_width_px) * float(pose.scale))))
+
+
 def explained_mask(
     puppet: Puppet,
     pose: Pose,
     samples: dict[str, PartSamples],
     shape: tuple[int, int],
     skip: str | Collection[str] | None = None,
+    line_radius: int = 0,
 ) -> NDArray[np.bool_]:
-    """Drawing pixels some placed part (except ``skip``) covers."""
+    """Drawing pixels some placed part (except ``skip``) covers.
+
+    The flat cover (dilated 5x5) always counts. ``line_radius`` grows the
+    explained lines by that many pixels: the soft chain-objective decay
+    (see :func:`exclusive_total`) works in the line-width neighbourhood,
+    while the hard hole search (:func:`fill_last`) keeps the pixel-exact
+    hole (``line_radius=0``) so a last piece still snaps within 1 degree.
+    """
     skipped = {skip} if isinstance(skip, str) else set(skip or ())
     height, width = shape
     cover = np.zeros((height, width), np.bool_)
@@ -489,7 +510,18 @@ def explained_mask(
         )
         > 0
     )
-    return np.asarray(grown | line_cover, dtype=np.bool_)
+    line_radius = max(0, int(line_radius))
+    grown_lines = (
+        np.asarray(
+            cv2.dilate(
+                line_cover.astype(np.uint8),
+                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * line_radius + 1, 2 * line_radius + 1)),
+            ),
+            dtype=np.uint8,
+        )
+        > 0
+    )
+    return np.asarray(grown | grown_lines, dtype=np.bool_)
 
 
 def fill_last(
@@ -847,7 +879,9 @@ def fit_chain(
     # striding of large parts): agreement there decays, so the chain prefers
     # unexplained drawing pixels. Other parts sit still during this fit, so
     # one field serves every candidate below.
-    explained = explained_mask(puppet, work, samples, feat.line.shape, skip=set(chain))
+    explained = explained_mask(
+        puppet, work, samples, feat.line.shape, skip=set(chain), line_radius=_explain_line_radius(puppet, work)
+    )
     best_angles = dict(work.angles)
     best_total = chain_objective(
         puppet,
