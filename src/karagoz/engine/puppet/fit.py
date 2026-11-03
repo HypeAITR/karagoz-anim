@@ -68,6 +68,11 @@ SCORE_MIN = 0.25
 # True placements stay under 0.3 overlap (seams); clean scores clear 1.1.
 OVERLAP_MAX = 0.5
 STACK_SCORE = 1.0
+# A limit range narrower than PEAK_SEP_DEG cannot host a separate peak: the
+# ambiguity gap is meaningless there, so a clipped sweep reports
+# NO_AMBIGUITY_GAP instead of a coincidental small gap (a ±10° ring never
+# "reaches" 45° out, and must never read as ambiguous).
+NO_AMBIGUITY_GAP = 1e9
 # Slack-joint offset search: prior per reference pixel toward the modelled
 # pivot, same scale as the rest prior per degree (a degree moves a 100 px
 # limb about as far as a pixel slides its joint).
@@ -759,8 +764,25 @@ def _part_confidence(
     feat: DrawingFeatures,
     tau: float,
 ) -> tuple[float, float]:
-    """Score + full-circle second-peak gap for one part, others fixed."""
+    """Score + second-peak gap for one part, others fixed.
+
+    A limit range narrower than PEAK_SEP_DEG cannot host a separate peak,
+    so the sweep is skipped there and the gap reports NO_AMBIGUITY_GAP.
+    Wider ranges sweep the full circle exactly as before.
+    """
     samp = samples[part]
+    lim = puppet.parts[part].limits
+    if lim is not None and len(lim) == 2 and 0.0 <= float(lim[1]) - float(lim[0]) < PEAK_SEP_DEG:
+        # No second peak fits inside this range: report the current score
+        # with a sentinel gap instead of a coincidental small one.
+        cur = score_samples(
+            samp,
+            np.asarray(part_matrix3(puppet, pose, part)[:2], dtype=np.float64),
+            feat,
+            tau,
+            None,
+        )
+        return cur, NO_AMBIGUITY_GAP
     steps: list[float] = []
     angle = 0.0
     while angle < 360.0:
@@ -2110,6 +2132,37 @@ def gate_split_needed(max_delta_deg: float) -> tuple[bool, int]:
     return True, need
 
 
+def _pick_chain_winner(
+    puppet: Puppet,
+    chain: list[str],
+    candidates: list[Pose],
+    samples: dict[str, PartSamples],
+    feat: DrawingFeatures,
+    tau: float,
+    anchor: dict[str, float],
+    blocked: NDArray[np.bool_] | None,
+) -> tuple[Pose, float]:
+    """The candidate that best explains Y under the transition objective.
+
+    Infeasible candidates (a member stacked on its own chain past overlap)
+    are disqualified whatever their total: a fold never wins over a feasible
+    chain. When every candidate folds, the first one (the X-anchored pull) is
+    returned so the reach rule below still fires on it.
+    """
+    shape = feat.line.shape
+    best = candidates[0]
+    best_total = float("-inf")
+    feasible_any = False
+    for cand in candidates:
+        feas, _why = chain_feasible(puppet, cand, chain, samples, shape)
+        if not feas:
+            continue
+        total = chain_objective(puppet, cand, chain, samples, feat, tau, anchor, blocked)
+        if not feasible_any or total > best_total:
+            best, best_total, feasible_any = cand, total, True
+    return best, best_total
+
+
 @dataclass
 class TransitionResult:
     pose_x: Pose
@@ -2119,6 +2172,7 @@ class TransitionResult:
     decision: str
     reason: str
     scores: dict[str, float]
+    needs_human: list[str] = field(default_factory=list)
 
 
 def transition_from_poses(
@@ -2133,8 +2187,9 @@ def transition_from_poses(
 
     Changed chains start from their ``pose_X`` angles and are refined on Y's
     lines and colours ("the hand is at Z in X and at ZX in Y: pull X's hand to
-    ZX"). The fit score decides first (``ret`` naming the chain and why when a
-    changed chain cannot reach Y — never forced); the interval gate then
+    ZX"). The winner's score or feasibility decides first (``ret`` naming the chain
+    and why when a changed chain cannot reach Y — never forced; low confidence only
+    lists the part in ``needs_human``); the interval gate then
     decides ``split`` for large-but-clean motions, else ``rig`` (K-2
     interpolates X->Y).
     """
@@ -2176,9 +2231,9 @@ def transition_from_poses(
         # The X-anchored pull cannot cross a large move (its window is local):
         # also try the chain's from-scratch fit on Y and keep whichever scores
         # better under the transition (X-anchor) objective. Locked members stay
-        # frozen in both starts. The fresh start only wins when it is clean
-        # (every member explains itself): a coincidental partial fit of a
-        # shape-changed part must not bypass the ret below.
+        # frozen in both starts. The winner is picked below by feasible joint
+        # total over three candidates (pull, fresh, pose_Y's own seating): a
+        # folded candidate never wins over a feasible one.
         fresh = fit_chain(
             loaded.puppet,
             start,
@@ -2190,14 +2245,26 @@ def transition_from_poses(
         )
         tau_pick = _tau_for(loaded.puppet, base)
         blocked_pick = context_blocked(loaded.puppet, start, names[leaf], own, feat_y.line.shape)
-        old_total = chain_objective(loaded.puppet, pulled, names[leaf], own, feat_y, tau_pick, anchor, blocked_pick)
-        new_total = chain_objective(loaded.puppet, fresh, names[leaf], own, feat_y, tau_pick, anchor, blocked_pick)
-        clean = all(
-            float(fresh.scores.get(m, 0.0)) >= STACK_SCORE for m in names[leaf] if not loaded.puppet.parts[m].hidden
+        # pose_Y's own seating of this chain, with the locked (frozen) members
+        # kept at X: the cold from-scratch fit can hang in a folded basin the Y
+        # fit already left, so the Y fit competes as a third candidate.
+        yside = pose_y.model_copy(deep=True)
+        yside.angles.update({m: float(a) for m, a in frozen.items()})
+        yside.offset.update({m: list(pose_x.offset[m]) for m in frozen if m in pose_x.offset})
+        best, _ = _pick_chain_winner(
+            loaded.puppet,
+            names[leaf],
+            [pulled, fresh, yside],
+            own,
+            feat_y,
+            tau_pick,
+            anchor,
+            blocked_pick,
         )
-        best = fresh if clean and new_total > old_total else pulled
         for member in names[leaf]:
             base.angles[member] = float(best.angles.get(member, 0.0))
+            if member in best.offset:
+                base.offset[member] = [float(v) for v in best.offset[member]]
             base.scores[member] = float(best.scores.get(member, 0.0))
             base.confidences[member] = float(best.confidences.get(member, 0.0))
     tau = _tau_for(loaded.puppet, base)
@@ -2217,18 +2284,21 @@ def transition_from_poses(
     split, need = gate_split_needed(float(worst))
     scores = {name: float(base.scores.get(name, 0.0)) for name in loaded.puppet.parts}
     bar = float(DEVIATION_THRESHOLD) * 180.0
-    # The fit score decides first: a chain that cannot reach Y (a new shape,
-    # foreshortening, a turn) is ret no matter how far it wandered trying.
-    # The gate's split only applies to large-but-clean motions.
+    # The winner's score or feasibility decides first: a chain that cannot
+    # reach Y (a new shape, foreshortening, a turn, a fold) is ret no matter
+    # how far it wandered trying. Low confidence never rets: it only lists
+    # the part in needs_human. The gate's split only applies to
+    # large-but-clean motions.
     bad: list[str] = []
     for leaf in changed:
+        feas, _why = chain_feasible(loaded.puppet, base, names[leaf], own, feat_y.line.shape)
+        if not feas:
+            bad.append(f"{leaf}/folded")
         for member in names[leaf]:
             part = loaded.puppet.parts[member]
             if part.hidden:
                 continue
-            low_score = float(base.scores.get(member, 0.0)) < SCORE_MIN
-            low_conf = float(base.confidences.get(member, 0.0)) < CONF_MIN
-            if low_score or low_conf:
+            if float(base.scores.get(member, 0.0)) < SCORE_MIN:
                 bad.append(f"{leaf}/{member}")
     if bad:
         return TransitionResult(
@@ -2242,6 +2312,7 @@ def transition_from_poses(
                 "needs a substitution drawing (K-3) or the drawn in-between path"
             ),
             scores=scores,
+            needs_human=needs_human(base, loaded.puppet),
         )
     if split:
         where = [f"{(k + 1) / (need + 1):.2f}" for k in range(need)]
@@ -2256,6 +2327,7 @@ def transition_from_poses(
                 f"{need} intermediate pose(s) at {', '.join(where)}"
             ),
             scores=scores,
+            needs_human=needs_human(base, loaded.puppet),
         )
     return TransitionResult(
         pose_x=pose_x,
@@ -2265,6 +2337,7 @@ def transition_from_poses(
         decision="rig",
         reason=f"every changed chain reaches Y (worst {worst:.1f}deg); K-2 interpolates X->Y",
         scores=scores,
+        needs_human=needs_human(base, loaded.puppet),
     )
 
 
@@ -2278,6 +2351,8 @@ def transition_dict(result: TransitionResult) -> dict[str, Any]:
         "decision": result.decision,
         "reason": result.reason,
         "scores": {k: float(v) for k, v in result.scores.items()},
+        "confidences": {k: float(v) for k, v in result.pose_y.confidences.items()},
+        "needs_human": list(result.needs_human),
     }
 
 
