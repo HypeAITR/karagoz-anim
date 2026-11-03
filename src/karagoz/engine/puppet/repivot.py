@@ -132,6 +132,12 @@ def repivot_view(view_dir: Path) -> dict[str, dict[str, Any]]:
     for limited, lim in result.limits.items():
         if limited in joints:
             joints[limited]["limits"] = [float(lim[0]), float(lim[1])]
+        if limited in puppet.parts:
+            puppet.parts[limited].limits = [float(lim[0]), float(lim[1])]
+    # a child under a dome may slide by half the dome's radius (joint slack, K-1 fit)
+    for child in result.domes:
+        if child in puppet.parts:
+            puppet.parts[child].slack_px = round(0.5 * float(result.radii[child]), 1)
     changes: dict[str, dict[str, Any]] = {}
     for name, part in puppet.parts.items():
         if part.parent is None or part.hidden:
