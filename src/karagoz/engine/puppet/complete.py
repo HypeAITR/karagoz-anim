@@ -362,9 +362,13 @@ def _arc_through(
 
 
 def _chord_strip(
-    masks: dict[str, NDArray[np.bool_]], chord: DomeChord, line_width: float
+    masks: dict[str, NDArray[np.bool_]], chord: DomeChord, line_width: float, trim_lw: float = 2.0
 ) -> NDArray[np.bool_]:
-    """The shared strip a contact chord owns: both masks near the run."""
+    """The shared strip a contact chord owns: both masks near the run.
+
+    ``trim_lw`` spares that many line widths at each run end so arc
+    junctions stay bridged; the seam heal takes the full run (0.0).
+    """
     height, width = np.asarray(masks[chord.part]).shape[:2]
     (x0, y0), (x1, y1) = chord.seg
     e0 = np.array([x0, y0], dtype=np.float64)
@@ -372,18 +376,21 @@ def _chord_strip(
     ln = max(float(np.linalg.norm(vec)), 1.0)
     d = vec / ln
     wide = np.zeros((height, width), np.bool_)
-    for k in np.arange(-2.0, ln + 2.0, 1.0):
+    for k in np.arange(trim_lw * line_width, ln - trim_lw * line_width + 1.0, 1.0):
         p = np.round(e0 + d * k).astype(int)
         if 0 <= p[0] < width and 0 <= p[1] < height:
             wide[p[1], p[0]] = True
     half = max(1, int(round(line_width / 2.0)))
-    band = np.asarray(
-        cv2.dilate(
-            wide.astype(np.uint8),
-            cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * half + 1, 2 * half + 1)),
-        ),
-        dtype=np.uint8,
-    ) > 0
+    band = (
+        np.asarray(
+            cv2.dilate(
+                wide.astype(np.uint8),
+                cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * half + 1, 2 * half + 1)),
+            ),
+            dtype=np.uint8,
+        )
+        > 0
+    )
     both = np.asarray(masks[chord.part], dtype=np.bool_) & np.asarray(masks[chord.other], dtype=np.bool_)
     return np.asarray(band & both, dtype=np.bool_)
 
@@ -395,8 +402,14 @@ def reassign_dome_chords(
     notes: dict[str, str],
     chords: list[DomeChord],
     line_width: float,
+    covers: dict[str, set[str]] | None = None,
 ) -> int:
     """Move contact-chord strips to their plates (K-0e item 3a).
+
+    A chord the plate covers at the seam (``covers`` maps the dome to its
+    plates) is skipped: the seam heal already completed the dome side flat
+    under the cover, so the strip must neither cut a slit nor leave stubs.
+
 
     The strip leaves the dome's mask and image (alpha cleared); the plate
     already paints it with reference colours, so the render is unchanged
@@ -404,19 +417,32 @@ def reassign_dome_chords(
     duplicate chords share one strip removal. Returns moved pixels.
     """
     moved = 0
-    cleared: dict[str, NDArray[bool]] = {}
+    cleared: dict[str, NDArray[np.bool_]] = {}
     for chord in chords:
         if chord.kind != "contact":
+            continue
+        if covers is not None and chord.other in covers.get(chord.part, ()):
             continue
         strip = _chord_strip(out_masks, chord, line_width)
         if not bool(strip.any()):
             continue
+        # A contact strip trims the dome; when it would amputate the part
+        # (the largest remainder keeps less than nine tenths of the mass,
+        # e.g. a band seen edge-on), the run is not a dome-closing chord on
+        # this shape — leave part and strip alone.
+        whole = int(np.asarray(out_masks[chord.part], dtype=np.bool_).sum())
+        if whole > 0:
+            _nc, _lab = cv2.connectedComponents(
+                np.asarray(np.asarray(out_masks[chord.part], dtype=np.bool_) & ~strip, dtype=np.uint8),
+                connectivity=8,
+            )
+            _sizes = np.bincount(np.asarray(_lab.ravel(), dtype=np.int64))
+            if _sizes.size > 1 and int(_sizes[1:].max()) < 0.9 * whole:
+                continue
         already = cleared.get(chord.part)
         if already is not None and float(strip[already].mean()) > 0.5:
             continue
-        out_masks[chord.part] = np.asarray(
-            np.asarray(out_masks[chord.part], dtype=np.bool_) & ~strip, dtype=np.bool_
-        )
+        out_masks[chord.part] = np.asarray(np.asarray(out_masks[chord.part], dtype=np.bool_) & ~strip, dtype=np.bool_)
         rgba = np.asarray(canvases[chord.part])
         if rgba.shape[2] == 4:
             rgba[..., 3][strip] = 0
@@ -429,6 +455,302 @@ def reassign_dome_chords(
         prior = notes.get(chord.part)
         notes[chord.part] = f"{prior}; {note}" if prior else note
     return moved
+
+
+def _seam_extensions(
+    out_masks: dict[str, NDArray[np.bool_]],
+    canvases: dict[str, NDArray[np.uint8]],
+    conts: dict[str, NDArray[np.bool_]],
+    methods: dict[str, list[str]],
+    notes: dict[str, str],
+    chords: list[DomeChord],
+    fronts: dict[str, set[str]],
+    rgb: NDArray[np.uint8],
+    line: NDArray[np.bool_],
+    line_width: float,
+) -> dict[str, NDArray[np.bool_]]:
+    """Grow seam-occluded domes under their plates (K-0e C1).
+
+    For contact chords whose plate passes in front at the shared seam, the
+    dome continues as a hidden disc under the plate: flat fill, no outline,
+    and the shared run itself heals to opaque flesh (the cover keeps the
+    outline), so a rotation reveals dome, never a slit or a straight edge.
+    Both the disc and the healed run attach to the dome only, invisible at
+    rest (the plate draws over them
+    via the returned win zones), finished in rotation. Returns covering
+    plate to win zones.
+    """
+    height, width = rgb.shape[:2]
+    touch_k = np.asarray(cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)), dtype=np.uint8)
+    wins: dict[str, NDArray[np.bool_]] = {}
+    for name in out_masks:
+        if name not in fronts:
+            continue
+        mask = np.asarray(out_masks[name], dtype=np.bool_)
+        own = np.asarray(mask & ~np.asarray(line, dtype=np.bool_), dtype=np.bool_)
+        flat = _flat_colour(rgb, own)
+        if flat is None:
+            continue
+        adjacent = np.asarray(cv2.dilate(np.asarray(mask, dtype=np.uint8), touch_k), dtype=np.uint8) > 0
+        for chord in chords:
+            if chord.part != name or chord.kind != "contact":
+                continue
+            if chord.other not in fronts[name]:
+                continue
+            cx, cy, rr = chord.circle
+            yy, xx = np.mgrid[0:height, 0:width]
+            disk = (xx - cx) ** 2 + (yy - cy) ** 2 <= rr**2
+            cand = np.asarray(
+                np.asarray(disk, dtype=np.bool_)
+                & np.asarray(out_masks[chord.other], dtype=np.bool_)
+                & ~mask,
+                dtype=np.bool_,
+            )
+            if not bool(cand.any()):
+                continue
+            _sn, slab_any = cv2.connectedComponents(np.asarray(cand, dtype=np.uint8), connectivity=8)
+            slab = np.asarray(slab_any, dtype=np.int32)
+            keep = np.zeros(cand.shape, np.bool_)
+            for cid in range(1, int(slab.max()) + 1):
+                cells = slab == cid
+                if bool((cells & adjacent).any()):
+                    keep |= cells
+            ext = np.asarray(keep, dtype=np.bool_)
+            run = _chord_strip(
+                {
+                    chord.part: np.asarray(out_masks[name], dtype=np.bool_),
+                    chord.other: np.asarray(out_masks[chord.other], dtype=np.bool_),
+                },
+                chord,
+                line_width,
+                trim_lw=0.0,
+            )
+            heal = np.asarray(run, dtype=np.bool_)
+            if bool(heal.any()):
+                rgba = np.asarray(canvases[name])
+                on = np.asarray(rgba[..., 3] > 127, dtype=np.bool_)
+                ink = np.asarray(on & (rgba[..., :3].max(axis=2) < 40), dtype=np.bool_)
+                target = np.asarray(heal & (~on | ink), dtype=np.bool_)
+                if bool(target.any()):
+                    fill = _local_flat(
+                        rgb,
+                        np.asarray(
+                            np.asarray(out_masks[name], dtype=np.bool_) & ~np.asarray(line, dtype=np.bool_),
+                            dtype=np.bool_,
+                        ),
+                        target,
+                        touch_k,
+                    )
+                    if fill is not None:
+                        rgba[..., :3][target] = fill
+                        rgba[..., 3][target] = 255
+                prev = wins.get(chord.other)
+                wins[chord.other] = heal if prev is None else np.asarray(prev | heal, dtype=np.bool_)
+                if "geometric" not in methods[name]:
+                    methods[name].append("geometric")
+                note = f"seam run of {int(heal.sum())} px under {chord.other} (flat)"
+                notes[name] = f"{notes[name]}; {note}" if name in notes else note
+            if not bool(ext.any()):
+                continue
+            rgba = np.asarray(canvases[name])
+            rgba[..., :3][ext] = flat
+            rgba[..., 3][ext] = 255
+            out_masks[name] = np.asarray(mask | ext, dtype=np.bool_)
+            mask = np.asarray(out_masks[name], dtype=np.bool_)
+            adjacent = np.asarray(cv2.dilate(np.asarray(mask, dtype=np.uint8), touch_k), dtype=np.uint8) > 0
+            conts[name] = np.asarray(np.asarray(conts[name], dtype=np.bool_) | ext, dtype=np.bool_)
+            if "geometric" not in methods[name]:
+                methods[name].append("geometric")
+            note = f"dome extension of {int(ext.sum())} px under {chord.other} (seam)"
+            notes[name] = f"{notes[name]}; {note}" if name in notes else note
+            prev = wins.get(chord.other)
+            wins[chord.other] = ext if prev is None else np.asarray(prev | ext, dtype=np.bool_)
+    return wins
+
+
+def _coincident_run_ink(
+    dome_canvas: NDArray[np.uint8], cover_canvas: NDArray[np.uint8], line_width: float
+) -> tuple[NDArray[np.bool_], NDArray[np.bool_]]:
+    """Windows and cover-nearness of dome runs drawn over the cover (K-0e C1).
+
+    Straight runs are detected in the finished dome canvas (never trusted
+    from a possibly stale pre-fill segment) and kept only when the cover
+    holds ink along the run's middle (the same one-half bar as the seam
+    rule): the neighbour drew that stroke. Returns the kept runs'
+    full-span windows (half line width each side of the fitted run) and
+    the dilated cover-ink mask, so callers paint and count only pixels
+    that are both straight-run and cover-coincident.
+    """
+    dome = np.asarray(dome_canvas)
+    cover = np.asarray(cover_canvas)
+    dome_ink = np.asarray((dome[..., 3] > 127) & (dome[..., :3].max(axis=2) < 40), dtype=np.bool_)
+    cover_ink = np.asarray((cover[..., 3] > 127) & (cover[..., :3].max(axis=2) < 40), dtype=np.bool_)
+    height, width = dome_ink.shape
+    out = np.zeros((height, width), np.bool_)
+    near = (np.asarray(cv2.dilate(cover_ink.astype(np.uint8), np.ones((3, 3), np.uint8)), dtype=np.uint8)) > 0
+    if not bool(dome_ink.any()) or not bool(cover_ink.any()):
+        return out, near
+    yy, xx = np.mgrid[0:height, 0:width].astype(np.float64)
+    for x0, y0, x1, y1 in _ink_runs(dome_ink, line_width):
+        vec = np.array([x1 - x0, y1 - y0], dtype=np.float64)
+        ln = max(float(np.linalg.norm(vec)), 1e-9)
+        direction = vec / ln
+        pts = [np.array([x0, y0]) + direction * t for t in np.arange(0.2 * ln, 0.8 * ln + 1.0, 1.0)]
+        cells = np.clip(np.round(pts).astype(int), [0, 0], [width - 1, height - 1])
+        if not cells.size:
+            continue
+        hits = [bool(near[y, x]) for x, y in cells]
+        if float(sum(hits)) / max(len(hits), 1) < 0.5:
+            continue
+        along = ((xx - x0) * vec[0] + (yy - y0) * vec[1]) / ln
+        across = np.abs((xx - x0) * (-vec[1]) + (yy - y0) * vec[0]) / ln
+        out |= np.asarray((across <= line_width) & (along >= 0.0) & (along <= ln), dtype=np.bool_)
+    return out, near
+
+
+def _drop_covered_runs(
+    out_masks: dict[str, NDArray[np.bool_]],
+    canvases: dict[str, NDArray[np.uint8]],
+    methods: dict[str, list[str]],
+    notes: dict[str, str],
+    chords: list[DomeChord],
+    fronts: dict[str, set[str]],
+    rgb: NDArray[np.uint8],
+    line: NDArray[np.bool_],
+    line_width: float,
+    wins: dict[str, NDArray[np.bool_]],
+) -> None:
+    """Drop a seam-covered run the dome still owns (K-0e C1).
+
+    Last pass over the finished canvases, so nothing after it can put the
+    ink back: runs are detected in the finished canvas (never trusted from
+    a possibly stale pre-fill segment) and a run coinciding with the
+    cover's own outline ink (the neighbour drew the stroke; partitioning
+    copied it to both sides) belongs to the cover. It leaves the dome
+    canvas for local flesh, opaque; the cover keeps drawing it, and the win
+    zone covers the band and the painted run at rest. Transparent band
+    pixels (slit remnants)
+    heal the same way.
+    """
+    for chord in chords:
+        if chord.kind != "contact":
+            continue
+        if chord.part not in fronts or chord.other not in fronts[chord.part]:
+            continue
+        if chord.part not in out_masks or chord.other not in out_masks:
+            continue
+        band = _chord_strip(
+            {
+                chord.part: np.asarray(out_masks[chord.part], dtype=np.bool_),
+                chord.other: np.asarray(out_masks[chord.other], dtype=np.bool_),
+            },
+            chord,
+            line_width,
+            trim_lw=0.0,
+        )
+        dome = np.asarray(canvases[chord.part])
+        cover = np.asarray(canvases[chord.other])
+        dome_on = np.asarray(dome[..., 3] > 127, dtype=np.bool_)
+        painted = np.zeros(dome_on.shape, np.bool_)
+        for _ in range(2):
+            run, near = _coincident_run_ink(dome, cover, line_width)
+            paint = np.asarray((dome[..., :3].max(axis=2) < 40) & dome_on & run & near, dtype=np.bool_)
+            target = np.asarray(band & ~dome_on, dtype=np.bool_) | paint
+            if not bool(target.any()):
+                break
+            flesh = np.asarray(
+                np.asarray(out_masks[chord.part], dtype=np.bool_)
+                & ~np.asarray(line, dtype=np.bool_)
+                & np.asarray(rgb[..., :3].min(axis=2) < 250, dtype=np.bool_),
+                dtype=np.bool_,
+            )
+            fill = _flat_colour(rgb, flesh)
+            if fill is None:
+                break
+            dome[..., :3][target] = fill
+            dome[..., 3][target] = 255
+            painted = np.asarray(painted | target, dtype=np.bool_)
+        if not bool(painted.any()):
+            continue
+        prev = wins.get(chord.other)
+        zone = np.asarray(band | painted, dtype=np.bool_)
+        wins[chord.other] = zone if prev is None else np.asarray(prev | zone, dtype=np.bool_)
+        if "geometric" not in methods.setdefault(chord.part, []):
+            methods[chord.part].append("geometric")
+        cleared = f"covered run of {int(painted.sum())} px cleared under {chord.other}"
+        notes[chord.part] = f"{notes[chord.part]}; {cleared}" if chord.part in notes else cleared
+
+
+def seam_fronts(
+    masks: dict[str, NDArray[np.bool_]],
+    chords: list[DomeChord],
+    line_width: float,
+) -> dict[str, set[str]]:
+    """Plates that occlude each dome at their shared chord (K-0e C1).
+
+    A general T-junction rule with no part names: a contact chord is a seam
+    where the dome ends. When the chord's middle lies on the plate's drawn
+    outline and the plate's outline continues past both run ends along the
+    seam, the plate passes in front there though ranked lower: the dome is
+    the occluded side. Returns dome names to their occluding plates.
+    """
+    fronts: dict[str, set[str]] = {}
+    er_k = np.ones((3, 3), np.uint8)
+    edge_of = {
+        name: np.asarray(
+            np.asarray(mask, dtype=np.bool_)
+            & ~np.asarray(cv2.erode(np.asarray(mask, dtype=np.uint8), er_k), dtype=np.uint8) > 0,
+            dtype=np.bool_,
+        )
+        for name, mask in masks.items()
+        if bool(np.asarray(mask, dtype=np.bool_).any())
+    }
+    if not edge_of:
+        return fronts
+    height, width = next(iter(edge_of.values())).shape[:2]
+    for chord in chords:
+        if chord.kind != "contact":
+            continue
+        if chord.part not in edge_of or chord.other not in edge_of:
+            continue
+        (x0, y0), (x1, y1) = chord.seg
+        e0 = np.array([x0, y0], dtype=np.float64)
+        vec = np.array([x1 - x0, y1 - y0], dtype=np.float64)
+        length = max(float(np.linalg.norm(vec)), 1e-9)
+        if length < 6.0 * line_width:
+            continue
+        direction = vec / length
+        plate_dist = np.asarray(
+            cv2.distanceTransform(
+                (~np.asarray(edge_of[chord.other], dtype=np.bool_)).astype(np.uint8), cv2.DIST_L2, 3
+            ),
+            dtype=np.float64,
+        )
+        mid = [e0 + direction * t for t in np.arange(0.2 * length, 0.8 * length + 1.0, 1.0)]
+        cells = np.clip(np.round(mid).astype(int), [0, 0], [width - 1, height - 1])
+        if not cells.size or float(np.mean([plate_dist[y, x] <= line_width for x, y in cells])) < 0.5:
+            continue
+        votes = 0
+        for end, outward in ((e0, -direction), (e0 + vec, direction)):
+            yy, xx = np.mgrid[0:height, 0:width].astype(np.float64)
+            dist = np.hypot(xx - end[0], yy - end[1])
+            ring = (
+                np.asarray(edge_of[chord.other], dtype=np.bool_)
+                & (dist > 2.0 * line_width)
+                & (dist <= 6.0 * line_width)
+            )
+            ys, xs = np.nonzero(ring)
+            if len(xs) < 8:
+                continue
+            pts = np.stack([xs.astype(np.float64), ys.astype(np.float64)], axis=1)
+            centre = pts.mean(axis=0)
+            _vals, vecs = np.linalg.eigh(np.cov((pts - centre).T))
+            axis = np.asarray(vecs[:, 1], dtype=np.float64)
+            if abs(float(axis @ outward)) >= np.cos(np.radians(30.0)):
+                votes += 1
+        if votes == 2:
+            fronts.setdefault(chord.part, set()).add(chord.other)
+    return fronts
 
 
 def default_image_cache_dir() -> Path:
@@ -447,6 +769,10 @@ class CompletionResult:
     # The continued outline per part (convex hull, plus the axis strip for
     # tubes): where the part claims to continue under its covers.
     conts: dict[str, NDArray[np.bool_]] = field(default_factory=dict)
+    # Seam occlusion (K-0e C1): dome to plates passing in front at the chord.
+    seam_cover: dict[str, list[str]] = field(default_factory=dict)
+    # Rest draw priority: covering plate to pixels hiding a dome's disc.
+    seam_wins: dict[str, NDArray[np.bool_]] = field(default_factory=dict)
     # Drawn tube ends found inside mouths: part name to canvas [x, y] of the
     # tip line centre. The pair-end check anchors its windows on these.
     tips: dict[str, list[float]] = field(default_factory=dict)
@@ -1092,6 +1418,7 @@ def complete_parts(
     # Dome chords (K-0e item 3) are detected on the split masks with
     # drawn-only paint: completion ink must never seed the detector.
     dome_chord_list = dome_chords(out_masks, canvases, z_of, line_width)
+    dome_fronts = seam_fronts(out_masks, dome_chord_list, line_width)
     # Drawn art is sacred: completion may add backing but never repaints split
     # pixels (reference colours). The snapshot below is what mouth paint and
     # rims must leave alone.
@@ -1100,6 +1427,7 @@ def complete_parts(
     notes: dict[str, str] = {}
     conts: dict[str, NDArray[np.bool_]] = {}
     tips: dict[str, list[float]] = {}
+
     image_calls = 0
 
     touch_k = np.asarray(cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3)), dtype=np.uint8)
@@ -1123,7 +1451,8 @@ def complete_parts(
                 ).any()
             )
         ]
-        if not covers:
+        seam_here = sorted(dome_fronts.get(name, ()))
+        if not covers and not seam_here:
             conts[name] = _hull_only(mask)
             found = _dome_mouth(mask, out_masks, order, z_of, name, touch_k)
             if found is not None:
@@ -1171,9 +1500,13 @@ def complete_parts(
             cells = hlab == cid
             if bool((cells & adjacent).any()):
                 comps.append(np.asarray(cells, dtype=np.bool_))
-        if not comps:
+        if not comps and not seam_here:
             continue
-        hidden = np.asarray(np.logical_or.reduce(comps), dtype=np.bool_)
+        hidden = (
+            np.asarray(np.logical_or.reduce(comps), dtype=np.bool_)
+            if comps
+            else np.zeros((height, width), np.bool_)
+        )
         frame = _tube_frame(own) if bool(own.any()) else None
         axis: NDArray[np.float64] | None = None
         cross: NDArray[np.float64] | None = None
@@ -1223,7 +1556,8 @@ def complete_parts(
             else:
                 notes[name] = "model call failed; left as is"
         else:
-            notes[name] = "no visible interior to copy; left as is"
+            if comps:
+                notes[name] = "no visible interior to copy; left as is"
         mouth_found = _dome_mouth(mask, out_masks, order, z_of, name, touch_k)
         if mouth_found is not None:
             mouth, under_name = mouth_found
@@ -1274,6 +1608,10 @@ def complete_parts(
         rgba[..., :3][mask] = canvas[mask]
         rgba[..., 3][mask] = 255
     inks = {name: _line_colour(rgb, np.asarray(out_masks[name] & line, dtype=np.bool_)) for name in order}
+    seam_wins = _seam_extensions(
+        out_masks, canvases, conts, methods, notes, dome_chord_list, dome_fronts, rgb, line, line_width
+    )
+    seam_cover = {name: sorted(dome_fronts[name]) for name in order if name in dome_fronts}
     slivers = _merge_slivers(out_masks, canvases, line_width, inks)
     for name, px in slivers.items():
         note = f"sliver merge of {px} px"
@@ -1281,11 +1619,27 @@ def complete_parts(
     # Contact dome chords (K-0e item 3a) move to their plates after all
     # fills: detection reruns on drawn-only paint so completion ink can
     # never seed it, and the strip leaves the dome's mask and image.
-    drawn_canvases = {
-        name: _part_rgba_image(rgb, np.asarray(drawn[name], dtype=np.bool_)) for name in order
-    }
+    drawn_canvases = {name: _part_rgba_image(rgb, np.asarray(drawn[name], dtype=np.bool_)) for name in order}
     fresh_chords = dome_chords(out_masks, drawn_canvases, z_of, line_width)
-    reassign_dome_chords(out_masks, canvases, methods, notes, fresh_chords, line_width)
+    reassign_dome_chords(out_masks, canvases, methods, notes, fresh_chords, line_width, dome_fronts)
+    # Contact chords the pre-fill pass found whose shared strip survives
+    # completion (a later mouth close can reshape the boundary enough to
+    # hide the chord from the post-fill re-run while the strip — and the
+    # dome's straight ink — remain): move those strips too. Pixel-identical
+    # by construction (both canvases sample the reference) and idempotent
+    # with the call above (a moved strip leaves no strip behind).
+    reassign_dome_chords(out_masks, canvases, methods, notes, dome_chord_list, line_width, dome_fronts)
+    # Splinters stranded by the strip moves (junction crumbs left on the
+    # dome when its strip leaves) rejoin a neighbour like any other sliver;
+    # the relabel path keeps the render pixel-identical.
+    inks = {name: _line_colour(rgb, np.asarray(out_masks[name] & line, dtype=np.bool_)) for name in order}
+    restrip = _merge_slivers(out_masks, canvases, line_width, inks)
+    for name, px in restrip.items():
+        note = f"sliver merge of {px} px"
+        notes[name] = f"{notes[name]}; {note}" if name in notes else note
+    _drop_covered_runs(
+        out_masks, canvases, methods, notes, dome_chord_list, dome_fronts, rgb, line, line_width, seam_wins
+    )
     return CompletionResult(
         masks=out_masks,
         methods=methods,
@@ -1294,6 +1648,8 @@ def complete_parts(
         images=canvases,
         conts=conts,
         tips=tips,
+        seam_cover=seam_cover,
+        seam_wins=seam_wins,
     )
 
 
