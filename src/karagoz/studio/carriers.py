@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from karagoz import config
+from karagoz.studio.failures import Failure
 
 MUSE_MODEL = "muse-spark-1.3-contributor"
 PRICE_PER_MTOK = {"input": 0.10, "output": 0.20}
@@ -51,6 +52,7 @@ class RunResult:
     cost_usd: float = 0.0
     seconds: float = 0.0
     error: str | None = None
+    failure: Failure | None = None
 
 
 OnEvent = Callable[[dict[str, Any]], None]

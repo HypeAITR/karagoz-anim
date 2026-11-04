@@ -18,7 +18,7 @@ import shutil
 import sys
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -39,6 +39,7 @@ from karagoz.studio.context import (
     shot_summary,
 )
 from karagoz.studio.events import Clock, EventLog
+from karagoz.studio.failures import Failure, failure_from_exception, owner_of, relative_to_prod
 from karagoz.studio.questions import QuestionPolicy, allowance, difficulty, parse_question
 from karagoz.studio.tasks import Board, Change, State, Task, TransitionError
 
@@ -64,6 +65,17 @@ DEPARTMENTS = [
     "edit",
 ]
 CODE_DEPARTMENTS = {"location", "voice", "draw", "render", "edit", "gate", "check", "review"}
+
+_CODE_FAIL_STEP = {"draw": "draw.run", "location": "location.run"}
+
+
+def _code_failure(prod: Path, exc: BaseException | Finding | tuple[Path, str], step: str) -> Failure:
+    """A Failure from a code-step error, with its file relative to the production."""
+    failure = failure_from_exception(exc, step)
+    if failure.file is None:
+        return failure
+    return replace(failure, file=relative_to_prod(prod, failure.file))
+
 
 DEFAULT_CARRIER = "muse-exec"
 DEFAULT_MAX_STEPS = 40
@@ -591,7 +603,12 @@ def code_work(
             image_cost = 0.0 if hooked_image else report.cost_usd
             if report.failed:
                 error = ", ".join(f"{path}: {message}" for path, message in report.failed)
-                return RunResult(ok=False, error=error, cost_usd=image_cost)
+                return RunResult(
+                    ok=False,
+                    error=error,
+                    cost_usd=image_cost,
+                    failure=_code_failure(prod, report.failed[0], "location.run"),
+                )
             hooked_sam = False
             sam_client: MetaClient | None = None
             active_sam: SamLike
@@ -730,7 +747,17 @@ def code_work(
                 ):
                     install_cost_hook(image.client, budget, event_log, task.id)
                     hooked_image = True
-            jobs = plan_draw(prod, episode, task.unit)
+            try:
+                jobs = plan_draw(prod, episode, task.unit)
+            except Exception as exc:
+                # a bad input fails the task with a routed failure, not the studio
+                claims_cost = _join_claims()
+                return RunResult(
+                    ok=False,
+                    error=f"{type(exc).__name__}: {exc}",
+                    cost_usd=claims_cost,
+                    failure=_code_failure(prod, exc, "draw.plan"),
+                )
             retired = retire_stale(jobs, prod / episode / "assets" / task.unit)
             if retired and on_event is not None:
                 assets_dir = prod / episode / "assets" / task.unit
@@ -746,12 +773,27 @@ def code_work(
                         },
                     }
                 )
-            report, _ = draw_shot(prod, episode, task.unit, jobs, draw_active, on_event=on_event)
+            try:
+                report, _ = draw_shot(prod, episode, task.unit, jobs, draw_active, on_event=on_event)
+            except Exception as exc:
+                # a bad input fails the task with a routed failure, not the studio
+                claims_cost = _join_claims()
+                return RunResult(
+                    ok=False,
+                    error=f"{type(exc).__name__}: {exc}",
+                    cost_usd=claims_cost,
+                    failure=_code_failure(prod, exc, "puppet.route"),
+                )
             draw_image_cost = 0.0 if hooked_image else report.cost_usd
             if report.failed:
                 error = ", ".join(f"{path}: {message}" for path, message in report.failed)
                 claims_cost = _join_claims()
-                return RunResult(ok=False, error=error, cost_usd=draw_image_cost + claims_cost)
+                return RunResult(
+                    ok=False,
+                    error=error,
+                    cost_usd=draw_image_cost + claims_cost,
+                    failure=_code_failure(prod, report.failed[0], "draw.run"),
+                )
             # With a region map the render places drawings by their landmarks (WP-11): measure them now (cached by
             # image hash, so only new drawings cost SAM calls).
             if _shot_has_regions(prod, episode, task.unit):
@@ -936,7 +978,9 @@ def code_work(
             )
         raise ValueError(f"not a code department: {department!r}")
     except Exception as exc:  # noqa: BLE001 - a code failure fails the task, not the studio
-        return RunResult(ok=False, error=f"{type(exc).__name__}: {exc}")
+        step = _CODE_FAIL_STEP.get(department, department)
+        failure = _code_failure(prod, exc, step)
+        return RunResult(ok=False, error=f"{type(exc).__name__}: {exc}", failure=failure)
 
 
 @dataclass
@@ -1387,6 +1431,43 @@ class Studio:
             self._maybe_interview(task, carrier, workdir, result.session_id)
         return changes
 
+    def _route_failure(self, task: Task, result: RunResult, changes: list[Change]) -> None:
+        """Route a code-task failure to the agent that caused it.
+
+        Builds the Failure from the result (or from its error string when the
+        code path attached none), retakes the owning task with the structured
+        note when it differs from the failing task, and logs a failure.routed
+        event either way. An owner already at its retake limit keeps today's
+        behaviour: Board.retake moves it to QUESTION with the structured note.
+        """
+        failure = result.failure
+        if failure is None:
+            step = _CODE_FAIL_STEP.get(task.department, task.department)
+            failure = failure_from_exception(Exception(result.error or "task failed"), step)
+        owner = owner_of(self.board, failure)
+        to: str | None = None
+        if owner is not None and owner != task.id:
+            try:
+                for change in self.board.retake(owner, failure.as_note()):
+                    changes.append(change)
+                    self._record(change)
+                to = owner
+            except TransitionError:
+                to = None
+        self.log.append(
+            task.id,
+            "failure.routed",
+            payload_type="failure.routed",
+            payload={
+                "from": task.id,
+                "to": to,
+                "step": failure.step,
+                "file": failure.file,
+                "field": failure.field,
+                "message": failure.message,
+            },
+        )
+
     def _maybe_interview(self, task: Task, carrier: Carrier, workdir: Path, session_id: str | None) -> None:
         """Ask a retaken agent what was unclear; never fails the task."""
         if task.retakes <= 0 or session_id is None:
@@ -1452,6 +1533,7 @@ class Studio:
         if not result.ok:
             changes.append(self.board.finish(task.id, ok=False, note=result.error))
             self._record(changes[-1])
+            self._route_failure(task, result, changes)
             return changes
         missing = [rel for rel in task.files_out if not (self.prod / rel).is_file()]
         if missing:

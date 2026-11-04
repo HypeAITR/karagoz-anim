@@ -92,6 +92,7 @@ A scene is a stack of layers, each with one behaviour managed by the engine: **h
 | `src/karagoz/studio/context.py` | per-task context compiler: cores, department guide, chosen sections, index, own notes |
 | `src/karagoz/studio/draw.py` | draw department: every drawing a shot needs, via Muse Image |
 | `src/karagoz/studio/events.py` | append-only JSONL event log: state changes, actions, costs, questions |
+| `src/karagoz/studio/failures.py` | structured failures: every failure reaches the agent that caused it |
 | `src/karagoz/studio/loop.py` | orchestrator loop: one review per shot, keep/redraw/retake, at most three rounds |
 | `src/karagoz/studio/orchestrator.py` | studio orchestrator: task board, isolated working directories, carriers, budget, log |
 | `src/karagoz/studio/puppet_route.py` | puppet in-between routing: key chains through the puppet fit, rig holds and frames |
