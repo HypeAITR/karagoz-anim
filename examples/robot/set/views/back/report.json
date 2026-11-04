@@ -1,0 +1,1240 @@
+{
+ "reference": "back.png",
+ "canvas": [
+  2400,
+  1792
+ ],
+ "line_width_px": 5.7,
+ "root": "torso",
+ "yaw_deg": 180.0,
+ "recomposition": {
+  "outside_band_gt40": 0,
+  "inside_band_gt40": 11177,
+  "band_px": 150527
+ },
+ "outlines": {
+  "torso": {
+   "components": 1.0,
+   "islands": 1,
+   "islands_ok": true,
+   "border_line_coverage": 1.0
+  },
+  "neck": {
+   "components": 1.0,
+   "islands": 1,
+   "islands_ok": true,
+   "border_line_coverage": 1.0
+  },
+  "head": {
+   "components": 1.0,
+   "islands": 1,
+   "islands_ok": true,
+   "border_line_coverage": 1.0
+  },
+  "shoulder_cap_r": {
+   "components": 1.0,
+   "islands": 1,
+   "islands_ok": true,
+   "border_line_coverage": 1.0
+  },
+  "upper_arm_r": {
+   "components": 1.0,
+   "islands": 1,
+   "islands_ok": true,
+   "border_line_coverage": 1.0
+  },
+  "elbow_r": {
+   "components": 1.0,
+   "islands": 1,
+   "islands_ok": true,
+   "border_line_coverage": 1.0
+  },
+  "forearm_r": {
+   "components": 1.0,
+   "islands": 1,
+   "islands_ok": true,
+   "border_line_coverage": 1.0
+  },
+  "hand_r": {
+   "components": 1.0,
+   "islands": 1,
+   "islands_ok": true,
+   "border_line_coverage": 1.0
+  },
+  "shoulder_cap_l": {
+   "components": 1.0,
+   "islands": 1,
+   "islands_ok": true,
+   "border_line_coverage": 1.0
+  },
+  "upper_arm_l": {
+   "components": 1.0,
+   "islands": 1,
+   "islands_ok": true,
+   "border_line_coverage": 1.0
+  },
+  "elbow_l": {
+   "components": 1.0,
+   "islands": 1,
+   "islands_ok": true,
+   "border_line_coverage": 1.0
+  },
+  "forearm_l": {
+   "components": 1.0,
+   "islands": 1,
+   "islands_ok": true,
+   "border_line_coverage": 1.0
+  },
+  "hand_l": {
+   "components": 1.0,
+   "islands": 1,
+   "islands_ok": true,
+   "border_line_coverage": 1.0
+  },
+  "leg_r": {
+   "components": 1.0,
+   "islands": 1,
+   "islands_ok": true,
+   "border_line_coverage": 1.0
+  },
+  "boot_r": {
+   "components": 1.0,
+   "islands": 1,
+   "islands_ok": true,
+   "border_line_coverage": 1.0
+  },
+  "foot_r": {
+   "components": 1.0,
+   "islands": 1,
+   "islands_ok": true,
+   "border_line_coverage": 1.0
+  },
+  "leg_l": {
+   "components": 1.0,
+   "islands": 1,
+   "islands_ok": true,
+   "border_line_coverage": 1.0
+  },
+  "boot_l": {
+   "components": 1.0,
+   "islands": 1,
+   "islands_ok": true,
+   "border_line_coverage": 1.0
+  },
+  "foot_l": {
+   "components": 1.0,
+   "islands": 1,
+   "islands_ok": true,
+   "border_line_coverage": 1.0
+  }
+ },
+ "symmetry": {
+  "boot": {
+   "area_ratio": 1.0028234186894631,
+   "bbox_size_ratio": 1.0
+  },
+  "elbow": {
+   "area_ratio": 0.998115239633818,
+   "bbox_size_ratio": 0.9876543209876543
+  },
+  "foot": {
+   "area_ratio": 1.000541738488057,
+   "bbox_size_ratio": 1.0
+  },
+  "forearm": {
+   "area_ratio": 0.7488828023641344,
+   "bbox_size_ratio": 0.4224321853093569
+  },
+  "hand": {
+   "area_ratio": 1.0995982986767485,
+   "bbox_size_ratio": 1.0584415584415585
+  },
+  "leg": {
+   "area_ratio": 1.6610953972743636,
+   "bbox_size_ratio": 2.0001443001443002
+  },
+  "shoulder_cap": {
+   "area_ratio": 1.0735000767224183,
+   "bbox_size_ratio": 1.0077519379844961
+  },
+  "upper_arm": {
+   "area_ratio": 0.9777109499380859,
+   "bbox_size_ratio": 0.9941570624497453
+  }
+ },
+ "symmetry_ok": null,
+ "foreign_share": {
+  "torso": 0.0,
+  "neck": 0.0,
+  "head": 0.0,
+  "shoulder_cap_r": 0.0,
+  "upper_arm_r": 0.0,
+  "elbow_r": 0.0,
+  "forearm_r": 0.0,
+  "hand_r": 0.0,
+  "shoulder_cap_l": 0.0,
+  "upper_arm_l": 0.0,
+  "elbow_l": 0.0,
+  "forearm_l": 0.0,
+  "hand_l": 0.0,
+  "leg_r": 0.0,
+  "boot_r": 0.0,
+  "foot_r": 0.0,
+  "leg_l": 0.0,
+  "boot_l": 0.0,
+  "foot_l": 0.0
+ },
+ "straight_cut_px": {
+  "torso": 0,
+  "neck": 0,
+  "head": 0,
+  "shoulder_cap_r": 0,
+  "upper_arm_r": 0,
+  "elbow_r": 0,
+  "forearm_r": 0,
+  "hand_r": 0,
+  "shoulder_cap_l": 0,
+  "upper_arm_l": 0,
+  "elbow_l": 0,
+  "forearm_l": 0,
+  "hand_l": 0,
+  "leg_r": 0,
+  "boot_r": 0,
+  "foot_r": 0,
+  "leg_l": 0,
+  "boot_l": 0,
+  "foot_l": 0
+ },
+ "exposed_completion_px": {
+  "torso": 37,
+  "neck": 0,
+  "head": 0,
+  "shoulder_cap_r": 7,
+  "upper_arm_r": 0,
+  "elbow_r": 0,
+  "forearm_r": 0,
+  "hand_r": 0,
+  "shoulder_cap_l": 24,
+  "upper_arm_l": 0,
+  "elbow_l": 0,
+  "forearm_l": 0,
+  "hand_l": 0,
+  "leg_r": 0,
+  "boot_r": 0,
+  "foot_r": 0,
+  "leg_l": 0,
+  "boot_l": 0,
+  "foot_l": 0
+ },
+ "pair_ends": {
+  "boot": {
+   "status": "ok",
+   "hist_l1": 0.0026595744680850985,
+   "shape_iou": 0.984759671746776
+  },
+  "elbow": {
+   "status": "ok",
+   "hist_l1": 0.004618226600985223,
+   "shape_iou": 0.9335604770017035
+  },
+  "foot": {
+   "status": "ok",
+   "hist_l1": 0.0033482142857143016,
+   "shape_iou": 0.8331870061457419
+  },
+  "forearm": {
+   "status": "mismatch",
+   "hist_l1": 0.01760912698412697,
+   "shape_iou": 0.5240641711229946
+  },
+  "hand": {
+   "status": "ok",
+   "hist_l1": 0.01934523809523811,
+   "shape_iou": 0.956386292834891
+  },
+  "leg": {
+   "status": "mismatch",
+   "hist_l1": 0.07198228128460686,
+   "shape_iou": 0.5579710144927537
+  },
+  "shoulder_cap": {
+   "status": "ok",
+   "hist_l1": 0.16090029761904764,
+   "shape_iou": 0.7555555555555555
+  },
+  "upper_arm": {
+   "status": "mismatch",
+   "hist_l1": 0.053757440476190486,
+   "shape_iou": 0.6491525423728813
+  }
+ },
+ "pair_ends_ok": false,
+ "z_conflicts": [],
+ "swept_cut_px": {
+  "neck": {
+   "-45": 0,
+   "+45": 0
+  },
+  "head": {
+   "-45": 0,
+   "+45": 0
+  },
+  "shoulder_cap_r": {
+   "-45": 0,
+   "+45": 0
+  },
+  "upper_arm_r": {
+   "-45": 0,
+   "+45": 0
+  },
+  "elbow_r": {
+   "-45": 0,
+   "+45": 0
+  },
+  "forearm_r": {
+   "-45": 0,
+   "+45": 0
+  },
+  "hand_r": {
+   "-45": 0,
+   "+45": 0
+  },
+  "shoulder_cap_l": {
+   "-45": 0,
+   "+45": 0
+  },
+  "upper_arm_l": {
+   "-45": 0,
+   "+45": 0
+  },
+  "elbow_l": {
+   "-45": 0,
+   "+45": 0
+  },
+  "forearm_l": {
+   "-45": 0,
+   "+45": 0
+  },
+  "hand_l": {
+   "-45": 0,
+   "+45": 0
+  },
+  "leg_r": {
+   "-45": 0,
+   "+45": 0
+  },
+  "boot_r": {
+   "-45": 0,
+   "+45": 0
+  },
+  "foot_r": {
+   "-45": 0,
+   "+45": 0
+  },
+  "leg_l": {
+   "-45": 0,
+   "+45": 0
+  },
+  "boot_l": {
+   "-45": 0,
+   "+45": 0
+  },
+  "foot_l": {
+   "-45": 0,
+   "+45": 0
+  }
+ },
+ "seam_cover": {},
+ "seam_wins": {
+  "upper_arm_r": {
+   "file": "seam_win_upper_arm_r.png",
+   "px": 1369
+  },
+  "torso": {
+   "file": "seam_win_torso.png",
+   "px": 762
+  },
+  "upper_arm_l": {
+   "file": "seam_win_upper_arm_l.png",
+   "px": 645
+  }
+ },
+ "joints": {
+  "neck": {
+   "parent": "torso",
+   "pivot": [
+    1198.7984934086628,
+    605.6468926553672
+   ],
+   "radius": 26.001734523957655,
+   "paper_px": {
+    "-45": 0,
+    "-20": 0,
+    "+20": 0,
+    "+45": 0
+   },
+   "own_px": {
+    "-45": 11,
+    "-20": 11,
+    "+20": 11,
+    "+45": 11
+   }
+  },
+  "head": {
+   "parent": "neck",
+   "pivot": [
+    1199.427255985267,
+    569.439226519337
+   ],
+   "radius": 26.29389801439097,
+   "paper_px": {
+    "-45": 0,
+    "-20": 0,
+    "+20": 0,
+    "+45": 0
+   },
+   "own_px": {
+    "-45": 0,
+    "-20": 0,
+    "+20": 0,
+    "+45": 0
+   }
+  },
+  "shoulder_cap_r": {
+   "parent": "torso",
+   "pivot": [
+    1424.496218487395,
+    734.6340336134454
+   ],
+   "radius": 27.524126309792685,
+   "paper_px": {
+    "-45": 0,
+    "-20": 0,
+    "+20": 0,
+    "+45": 0
+   },
+   "own_px": {
+    "-45": 0,
+    "-20": 0,
+    "+20": 2,
+    "+45": 2
+   },
+   "limits": [
+    -10.0,
+    10.0
+   ]
+  },
+  "upper_arm_r": {
+   "parent": "shoulder_cap_r",
+   "pivot": [
+    1457.4234198127735,
+    736.8202272003743
+   ],
+   "radius": 80.78036430684686,
+   "paper_px": {
+    "-45": 0,
+    "-20": 0,
+    "+20": 0,
+    "+45": 0
+   },
+   "own_px": {
+    "-45": 298,
+    "-20": 281,
+    "+20": 286,
+    "+45": 298
+   }
+  },
+  "elbow_r": {
+   "parent": "upper_arm_r",
+   "pivot": [
+    1698.3809736603027,
+    732.9012065006993
+   ],
+   "radius": 52.965474818269655,
+   "paper_px": {
+    "-45": 0,
+    "-20": 0,
+    "+20": 0,
+    "+45": 0
+   },
+   "own_px": {
+    "-45": 0,
+    "-20": 0,
+    "+20": 0,
+    "+45": 0
+   },
+   "limits": [
+    -10.0,
+    10.0
+   ]
+  },
+  "forearm_r": {
+   "parent": "elbow_r",
+   "pivot": [
+    1698.3809736603027,
+    732.9012065006993
+   ],
+   "radius": 52.965474818269655,
+   "paper_px": {
+    "-45": 0,
+    "-20": 0,
+    "+20": 0,
+    "+45": 0
+   },
+   "own_px": {
+    "-45": 0,
+    "-20": 0,
+    "+20": 0,
+    "+45": 0
+   }
+  },
+  "hand_r": {
+   "parent": "forearm_r",
+   "pivot": [
+    1909.90687250996,
+    728.9302788844622
+   ],
+   "radius": 25.281737508665255,
+   "paper_px": {
+    "-45": 0,
+    "-20": 0,
+    "+20": 0,
+    "+45": 0
+   },
+   "own_px": {
+    "-45": 0,
+    "-20": 0,
+    "+20": 0,
+    "+45": 0
+   }
+  },
+  "shoulder_cap_l": {
+   "parent": "torso",
+   "pivot": [
+    974.8495024875622,
+    735.1028192371476
+   ],
+   "radius": 27.70854462932514,
+   "paper_px": {
+    "-45": 0,
+    "-20": 0,
+    "+20": 0,
+    "+45": 0
+   },
+   "own_px": {
+    "-45": 151,
+    "-20": 76,
+    "+20": 2,
+    "+45": 18
+   },
+   "limits": [
+    -10.0,
+    10.0
+   ]
+  },
+  "upper_arm_l": {
+   "parent": "shoulder_cap_l",
+   "pivot": [
+    945.4289949464908,
+    736.6751921704333
+   ],
+   "radius": 80.73850224259813,
+   "paper_px": {
+    "-45": 0,
+    "-20": 0,
+    "+20": 0,
+    "+45": 0
+   },
+   "own_px": {
+    "-45": 288,
+    "-20": 200,
+    "+20": 193,
+    "+45": 288
+   }
+  },
+  "elbow_l": {
+   "parent": "upper_arm_l",
+   "pivot": [
+    700.9047495346724,
+    735.1504552082274
+   ],
+   "radius": 52.52513219376851,
+   "paper_px": {
+    "-45": 0,
+    "-20": 0,
+    "+20": 0,
+    "+45": 0
+   },
+   "own_px": {
+    "-45": 0,
+    "-20": 0,
+    "+20": 0,
+    "+45": 0
+   },
+   "limits": [
+    -10.0,
+    10.0
+   ]
+  },
+  "forearm_l": {
+   "parent": "elbow_l",
+   "pivot": [
+    700.9047495346724,
+    735.1504552082274
+   ],
+   "radius": 52.52513219376851,
+   "paper_px": {
+    "-45": 0,
+    "-20": 0,
+    "+20": 0,
+    "+45": 0
+   },
+   "own_px": {
+    "-45": 389,
+    "-20": 246,
+    "+20": 206,
+    "+45": 389
+   }
+  },
+  "hand_l": {
+   "parent": "forearm_l",
+   "pivot": [
+    500.64834337349396,
+    735.2944277108434
+   ],
+   "radius": 20.56004690782767,
+   "paper_px": {
+    "-45": 0,
+    "-20": 0,
+    "+20": 0,
+    "+45": 0
+   },
+   "own_px": {
+    "-45": 0,
+    "-20": 0,
+    "+20": 0,
+    "+45": 0
+   }
+  },
+  "leg_r": {
+   "parent": "torso",
+   "pivot": [
+    1325.1764705882354,
+    1284.9187165775402
+   ],
+   "radius": 17.251659154465237,
+   "paper_px": {
+    "-45": 0,
+    "-20": 0,
+    "+20": 0,
+    "+45": 0
+   },
+   "own_px": {
+    "-45": 0,
+    "-20": 0,
+    "+20": 0,
+    "+45": 0
+   }
+  },
+  "boot_r": {
+   "parent": "leg_r",
+   "pivot": [
+    1325.1347517730496,
+    1417.7637752318603
+   ],
+   "radius": 24.154958525629645,
+   "paper_px": {
+    "-45": 0,
+    "-20": 0,
+    "+20": 0,
+    "+45": 0
+   },
+   "own_px": {
+    "-45": 0,
+    "-20": 0,
+    "+20": 0,
+    "+45": 0
+   }
+  },
+  "foot_r": {
+   "parent": "boot_r",
+   "pivot": [
+    1325.2350081037278,
+    1571.989059967585
+   ],
+   "radius": 28.02835705319874,
+   "paper_px": {
+    "-45": 0,
+    "-20": 0,
+    "+20": 0,
+    "+45": 0
+   },
+   "own_px": {
+    "-45": 0,
+    "-20": 0,
+    "+20": 0,
+    "+45": 0
+   }
+  },
+  "leg_l": {
+   "parent": "torso",
+   "pivot": [
+    1053.9946611909652,
+    1235.4041067761807
+   ],
+   "radius": 27.840340746074396,
+   "paper_px": {
+    "-45": 0,
+    "-20": 0,
+    "+20": 0,
+    "+45": 0
+   },
+   "own_px": {
+    "-45": 0,
+    "-20": 0,
+    "+20": 0,
+    "+45": 0
+   }
+  },
+  "boot_l": {
+   "parent": "leg_l",
+   "pivot": [
+    1073.6692265496436,
+    1417.5650027427318
+   ],
+   "radius": 24.08897927503468,
+   "paper_px": {
+    "-45": 0,
+    "-20": 0,
+    "+20": 0,
+    "+45": 0
+   },
+   "own_px": {
+    "-45": 0,
+    "-20": 0,
+    "+20": 0,
+    "+45": 0
+   }
+  },
+  "foot_l": {
+   "parent": "boot_l",
+   "pivot": [
+    1072.8447304907481,
+    1572.0872888173774
+   ],
+   "radius": 28.130381743817548,
+   "paper_px": {
+    "-45": 0,
+    "-20": 0,
+    "+20": 0,
+    "+45": 0
+   },
+   "own_px": {
+    "-45": 0,
+    "-20": 0,
+    "+20": 0,
+    "+45": 0
+   }
+  }
+ },
+ "completed": {
+  "torso": [
+   "geometric"
+  ],
+  "neck": [
+   "geometric"
+  ],
+  "head": [
+   "geometric"
+  ],
+  "shoulder_cap_r": [
+   "geometric"
+  ],
+  "upper_arm_r": [
+   "geometric"
+  ],
+  "elbow_r": [
+   "geometric"
+  ],
+  "forearm_r": [
+   "geometric"
+  ],
+  "hand_r": [
+   "geometric"
+  ],
+  "shoulder_cap_l": [
+   "geometric"
+  ],
+  "upper_arm_l": [
+   "geometric"
+  ],
+  "elbow_l": [
+   "geometric"
+  ],
+  "forearm_l": [
+   "geometric"
+  ],
+  "hand_l": [
+   "geometric"
+  ],
+  "leg_r": [
+   "geometric"
+  ],
+  "boot_r": [
+   "geometric"
+  ],
+  "foot_r": [
+   "geometric"
+  ],
+  "leg_l": [
+   "geometric"
+  ],
+  "boot_l": [
+   "geometric"
+  ],
+  "foot_l": [
+   "geometric"
+  ]
+ },
+ "completion_notes": {
+  "torso": "geometric fill (hull) of 2884 px under neck,shoulder_cap_r,shoulder_cap_l",
+  "neck": "geometric fill (hull+tube-axis strip) of 200 px under head; whisker of 73 px past body removed under head (transparent); cover strip of 6108 px toward head (flat, no rim); cut rim of 831 px healed under head (flat); convex mouth close of 58 px over torso (own); sliver merge of 2 px; 20 px outside own extrusion under cover removed (transparent)",
+  "head": "convex mouth close of 299 px over neck (own)",
+  "shoulder_cap_r": "convex mouth close of 663 px over upper_arm_r (own); dome chord of 337 px to torso; cover mouth surface healed: 233 px tone",
+  "upper_arm_r": "geometric fill (hull+tube-axis strip) of 6164 px under shoulder_cap_r,elbow_r; 765 px outside own extrusion under cover removed (transparent); closed end outline of 1450 px under cover",
+  "elbow_r": "convex mouth close of 648 px over upper_arm_r (tube+tip)",
+  "forearm_r": "geometric fill (hull) of 662 px under elbow_r,hand_r",
+  "hand_r": "convex mouth close of 820 px over forearm_r (tube+tip); sliver merge of 38 px",
+  "shoulder_cap_l": "convex mouth close of 762 px over torso (own)",
+  "upper_arm_l": "geometric fill (hull+tube-axis strip) of 5755 px under shoulder_cap_l,elbow_l; 739 px outside own extrusion under cover removed (transparent); closed end outline of 1384 px under cover",
+  "elbow_l": "convex mouth close of 645 px over upper_arm_l (tube+tip)",
+  "forearm_l": "geometric fill (hull) of 205 px under elbow_l,hand_l; sliver merge of 51 px; 734 px outside own extrusion under cover removed (transparent); closed end outline of 86 px under cover",
+  "hand_l": "convex mouth close of 744 px over forearm_l (own+tip)",
+  "leg_r": "geometric fill (hull) of 303 px under torso,boot_r",
+  "boot_r": "geometric fill (hull) of 101 px under foot_r; convex mouth close of 1300 px over leg_r (tube+tip); sliver merge of 65 px",
+  "foot_r": "convex mouth close of 3072 px over boot_r (tube+tip)",
+  "leg_l": "geometric fill (hull) of 2139 px under torso,boot_l",
+  "boot_l": "geometric fill (hull) of 101 px under foot_l; convex mouth close of 1342 px over leg_l (tube+tip); sliver merge of 89 px",
+  "foot_l": "convex mouth close of 3080 px over boot_l (tube+tip)"
+ },
+ "shadow": {
+  "file": "parts/_shadow.png",
+  "h_over_w": 0.199438202247191
+ },
+ "needs_human": [
+  {
+   "kind": "unseeded_region",
+   "region": 8,
+   "area_px": 1405,
+   "assigned_to": "neck",
+   "why": "reach"
+  },
+  {
+   "kind": "unseeded_region",
+   "region": 19,
+   "area_px": 996,
+   "assigned_to": "hand_l",
+   "why": "border"
+  },
+  {
+   "kind": "unseeded_region",
+   "region": 20,
+   "area_px": 906,
+   "assigned_to": "forearm_r",
+   "why": "reach"
+  },
+  {
+   "kind": "unseeded_region",
+   "region": 25,
+   "area_px": 516,
+   "assigned_to": "elbow_l",
+   "why": "reach"
+  },
+  {
+   "kind": "unseeded_region",
+   "region": 32,
+   "area_px": 2660,
+   "assigned_to": "forearm_r",
+   "why": "border"
+  },
+  {
+   "kind": "unseeded_region",
+   "region": 34,
+   "area_px": 2354,
+   "assigned_to": "forearm_l",
+   "why": "reach"
+  },
+  {
+   "kind": "unseeded_region",
+   "region": 48,
+   "area_px": 3859,
+   "assigned_to": "torso",
+   "why": "reach"
+  },
+  {
+   "kind": "unseeded_region",
+   "region": 49,
+   "area_px": 3778,
+   "assigned_to": "leg_l",
+   "why": "reach"
+  },
+  {
+   "kind": "unseeded_region",
+   "region": 52,
+   "area_px": 2049,
+   "assigned_to": "leg_l",
+   "why": "border"
+  },
+  {
+   "kind": "unseeded_region",
+   "region": 53,
+   "area_px": 2066,
+   "assigned_to": "leg_r",
+   "why": "border"
+  },
+  {
+   "kind": "unseeded_region",
+   "region": 56,
+   "area_px": 1665,
+   "assigned_to": "leg_l",
+   "why": "reach"
+  },
+  {
+   "kind": "unseeded_region",
+   "region": 57,
+   "area_px": 1660,
+   "assigned_to": "leg_r",
+   "why": "reach"
+  },
+  {
+   "kind": "unseeded_region",
+   "region": 60,
+   "area_px": 1357,
+   "assigned_to": "foot_l",
+   "why": "reach"
+  },
+  {
+   "kind": "unseeded_region",
+   "region": 61,
+   "area_px": 1370,
+   "assigned_to": "foot_r",
+   "why": "reach"
+  }
+ ],
+ "region_assignments": {
+  "40": {
+   "area_px": 20274,
+   "assigned_to": "torso",
+   "why": "seeded"
+  },
+  "10": {
+   "area_px": 184825,
+   "assigned_to": "torso",
+   "why": "seeded"
+  },
+  "27": {
+   "area_px": 6885,
+   "assigned_to": "torso",
+   "why": "seeded"
+  },
+  "45": {
+   "area_px": 1396,
+   "assigned_to": "torso",
+   "why": "seeded"
+  },
+  "46": {
+   "area_px": 5613,
+   "assigned_to": "torso",
+   "why": "seeded"
+  },
+  "47": {
+   "area_px": 62768,
+   "assigned_to": "torso",
+   "why": "seeded"
+  },
+  "9": {
+   "area_px": 1853,
+   "assigned_to": "neck",
+   "why": "seeded"
+  },
+  "5": {
+   "area_px": 121933,
+   "assigned_to": "head",
+   "why": "seeded"
+  },
+  "6": {
+   "area_px": 1909,
+   "assigned_to": "head",
+   "why": "seeded"
+  },
+  "7": {
+   "area_px": 1923,
+   "assigned_to": "head",
+   "why": "seeded"
+  },
+  "2": {
+   "area_px": 429,
+   "assigned_to": "head",
+   "why": "seeded"
+  },
+  "3": {
+   "area_px": 489,
+   "assigned_to": "head",
+   "why": "seeded"
+  },
+  "4": {
+   "area_px": 1396,
+   "assigned_to": "head",
+   "why": "seeded"
+  },
+  "12": {
+   "area_px": 10372,
+   "assigned_to": "shoulder_cap_r",
+   "why": "seeded"
+  },
+  "31": {
+   "area_px": 2384,
+   "assigned_to": "upper_arm_r",
+   "why": "seeded"
+  },
+  "37": {
+   "area_px": 2706,
+   "assigned_to": "upper_arm_r",
+   "why": "seeded"
+  },
+  "38": {
+   "area_px": 2577,
+   "assigned_to": "upper_arm_r",
+   "why": "seeded"
+  },
+  "24": {
+   "area_px": 3769,
+   "assigned_to": "elbow_r",
+   "why": "seeded"
+  },
+  "39": {
+   "area_px": 2338,
+   "assigned_to": "forearm_r",
+   "why": "seeded"
+  },
+  "33": {
+   "area_px": 2366,
+   "assigned_to": "forearm_r",
+   "why": "seeded"
+  },
+  "21": {
+   "area_px": 5198,
+   "assigned_to": "hand_r",
+   "why": "seeded"
+  },
+  "22": {
+   "area_px": 2170,
+   "assigned_to": "hand_r",
+   "why": "seeded"
+  },
+  "44": {
+   "area_px": 2186,
+   "assigned_to": "hand_r",
+   "why": "seeded"
+  },
+  "11": {
+   "area_px": 10368,
+   "assigned_to": "shoulder_cap_l",
+   "why": "seeded"
+  },
+  "30": {
+   "area_px": 2565,
+   "assigned_to": "upper_arm_l",
+   "why": "seeded"
+  },
+  "35": {
+   "area_px": 2695,
+   "assigned_to": "upper_arm_l",
+   "why": "seeded"
+  },
+  "36": {
+   "area_px": 2371,
+   "assigned_to": "upper_arm_l",
+   "why": "seeded"
+  },
+  "23": {
+   "area_px": 3750,
+   "assigned_to": "elbow_l",
+   "why": "seeded"
+  },
+  "28": {
+   "area_px": 2657,
+   "assigned_to": "forearm_l",
+   "why": "seeded"
+  },
+  "29": {
+   "area_px": 2373,
+   "assigned_to": "forearm_l",
+   "why": "seeded"
+  },
+  "18": {
+   "area_px": 5232,
+   "assigned_to": "hand_l",
+   "why": "seeded"
+  },
+  "17": {
+   "area_px": 2163,
+   "assigned_to": "hand_l",
+   "why": "seeded"
+  },
+  "43": {
+   "area_px": 2158,
+   "assigned_to": "hand_l",
+   "why": "seeded"
+  },
+  "51": {
+   "area_px": 1430,
+   "assigned_to": "leg_r",
+   "why": "seeded"
+  },
+  "55": {
+   "area_px": 1805,
+   "assigned_to": "leg_r",
+   "why": "seeded"
+  },
+  "59": {
+   "area_px": 20450,
+   "assigned_to": "boot_r",
+   "why": "seeded"
+  },
+  "63": {
+   "area_px": 11524,
+   "assigned_to": "foot_r",
+   "why": "seeded"
+  },
+  "50": {
+   "area_px": 1426,
+   "assigned_to": "leg_l",
+   "why": "seeded"
+  },
+  "54": {
+   "area_px": 1786,
+   "assigned_to": "leg_l",
+   "why": "seeded"
+  },
+  "58": {
+   "area_px": 20493,
+   "assigned_to": "boot_l",
+   "why": "seeded"
+  },
+  "62": {
+   "area_px": 11509,
+   "assigned_to": "foot_l",
+   "why": "seeded"
+  },
+  "8": {
+   "area_px": 1405,
+   "assigned_to": "neck",
+   "why": "reach"
+  },
+  "13": {
+   "area_px": 196,
+   "assigned_to": "hand_l",
+   "why": "border"
+  },
+  "14": {
+   "area_px": 409,
+   "assigned_to": "hand_l",
+   "why": "border"
+  },
+  "15": {
+   "area_px": 391,
+   "assigned_to": "hand_r",
+   "why": "border"
+  },
+  "16": {
+   "area_px": 227,
+   "assigned_to": "hand_r",
+   "why": "border"
+  },
+  "19": {
+   "area_px": 996,
+   "assigned_to": "hand_l",
+   "why": "border"
+  },
+  "20": {
+   "area_px": 906,
+   "assigned_to": "forearm_r",
+   "why": "reach"
+  },
+  "25": {
+   "area_px": 516,
+   "assigned_to": "elbow_l",
+   "why": "reach"
+  },
+  "26": {
+   "area_px": 488,
+   "assigned_to": "elbow_r",
+   "why": "reach"
+  },
+  "32": {
+   "area_px": 2660,
+   "assigned_to": "forearm_r",
+   "why": "border"
+  },
+  "34": {
+   "area_px": 2354,
+   "assigned_to": "forearm_l",
+   "why": "reach"
+  },
+  "41": {
+   "area_px": 439,
+   "assigned_to": "hand_l",
+   "why": "border"
+  },
+  "42": {
+   "area_px": 428,
+   "assigned_to": "hand_r",
+   "why": "border"
+  },
+  "48": {
+   "area_px": 3859,
+   "assigned_to": "torso",
+   "why": "reach"
+  },
+  "49": {
+   "area_px": 3778,
+   "assigned_to": "leg_l",
+   "why": "reach"
+  },
+  "52": {
+   "area_px": 2049,
+   "assigned_to": "leg_l",
+   "why": "border"
+  },
+  "53": {
+   "area_px": 2066,
+   "assigned_to": "leg_r",
+   "why": "border"
+  },
+  "56": {
+   "area_px": 1665,
+   "assigned_to": "leg_l",
+   "why": "reach"
+  },
+  "57": {
+   "area_px": 1660,
+   "assigned_to": "leg_r",
+   "why": "reach"
+  },
+  "60": {
+   "area_px": 1357,
+   "assigned_to": "foot_l",
+   "why": "reach"
+  },
+  "61": {
+   "area_px": 1370,
+   "assigned_to": "foot_r",
+   "why": "reach"
+  }
+ },
+ "cuts": [],
+ "model_calls": 0,
+ "sam_calls": 0,
+ "cost_usd": 0.0
+}

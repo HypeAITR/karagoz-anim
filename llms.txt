@@ -5,7 +5,7 @@
 karagoz-anim turns a script and voice lines into a 2D limited-animation scene (flat colour, black outline,
 1920×1080, 24 fps). Studio agents write small YAML/JSON files with names, never x/y coordinates; a coordinate
 engine turns names into positions, scale, frames and face patches; drawings come from Muse Image, masks from
-SAM 3.1, vision checks from Muse Spark, voices from ElevenLabs.
+SAM 3.1, vision checks from Muse Spark, voices from Meta MMS-TTS (run locally).
 
 ## Start here
 
