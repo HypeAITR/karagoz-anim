@@ -29,6 +29,7 @@ import numpy as np
 from numpy.typing import NDArray
 from PIL import Image, ImageDraw, ImageFont
 
+from karagoz.engine.puppet.limb_measure import detect_unchanged_chain_members
 from karagoz.engine.puppet.model import Puppet, load_set
 from karagoz.engine.puppet.parts import line_mask
 from karagoz.engine.puppet.pose import Pose, chains, part_matrix3, render_pose, tree_order, z_order
@@ -2252,6 +2253,37 @@ def transition_from_poses(
     locked, _metrics = difference_locked(loaded.puppet, pose_x, arr_x, arr_y, own)
     locked_set = set(locked)
     names = chains(loaded.puppet)
+    # Rule 2(b): Lock chain members whose limb did not change in the drawing
+    # between X and Y (provided both poses seat the chain above SCORE_MIN and
+    # no ancestor in the chain made a large rotation).
+    unchanged_draw = detect_unchanged_chain_members(loaded.puppet, loaded.images, pose_x, arr_x, pose_y, arr_y)
+    tau_y0 = _tau_for(loaded.puppet, pose_y)
+    for _leaf, members in names.items():
+        chain_seated = True
+        for m in members:
+            if loaded.puppet.parts[m].hidden or m not in own:
+                continue
+            sx = float(pose_x.scores[m]) if m in pose_x.scores else 1.0
+            if m in pose_y.scores:
+                sy = float(pose_y.scores[m])
+            else:
+                mat_m = np.asarray(part_matrix3(loaded.puppet, pose_y, m)[:2], dtype=np.float64)
+                sy = float(score_samples(own[m], mat_m, feat_y, tau_y0, None))
+            if sx < SCORE_MIN or sy < SCORE_MIN:
+                chain_seated = False
+                break
+        if not chain_seated:
+            continue
+        for idx, member in enumerate(members):
+            if member in locked_set or member not in unchanged_draw:
+                continue
+            ancestors_still = all(
+                abs(_wrap_delta(float(pose_y.angles.get(anc, 0.0)) - float(pose_x.angles.get(anc, 0.0)))) <= 18.0
+                for anc in members[:idx]
+            )
+            if ancestors_still:
+                locked_set.add(member)
+                locked.append(member)
     changed = sorted(leaf for leaf, members in names.items() if any(m not in locked_set for m in members))
     base = pose_y.model_copy(deep=True)
     for name in locked:
@@ -2259,6 +2291,10 @@ def transition_from_poses(
             base.angles[name] = float(pose_x.angles[name])
         elif name in base.angles:
             del base.angles[name]
+        if name in pose_x.offset:
+            base.offset[name] = [float(v) for v in pose_x.offset[name]]
+        elif name in base.offset:
+            del base.offset[name]
     for leaf in changed:
         start = base.model_copy(deep=True)
         anchor = {}
@@ -2506,6 +2542,34 @@ def _transition_job(payload: dict[str, Any]) -> dict[str, Any]:
     return doc
 
 
+def carry_locked(pose_x: dict[str, Any], prev_doc: dict[str, Any]) -> dict[str, Any]:
+    """The next interval's X pose with the previous interval's locked members held.
+
+    ``pose_x`` is a pose dump (the shared key's own fit), ``prev_doc`` the
+    previous interval's transition document (``locked`` and ``pose_Y``). Every
+    locked member takes ``pose_Y``'s angle and offset, so a limb held still
+    across X->Y stays at the same value when Y->Z starts.
+    """
+    out = dict(pose_x)
+    angles = dict(out.get("angles") or {})
+    offset = dict(out.get("offset") or {})
+    held = prev_doc.get("pose_Y") or {}
+    held_angles = dict(held.get("angles") or {})
+    held_offset = dict(held.get("offset") or {})
+    for name in prev_doc.get("locked") or []:
+        if name in held_angles:
+            angles[name] = float(held_angles[name])
+        else:
+            angles.pop(name, None)
+        if name in held_offset:
+            offset[name] = [float(v) for v in held_offset[name]]
+        else:
+            offset.pop(name, None)
+    out["angles"] = angles
+    out["offset"] = offset
+    return out
+
+
 def default_workers() -> int:
     """Half the CPUs, at least one, at most four (one view is hundreds of MB)."""
     import os
@@ -2573,11 +2637,18 @@ def fit_chain_poses(
                 "out_dir": str(out / key),
             }
         )
+    # Intervals run in order: a member an interval locks keeps X's value in its
+    # Y pose, so the next interval must start from that held value, not from
+    # Y's own fit (otherwise the held limb jumps at the interval boundary).
     results: list[dict[str, Any]] = []
-    if intervals:
-        with ProcessPoolExecutor(max_workers=max(1, n_workers)) as pool:
-            for doc in pool.map(_transition_job, intervals):
-                results.append(doc)
+    prev: dict[str, Any] | None = None
+    for job in intervals:
+        if prev is not None and prev.get("view") == job["view"]:
+            job["pose_x"] = carry_locked(job["pose_x"], prev)
+        doc = _transition_job(job)
+        doc["view"] = job["view"]
+        results.append(doc)
+        prev = doc
     summary = {
         "poses": {Path(k).name: {"view": pose_views[k], "pose": poses[k].model_dump(mode="json")} for k in poses},
         "intervals": [

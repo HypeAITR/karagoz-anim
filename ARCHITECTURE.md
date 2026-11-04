@@ -58,6 +58,7 @@ A scene is a stack of layers, each with one behaviour managed by the engine: **h
 | `src/karagoz/engine/puppet/pose.py` | puppet poses: joint angles, root similarity, chains from the tree, z-order render with the shadow layer |
 | `src/karagoz/engine/puppet/interp.py` | joint timing and angle interpolation: ease curves, shortest-path angles, follow-through sequences |
 | `src/karagoz/engine/puppet/fit.py` | fit the puppet to a key drawing: single-part snap, limb chains, X->Y transitions, fit and transition reports; joint limits on every search path, unexplained-pixel decay, multi-start pull |
+| `src/karagoz/engine/puppet/limb_measure.py` | per-limb measures in drawing and puppet render (joints, length, width, angle); pose exam (drawing diff vs motor error), transition exam (drawing change vs puppet change), limbs unchanged in the drawing |
 | `src/karagoz/engine/puppet/repivot.py` | refresh a built set's pivots with the current rule: copy, recompute, rewrite `puppet.json` pivots and the report joints |
 | `src/karagoz/engine/puppet/render_aa.py` | fast anti-aliased puppet renderer: cropped premultiplied parts, destination-box bilinear warps, over compositing |
 | `src/karagoz/engine/puppet/frame_checks.py` | per-frame inbetween measures: locked change, swept joint region and paper gap, key-vs-puppet cut |
