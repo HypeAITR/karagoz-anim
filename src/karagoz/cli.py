@@ -606,6 +606,7 @@ def cmd_puppet_inbetween(args: argparse.Namespace) -> int:
             kind=str(args.ease),
             follow_through=int(args.follow_through),
             hold_from_puppet=bool(args.hold_from_puppet),
+            workers=args.workers,
         )
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
@@ -962,6 +963,7 @@ def build_parser() -> argparse.ArgumentParser:
     puppet_inbetween.add_argument(
         "--hold-from-puppet", action="store_true", help="holds from the puppet, not the key drawings"
     )
+    puppet_inbetween.add_argument("--workers", type=int, default=None, help="render workers (default: up to 4)")
     puppet_p.set_defaults(func=cmd_puppet)
 
     strip_p = sub.add_parser("strip", help="write a contact sheet of a run of video frames")
