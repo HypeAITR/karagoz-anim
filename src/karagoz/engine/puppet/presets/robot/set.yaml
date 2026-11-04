@@ -1,0 +1,27 @@
+# Robot puppet set (K-0d). All five views; seeds are per view.
+# Preset/reference paths resolve against this file's directory.
+character: robot
+default_view: 3q_right
+head_part: head
+views:
+  front:
+    preset: front.yaml
+    reference: ../../../../../../_wp/kukla-ortak/views/front.png
+    yaw_deg: 0
+  3q_right:
+    preset: 3q_right.yaml
+    reference: ../../../../../../_wp/kukla-ortak/views/3q_right.png
+    yaw_deg: 25
+  3q_left:
+    preset: 3q_left.yaml
+    reference: ../../../../../../_wp/kukla-ortak/views/3q_left.png
+    yaw_deg: -25
+  back:
+    preset: back.yaml
+    reference: ../../../../../../_wp/kukla-ortak/views/back.png
+    yaw_deg: 180
+  profile_right:
+    preset: profile_right.yaml
+    reference: ../../../../../../_wp/kukla-ortak/views/profile_right.png
+    yaw_deg: 90
+head_views: {}

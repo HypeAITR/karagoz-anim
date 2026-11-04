@@ -49,6 +49,20 @@ A scene is a stack of layers, each with one behaviour managed by the engine: **h
 | `src/karagoz/engine/rig/layers.py` | per-frame layer compositing with z-order |
 | `src/karagoz/engine/rig/frames.py` | the inbetween frames of one interval |
 | `src/karagoz/engine/rig/fill.py` | one image-model edit for the gap under the moving limb, through an injected client |
+| `src/karagoz/engine/puppet/model.py` | puppet file formats: parts config, `puppet.json` document, optional joint limits |
+| `src/karagoz/engine/puppet/parts.py` | split the reference into one mask per part (line regions, SAM, seeds) |
+| `src/karagoz/engine/puppet/complete.py` | make every part whole under its covers (tube strip or hull, model fallback) |
+| `src/karagoz/engine/puppet/pivots.py` | joint suggestion per child: overlap centre or fitted ring/cap circle |
+| `src/karagoz/engine/puppet/view_geometry.py` | view angle from geometry: pair foreshortening, profile shoulder offset, palette distance |
+| `src/karagoz/engine/puppet/build.py` | assemble the puppet: files, recomposition, outline and rotation measurements; build a view set in parallel, cross-view report and contact sheet |
+| `src/karagoz/engine/puppet/pose.py` | puppet poses: joint angles, root similarity, chains from the tree, z-order render with the shadow layer |
+| `src/karagoz/engine/puppet/interp.py` | joint timing and angle interpolation: ease curves, shortest-path angles, follow-through sequences |
+| `src/karagoz/engine/puppet/fit.py` | fit the puppet to a key drawing: single-part snap, limb chains, X->Y transitions, fit and transition reports; joint limits on every search path, unexplained-pixel decay, multi-start pull |
+| `src/karagoz/engine/puppet/limb_measure.py` | per-limb measures in drawing and puppet render (joints, length, width, angle); pose exam (drawing diff vs motor error), transition exam (drawing change vs puppet change), limbs unchanged in the drawing |
+| `src/karagoz/engine/puppet/repivot.py` | refresh a built set's pivots with the current rule: copy, recompute, rewrite `puppet.json` pivots and the report joints |
+| `src/karagoz/engine/puppet/render_aa.py` | fast anti-aliased puppet renderer: cropped premultiplied parts, destination-box bilinear warps, over compositing |
+| `src/karagoz/engine/puppet/frame_checks.py` | per-frame inbetween measures: locked change, swept joint region and paper gap, key-vs-puppet cut |
+| `src/karagoz/engine/puppet/inbetween.py` | K-2d inbetween run: poses, z-switch frames, holds, measures, preview and sheet |
 | `src/karagoz/engine/camera.py` | camera track: framing names into a crop box per frame |
 | `src/karagoz/engine/compose.py` | compositor: cut out drawings, place characters, composite frames |
 | `src/karagoz/engine/framing.py` | per-frame camera target boxes from the drawing on screen at each frame |
@@ -78,11 +92,15 @@ A scene is a stack of layers, each with one behaviour managed by the engine: **h
 | `src/karagoz/studio/context.py` | per-task context compiler: cores, department guide, chosen sections, index, own notes |
 | `src/karagoz/studio/draw.py` | draw department: every drawing a shot needs, via Muse Image |
 | `src/karagoz/studio/events.py` | append-only JSONL event log: state changes, actions, costs, questions |
+| `src/karagoz/studio/failures.py` | structured failures: every failure reaches the agent that caused it |
 | `src/karagoz/studio/loop.py` | orchestrator loop: one review per shot, keep/redraw/retake, at most three rounds |
 | `src/karagoz/studio/orchestrator.py` | studio orchestrator: task board, isolated working directories, carriers, budget, log |
+| `src/karagoz/studio/profile.py` | timing report: per-span totals, wall share, critical path, parallelism, slowest spans |
+| `src/karagoz/studio/puppet_route.py` | puppet in-between routing: key chains through the puppet fit, rig holds and frames |
 | `src/karagoz/studio/questions.py` | question allowance: every question logged by difficulty, department and topic |
 | `src/karagoz/studio/review.py` | checker agents: one whole movement per checker, in parallel, without the gate's flags |
 | `src/karagoz/studio/tasks.py` | task board and state machine for the studio (pure logic) |
+| `src/karagoz/studio/timing_log.py` | timing spans: where a run's time went, written step by step by the engine itself |
 
 ### meta — Meta Model API adapters
 

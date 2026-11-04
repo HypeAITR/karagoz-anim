@@ -27,6 +27,8 @@ from karagoz.meta.client import MetaApiError
 from karagoz.meta.sam import USD_PER_CALL as USD_PER_SAM_CALL
 from karagoz.spec import Align, Lines, Pose, Poses, PoseSequence, Shots, SpecError, Style, Xsheet, load
 from karagoz.spec.models import Hand
+from karagoz.studio.events import EventLog
+from karagoz.studio.timing_log import active_log, current_parent, span
 
 USD_PER_IMAGE = 0.01
 
@@ -1074,6 +1076,14 @@ def _run_patch(
 
 def retire_stale(jobs: list[DrawJob], shot_assets: Path) -> list[Path]:
     """Move character drawings no planned job keeps into `<character>/history/`; return the new paths, sorted."""
+    with span("draw:retire", jobs=len(jobs)) as retire_span:
+        retired = _retire_stale(jobs, shot_assets)
+        retire_span.set(files=len(retired))
+        return retired
+
+
+def _retire_stale(jobs: list[DrawJob], shot_assets: Path) -> list[Path]:
+    """Move character drawings no planned job keeps into `<character>/history/`; return the new paths, sorted."""
     if not shot_assets.is_dir():
         return []
     bases: dict[str, set[str]] = {}
@@ -1117,6 +1127,27 @@ def _sam_calls_of(face_of: Callable[[Path], tuple[float, float, float, float] | 
         return 0
     raw = getattr(face_of, "sam_calls", 0)
     return raw if isinstance(raw, int) and raw > 0 else 0
+
+
+def _run_job_span(
+    job: DrawJob,
+    image: MuseImageLike,
+    face_of: Callable[[Path], tuple[float, float, float, float] | None] | None,
+    log: EventLog | None,
+    parent: str | None,
+) -> tuple[int, int, float, str | None]:
+    """Run one draw job in a pool thread (log and parent ride in the job)."""
+    with span(
+        f"draw:job:{job.kind}:{job.out.name}",
+        log=log,
+        parent=parent,
+        kind=job.kind,
+        wave=job.wave,
+        character=job.character,
+    ):
+        if job.kind in ("mouth", "eyes"):
+            return _run_patch(job, image, face_of)
+        return _run_simple(job, image)
 
 
 def run_draw(
@@ -1168,55 +1199,56 @@ def run_draw(
 
     for wave in sorted({j.wave for j in jobs}):
         wave_jobs = [j for j in jobs if j.wave == wave]
-        cached_idx: set[int] = set()
-        pending_idx: list[int] = []
-        for i, job in enumerate(wave_jobs):
-            rel = _manifest_key(job, assets_dir)
-            entry = manifest.get(rel)
-            if _output_exists(job) and entry is not None and entry.get("key") == job.key():
-                cached.append(job.out)
-                cached_idx.add(i)
-            else:
-                pending_idx.append(i)
+        with span(f"draw:wave:{wave}", jobs=len(wave_jobs)):
+            cached_idx: set[int] = set()
+            pending_idx: list[int] = []
+            for i, job in enumerate(wave_jobs):
+                rel = _manifest_key(job, assets_dir)
+                entry = manifest.get(rel)
+                if _output_exists(job) and entry is not None and entry.get("key") == job.key():
+                    cached.append(job.out)
+                    cached_idx.add(i)
+                else:
+                    pending_idx.append(i)
 
-        results: dict[int, tuple[int, int, float, str | None]] = {}
-        if pending_idx:
-            pending_jobs = [wave_jobs[i] for i in pending_idx]
-            with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
-                futures = [
-                    pool.submit(_run_patch, job, image, face_of)
-                    if job.kind in ("mouth", "eyes")
-                    else pool.submit(_run_simple, job, image)
-                    for job in pending_jobs
-                ]
-                for pos, fut in enumerate(futures):
-                    results[pending_idx[pos]] = fut.result()
+            results: dict[int, tuple[int, int, float, str | None]] = {}
+            if pending_idx:
+                pending_jobs = [wave_jobs[i] for i in pending_idx]
+                with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+                    pool_log = active_log()
+                    pool_parent = current_parent()
+                    futures = [
+                        pool.submit(_run_job_span, job, image, face_of, pool_log, pool_parent) for job in pending_jobs
+                    ]
+                    for pos, fut in enumerate(futures):
+                        results[pending_idx[pos]] = fut.result()
 
-        for i, job in enumerate(wave_jobs):
-            rel = _manifest_key(job, assets_dir)
-            if i in cached_idx:
-                emit(job, "cached", 0, 0.0)
-                continue
-            calls, images, seconds, error = results[i]
-            total_calls += calls
-            total_images += images
-            if error is None:
-                done.append(job.out)
-                manifest[rel] = {
-                    "key": job.key(),
-                    "kind": job.kind,
-                    "prompt": job.prompt,
-                    "reasoning": job.reasoning,
-                    "calls": calls,
-                    "seconds": round(seconds, 3),
-                }
-                emit(job, "done", calls, seconds)
-            else:
-                failed.append((job.out, error))
-                emit(job, "failed", calls, seconds)
+            for i, job in enumerate(wave_jobs):
+                rel = _manifest_key(job, assets_dir)
+                if i in cached_idx:
+                    emit(job, "cached", 0, 0.0)
+                    continue
+                calls, images, seconds, error = results[i]
+                total_calls += calls
+                total_images += images
+                if error is None:
+                    done.append(job.out)
+                    manifest[rel] = {
+                        "key": job.key(),
+                        "kind": job.kind,
+                        "prompt": job.prompt,
+                        "reasoning": job.reasoning,
+                        "calls": calls,
+                        "seconds": round(seconds, 3),
+                    }
+                    emit(job, "done", calls, seconds)
+                else:
+                    failed.append((job.out, error))
+                    emit(job, "failed", calls, seconds)
 
-        manifest_path.parent.mkdir(parents=True, exist_ok=True)
-        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            with span("draw:manifest", wave=wave):
+                manifest_path.parent.mkdir(parents=True, exist_ok=True)
+                manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     sam_calls = max(0, _sam_calls_of(face_of) - sam_before)
     return DrawReport(

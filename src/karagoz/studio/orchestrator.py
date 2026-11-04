@@ -18,7 +18,7 @@ import shutil
 import sys
 import threading
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -39,8 +39,10 @@ from karagoz.studio.context import (
     shot_summary,
 )
 from karagoz.studio.events import Clock, EventLog
+from karagoz.studio.failures import Failure, failure_from_exception, owner_of, relative_to_prod
 from karagoz.studio.questions import QuestionPolicy, allowance, difficulty, parse_question
 from karagoz.studio.tasks import Board, Change, State, Task, TransitionError
+from karagoz.studio.timing_log import activate, record_wait, span
 
 if TYPE_CHECKING:
     from karagoz.engine.regions import SamLike
@@ -64,6 +66,17 @@ DEPARTMENTS = [
     "edit",
 ]
 CODE_DEPARTMENTS = {"location", "voice", "draw", "render", "edit", "gate", "check", "review"}
+
+_CODE_FAIL_STEP = {"draw": "draw.run", "location": "location.run"}
+
+
+def _code_failure(prod: Path, exc: BaseException | Finding | tuple[Path, str], step: str) -> Failure:
+    """A Failure from a code-step error, with its file relative to the production."""
+    failure = failure_from_exception(exc, step)
+    if failure.file is None:
+        return failure
+    return replace(failure, file=relative_to_prod(prod, failure.file))
+
 
 DEFAULT_CARRIER = "muse-exec"
 DEFAULT_MAX_STEPS = 40
@@ -152,6 +165,23 @@ def _interview_on(prod: Path, episode: str) -> bool:
     if isinstance(value, str):
         return value.strip().lower() == "on"
     return False
+
+
+def _character_refs(prod: Path) -> list[str]:
+    """Production-relative reference drawing paths named in characters.yaml (relative ones only)."""
+    try:
+        data = yaml.safe_load((prod / "characters.yaml").read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return []
+    chars = data.get("characters") if isinstance(data, dict) else None
+    if not isinstance(chars, dict):
+        return []
+    refs: list[str] = []
+    for entry in chars.values():
+        ref = entry.get("ref") if isinstance(entry, dict) else None
+        if isinstance(ref, str) and ref and not Path(ref).is_absolute() and ".." not in Path(ref).parts:
+            refs.append(ref)
+    return sorted(set(refs))
 
 
 def _default_checker(episode_dir: Path, outputs: list[str]) -> list[Finding]:
@@ -591,7 +621,12 @@ def code_work(
             image_cost = 0.0 if hooked_image else report.cost_usd
             if report.failed:
                 error = ", ".join(f"{path}: {message}" for path, message in report.failed)
-                return RunResult(ok=False, error=error, cost_usd=image_cost)
+                return RunResult(
+                    ok=False,
+                    error=error,
+                    cost_usd=image_cost,
+                    failure=_code_failure(prod, report.failed[0], "location.run"),
+                )
             hooked_sam = False
             sam_client: MetaClient | None = None
             active_sam: SamLike
@@ -661,7 +696,8 @@ def code_work(
             from karagoz.meta.client import MetaClient
             from karagoz.meta.image import MuseImage
             from karagoz.studio import claims as claims_module
-            from karagoz.studio.draw import link_location_background, plan_draw, retire_stale, run_draw
+            from karagoz.studio.draw import link_location_background, plan_draw, retire_stale
+            from karagoz.studio.puppet_route import draw_shot
 
             claims_thread: threading.Thread | None = None
             claims_holder: dict[str, Any] = {}
@@ -729,7 +765,17 @@ def code_work(
                 ):
                     install_cost_hook(image.client, budget, event_log, task.id)
                     hooked_image = True
-            jobs = plan_draw(prod, episode, task.unit)
+            try:
+                jobs = plan_draw(prod, episode, task.unit)
+            except Exception as exc:
+                # a bad input fails the task with a routed failure, not the studio
+                claims_cost = _join_claims()
+                return RunResult(
+                    ok=False,
+                    error=f"{type(exc).__name__}: {exc}",
+                    cost_usd=claims_cost,
+                    failure=_code_failure(prod, exc, "draw.plan"),
+                )
             retired = retire_stale(jobs, prod / episode / "assets" / task.unit)
             if retired and on_event is not None:
                 assets_dir = prod / episode / "assets" / task.unit
@@ -745,12 +791,27 @@ def code_work(
                         },
                     }
                 )
-            report = run_draw(jobs, draw_active, on_event=on_event)
+            try:
+                report, _ = draw_shot(prod, episode, task.unit, jobs, draw_active, on_event=on_event)
+            except Exception as exc:
+                # a bad input fails the task with a routed failure, not the studio
+                claims_cost = _join_claims()
+                return RunResult(
+                    ok=False,
+                    error=f"{type(exc).__name__}: {exc}",
+                    cost_usd=claims_cost,
+                    failure=_code_failure(prod, exc, "puppet.route"),
+                )
             draw_image_cost = 0.0 if hooked_image else report.cost_usd
             if report.failed:
                 error = ", ".join(f"{path}: {message}" for path, message in report.failed)
                 claims_cost = _join_claims()
-                return RunResult(ok=False, error=error, cost_usd=draw_image_cost + claims_cost)
+                return RunResult(
+                    ok=False,
+                    error=error,
+                    cost_usd=draw_image_cost + claims_cost,
+                    failure=_code_failure(prod, report.failed[0], "draw.run"),
+                )
             # With a region map the render places drawings by their landmarks (WP-11): measure them now (cached by
             # image hash, so only new drawings cost SAM calls).
             if _shot_has_regions(prod, episode, task.unit):
@@ -815,7 +876,8 @@ def code_work(
         if department == "render":
             from karagoz.engine.shot import render_shot
 
-            rendered = render_shot(prod, episode, task.unit)
+            with span(f"render:{task.unit}", task=task.id, shot=task.unit):
+                rendered = render_shot(prod, episode, task.unit)
             for warning in rendered.warnings:
                 if on_event is not None:
                     on_event({"payload_type": "code.note", "payload": {"text": warning}})
@@ -935,7 +997,9 @@ def code_work(
             )
         raise ValueError(f"not a code department: {department!r}")
     except Exception as exc:  # noqa: BLE001 - a code failure fails the task, not the studio
-        return RunResult(ok=False, error=f"{type(exc).__name__}: {exc}")
+        step = _CODE_FAIL_STEP.get(department, department)
+        failure = _code_failure(prod, exc, step)
+        return RunResult(ok=False, error=f"{type(exc).__name__}: {exc}", failure=failure)
 
 
 @dataclass
@@ -1116,15 +1180,24 @@ class Studio:
         self._stop = False
         try:
             while True:
-                self.step()
+                changes = self.step()
                 if self._stop:
                     break
                 if not any(self._runnable(t) for t in self.board.ready()):
-                    break
+                    # step() plans new tasks only at its start: a task this step finished (the director writing
+                    # shots.yaml) may have made new ones, so a step that changed something gets one more step.
+                    if not changes:
+                        break
+                    if not self._plan_adds_tasks():
+                        break
         finally:
             self._until = None
             self._only = None
             self._stop = False
+
+    def _plan_adds_tasks(self) -> bool:
+        """True when the current files plan a task the board does not have yet."""
+        return any(task.id not in self.board.tasks for task in plan_tasks(self.prod, self.episode))
 
     def approve(self, task_id: str) -> None:
         self._record(self.board.approve(task_id, task_digest=self._task_digest))
@@ -1287,6 +1360,7 @@ class Studio:
         changes.append(self.board.start(task.id, self._digest, task_digest=self._task_digest))
         task.input_files = file_digests(self.prod, task)
         self._record(changes[-1])
+        record_wait(self.log, task.id, department=task.department, attempt=task.attempts)
         try:
             workdir = self._prepare_workdir(task)
         except Exception as exc:  # noqa: BLE001 - a workdir-prep failure fails the task, not the studio
@@ -1301,9 +1375,21 @@ class Studio:
             model=self._models_map.get(task.department),
         )
         try:
-            result = carrier.run(brief, on_event=lambda obj: self._on_carrier_event(task.id, obj))
+            # Tasks may run on worker threads (a fresh context each): activate the run's log here.
+            with (
+                activate(self.log),
+                span(
+                    f"task:{task.id}",
+                    task=task.id,
+                    department=task.department,
+                    carrier=carrier_name,
+                    attempt=task.attempts,
+                ) as task_span,
+            ):
+                result = carrier.run(brief, on_event=lambda obj: self._on_carrier_event(task.id, obj))
         except Exception as exc:  # noqa: BLE001 - a carrier crash fails the task, not the studio
             result = RunResult(ok=False, error=f"{type(exc).__name__}: {exc}")
+        task_span.set(ok=result.ok)
         return self._complete_agent_run(task, workdir, result, changes, carrier)
 
     def _complete_agent_run(
@@ -1386,6 +1472,43 @@ class Studio:
             self._maybe_interview(task, carrier, workdir, result.session_id)
         return changes
 
+    def _route_failure(self, task: Task, result: RunResult, changes: list[Change]) -> None:
+        """Route a code-task failure to the agent that caused it.
+
+        Builds the Failure from the result (or from its error string when the
+        code path attached none), retakes the owning task with the structured
+        note when it differs from the failing task, and logs a failure.routed
+        event either way. An owner already at its retake limit keeps today's
+        behaviour: Board.retake moves it to QUESTION with the structured note.
+        """
+        failure = result.failure
+        if failure is None:
+            step = _CODE_FAIL_STEP.get(task.department, task.department)
+            failure = failure_from_exception(Exception(result.error or "task failed"), step)
+        owner = owner_of(self.board, failure)
+        to: str | None = None
+        if owner is not None and owner != task.id:
+            try:
+                for change in self.board.retake(owner, failure.as_note()):
+                    changes.append(change)
+                    self._record(change)
+                to = owner
+            except TransitionError:
+                to = None
+        self.log.append(
+            task.id,
+            "failure.routed",
+            payload_type="failure.routed",
+            payload={
+                "from": task.id,
+                "to": to,
+                "step": failure.step,
+                "file": failure.file,
+                "field": failure.field,
+                "message": failure.message,
+            },
+        )
+
     def _maybe_interview(self, task: Task, carrier: Carrier, workdir: Path, session_id: str | None) -> None:
         """Ask a retaken agent what was unclear; never fails the task."""
         if task.retakes <= 0 or session_id is None:
@@ -1431,19 +1554,31 @@ class Studio:
             dst = self.prod / rel
             previous[rel] = dst.read_bytes() if dst.is_file() else None
         try:
-            result = self.code(
-                self.prod,
-                self.episode,
-                task,
-                on_event=lambda obj: self._on_carrier_event(task.id, obj),
-                work_root=self.work_root,
-                guide_dir=self._effective_guide_dir(),
-                skills_dir=self.skills_dir,
-                budget=self.budget,
-                event_log=self.log,
-            )
+            with (
+                activate(self.log),
+                span(
+                    f"task:{task.id}",
+                    task=task.id,
+                    department=task.department,
+                    carrier="code",
+                    attempt=task.attempts,
+                ) as code_span,
+            ):
+                record_wait(self.log, task.id, parent=None, department=task.department, attempt=task.attempts)
+                result = self.code(
+                    self.prod,
+                    self.episode,
+                    task,
+                    on_event=lambda obj: self._on_carrier_event(task.id, obj),
+                    work_root=self.work_root,
+                    guide_dir=self._effective_guide_dir(),
+                    skills_dir=self.skills_dir,
+                    budget=self.budget,
+                    event_log=self.log,
+                )
         except Exception as exc:  # noqa: BLE001 - a code crash fails the task, not the studio
             result = RunResult(ok=False, error=f"{type(exc).__name__}: {exc}")
+        code_span.set(ok=result.ok)
         self.log.append(task.id, "cost", usd=result.cost_usd, seconds=result.seconds, session=result.session_id)
         self.budget.charge(task.unit, result.cost_usd)
         if result.pending:
@@ -1451,6 +1586,7 @@ class Studio:
         if not result.ok:
             changes.append(self.board.finish(task.id, ok=False, note=result.error))
             self._record(changes[-1])
+            self._route_failure(task, result, changes)
             return changes
         missing = [rel for rel in task.files_out if not (self.prod / rel).is_file()]
         if missing:
@@ -1490,6 +1626,15 @@ class Studio:
                 dst = workdir / rel
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 dst.write_bytes(src.read_bytes())
+        # characters.yaml names reference drawings by relative path; `karagoz check` in the workdir verifies they
+        # exist, so the copied file brings its references along (else every agent fails on "ref does not exist").
+        if "characters.yaml" in task.files_in:
+            for ref in _character_refs(self.prod):
+                src = self.prod / ref
+                dst = workdir / ref
+                if src.is_file() and not dst.exists():
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    dst.write_bytes(src.read_bytes())
         previous: list[str] = []
         for rel in task.files_out:
             src = self.prod / rel

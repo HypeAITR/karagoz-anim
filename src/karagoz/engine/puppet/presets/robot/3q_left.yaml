@@ -1,0 +1,128 @@
+# Robot demo character, view 3q_left (turned ~25 deg towards the viewer's LEFT).
+# Same part names, parents and z-order as presets/robot.yaml (the 3q_right view).
+# The character faces the viewer, so the _r side is image-left and _l is image-right.
+# Far side in this view is the character's RIGHT (image-left): narrower, foreshortened.
+# Seeds are [x, y] pixels in the 2400x1792 reference _wp/kukla-ortak/views/3q_left.png,
+# each read from the image and verified: non-line, non-background, one region per part.
+# SAM concepts are kept for a future live run; the build below uses seeds alone.
+# All 19 parts are visible in this view, so no part is marked hidden.
+# Features are probe points read from the drawing (mirrored from 3q_right
+# and verified on pixels): eye_mid (face centre), seam (chest centre line,
+# the yaw ruler), chest_grid (one-sided detail on the robot's right).
+yaw_deg: -25
+line_max_luma: 25.0
+features:
+  eye_mid: {part: head, point: [1119, 380], front: true}
+  seam: {part: torso, point: [1086, 950], front: true}
+  chest_grid: {part: torso, point: [971, 1012], front: true}
+parts:
+  - name: torso
+    parent: null
+    concepts: ["robot torso", "torso"]
+    # [1128, 806] grey chest (R18); [1150, 1180] maroon lower band (R76);
+    # [1050, 750] left-chest grey (R19). R76/R19 are unseeded regions the
+    # reach fallback otherwise gives to a leg (see _wp/RAPOR.md).
+    seed: [[1128, 806], [1150, 1180], [1050, 750], [1094, 655], [979, 1051]]
+    z: 0
+  - name: neck
+    parent: torso
+    concepts: ["robot neck"]
+    seed: [1200, 588]
+    z: 1
+  - name: head
+    parent: neck
+    concepts: ["robot head", "head"]
+    seed: [[1230, 280], [1368, 497], [1220, 365], [1043, 363]]
+    z: 6
+  - name: shoulder_cap_r
+    parent: torso
+    concepts: ["robot shoulder"]
+    seed: [930, 735]
+    z: 5
+  - name: upper_arm_r
+    parent: shoulder_cap_r
+    concepts: ["robot arm"]
+    seed: [[720, 722], [780, 722], [840, 722]]
+    z: 2
+  - name: elbow_r
+    parent: upper_arm_r
+    concepts: ["robot elbow"]
+    seed: [[655, 722], [682, 722]]
+    z: 3
+  - name: forearm_r
+    parent: elbow_r
+    concepts: ["robot arm"]
+    seed: [[490, 722], [550, 722], [605, 722]]
+    z: 2
+  - name: hand_r
+    parent: forearm_r
+    concepts: ["robot claw"]
+    seed: [[420, 735], [455, 722]]
+    z: 4
+  - name: shoulder_cap_l
+    parent: torso
+    concepts: ["robot shoulder"]
+    seed: [1400, 720]
+    z: 5
+  - name: upper_arm_l
+    parent: shoulder_cap_l
+    concepts: ["robot arm"]
+    seed: [[1510, 722], [1570, 722], [1640, 722]]
+    z: 2
+  - name: elbow_l
+    parent: upper_arm_l
+    concepts: ["robot elbow"]
+    seed: [[1690, 722], [1717, 730]]
+    z: 3
+  - name: forearm_l
+    parent: elbow_l
+    concepts: ["robot arm"]
+    seed: [[1755, 722], [1792, 722], [1880, 722]]
+    z: 2
+  - name: hand_l
+    parent: forearm_l
+    concepts: ["robot claw"]
+    seed: [[1975, 740], [2036, 684], [2035, 766], [1945, 721]]
+    z: 4
+  - name: leg_r
+    parent: torso
+    concepts: ["robot leg"]
+    limits: [-35.0, 35.0]
+    seed: [[985, 1205], [1040, 1320]]
+    z: -1
+  - name: boot_r
+    parent: leg_r
+    concepts: ["robot boot"]
+    limits: [-25.0, 25.0]
+    seed: [[990, 1358], [990, 1440]]
+    z: 2
+  - name: foot_r
+    parent: boot_r
+    concepts: ["robot foot"]
+    limits: [-30.0, 30.0]
+    # [940, 1570]/[960, 1610] top face (R91/R95); [1090, 1575] dark front
+    # face (R90) -- unseeded it joins the torso by reach (see _wp/RAPOR.md).
+    seed: [[940, 1570], [960, 1610], [1090, 1575]]
+    z: 3
+  - name: leg_l
+    parent: torso
+    concepts: ["robot leg"]
+    limits: [-35.0, 35.0]
+    seed: [[1255, 1235], [1300, 1285], [1305, 1325], [1300, 1365]]
+    # K-0r: the reference draws this hip pad in front of the torso (its whole
+    # oval outline shows); z above the torso, below the boot and the arms.
+    z: 1
+  - name: boot_l
+    parent: leg_l
+    concepts: ["robot boot"]
+    limits: [-25.0, 25.0]
+    seed: [[1270, 1385], [1265, 1450]]
+    z: 2
+  - name: foot_l
+    parent: boot_l
+    concepts: ["robot foot"]
+    limits: [-30.0, 30.0]
+    # [1240, 1590]/[1240, 1640] top face (R94/R96); [1355, 1600] dark front
+    # face (R93) -- unseeded it joins the torso by reach (see _wp/RAPOR.md).
+    seed: [[1240, 1590], [1240, 1640], [1355, 1600]]
+    z: 3

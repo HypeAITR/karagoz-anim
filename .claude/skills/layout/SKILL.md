@@ -110,6 +110,24 @@ never describe furniture as something to draw, no anatomical close-ups. Your wor
 - One character per drawing; never describe two people in one pose.
 - Run `karagoz check <file>` if available; fix every `error`.
 
+## Characters with a puppet
+
+A character whose `characters.yaml` entry has `puppet:` gets its in-betweens from a layered puppet. The key poses are
+still drawn by the image model; the engine then fits the puppet to each key and turns the parts between them. What
+that means for your poses:
+
+- **The puppet only rotates its parts.** Arms, hands, head and a little lean are cheap and look clean. It cannot
+  bend a joint it does not have (the robot has no knee: no crouch, no squat), it cannot foreshorten a limb pointing
+  at the camera, and it cannot turn the body to a new view between two keys. Keep the motion in the arms, hands and
+  head; legs straight; arms moving sideways, up or down in the picture plane, not toward the viewer.
+- **Small steps between keys.** The engine accepts at most about 27° of turn per in-between segment. A wave, a
+  raised hand or a pointing arm needs a key at each end and two to four in-betweens. A bigger swing (an arm from down
+  to straight up) needs an extra key in the middle.
+- When a key cannot be fitted (the drawing shows something the puppet cannot do), or a move is too large, the engine
+  draws those in-betweens with the image model instead (`ret` or `split` in the draw log). Nothing breaks, but the
+  shot loses the puppet's smoothness and costs more. Write keys the puppet can do.
+- Two characters can share one puppet set (identical twins). Each one still needs its own poses.
+
 ## Sequences
 
 An action that is not one pose change (pouring, a gag, a fall) is a **sequence**, not a transition: see

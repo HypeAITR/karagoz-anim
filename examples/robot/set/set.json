@@ -1,0 +1,34 @@
+{
+ "version": 1,
+ "character": "robot",
+ "views": {
+  "front": {
+   "yaw_deg": 0.0,
+   "dir": "views/front",
+   "mirror_of": null
+  },
+  "3q_right": {
+   "yaw_deg": 25.0,
+   "dir": "views/3q_right",
+   "mirror_of": null
+  },
+  "3q_left": {
+   "yaw_deg": -25.0,
+   "dir": "views/3q_left",
+   "mirror_of": null
+  },
+  "back": {
+   "yaw_deg": 180.0,
+   "dir": "views/back",
+   "mirror_of": null
+  },
+  "profile_right": {
+   "yaw_deg": 90.0,
+   "dir": "views/profile_right",
+   "mirror_of": null
+  }
+ },
+ "head_views": {},
+ "head_part": "head",
+ "default_view": "3q_right"
+}

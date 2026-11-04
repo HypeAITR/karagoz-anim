@@ -1,12 +1,13 @@
 [project]
 name = "karagoz-anim"
-version = "0.1.0"
+version = "0.0.1"
 description = "Script + voice -> 2D limited animation, produced by a team of AI agents on Meta's models"
 readme = "README.md"
-license = "Apache-2.0"
+license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
     "meta-sam-parser==0.1.0",
+    "numba>=0.60",
     "numpy>=2.0",
     "opencv-python-headless>=4.10",
     "pillow>=11.0",
@@ -27,6 +28,7 @@ karagoz = "karagoz.cli:main"
 dev = [
     "mypy>=1.13",
     "pytest>=8.3",
+    "pytest-xdist>=3.8.0",
     "ruff>=0.8",
     "types-pyyaml>=6.0",
 ]

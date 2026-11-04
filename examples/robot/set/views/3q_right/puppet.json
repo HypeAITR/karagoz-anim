@@ -1,0 +1,365 @@
+{
+ "version": 1,
+ "reference": "3q_right.png",
+ "canvas": [
+  2400,
+  1792
+ ],
+ "line_width_px": 5.7,
+ "root": "torso",
+ "parts": {
+  "torso": {
+   "parent": null,
+   "pivot": [
+    1222.8513740994665,
+    922.8786303507968
+   ],
+   "z": 0,
+   "file": "parts/torso.png",
+   "limits": null,
+   "slack_px": 0.0,
+   "completed": [
+    "geometric"
+   ],
+   "approved": false,
+   "hidden": false,
+   "estimated": false
+  },
+  "neck": {
+   "parent": "torso",
+   "pivot": [
+    1221.5363705972436,
+    608.9437212863706
+   ],
+   "z": 1,
+   "file": "parts/neck.png",
+   "limits": null,
+   "slack_px": 0.0,
+   "completed": [
+    "geometric"
+   ],
+   "approved": false,
+   "hidden": false,
+   "estimated": false
+  },
+  "head": {
+   "parent": "neck",
+   "pivot": [
+    1219.094190140845,
+    573.1461267605633
+   ],
+   "z": 6,
+   "file": "parts/head.png",
+   "limits": null,
+   "slack_px": 0.0,
+   "completed": [
+    "geometric"
+   ],
+   "approved": false,
+   "hidden": false,
+   "estimated": false
+  },
+  "shoulder_cap_r": {
+   "parent": "torso",
+   "pivot": [
+    1007.3020420603475,
+    743.7186833282536
+   ],
+   "z": 5,
+   "file": "parts/shoulder_cap_r.png",
+   "limits": [
+    -10.0,
+    10.0
+   ],
+   "slack_px": 0.0,
+   "completed": [
+    "geometric"
+   ],
+   "approved": false,
+   "hidden": false,
+   "estimated": false
+  },
+  "upper_arm_r": {
+   "parent": "shoulder_cap_r",
+   "pivot": [
+    963.7255339205112,
+    733.3030855771543
+   ],
+   "z": 2,
+   "file": "parts/upper_arm_r.png",
+   "limits": null,
+   "slack_px": 38.1,
+   "completed": [
+    "geometric"
+   ],
+   "approved": false,
+   "hidden": false,
+   "estimated": false
+  },
+  "elbow_r": {
+   "parent": "upper_arm_r",
+   "pivot": [
+    691.565149702864,
+    732.2949108814552
+   ],
+   "z": 3,
+   "file": "parts/elbow_r.png",
+   "limits": [
+    -10.0,
+    10.0
+   ],
+   "slack_px": 0.0,
+   "completed": [
+    "geometric"
+   ],
+   "approved": false,
+   "hidden": false,
+   "estimated": false
+  },
+  "forearm_r": {
+   "parent": "elbow_r",
+   "pivot": [
+    691.565149702864,
+    732.2949108814552
+   ],
+   "z": 2,
+   "file": "parts/forearm_r.png",
+   "limits": null,
+   "slack_px": 0.0,
+   "completed": [
+    "geometric"
+   ],
+   "approved": false,
+   "hidden": false,
+   "estimated": false
+  },
+  "hand_r": {
+   "parent": "forearm_r",
+   "pivot": [
+    490.06882989183873,
+    733.2468043264504
+   ],
+   "z": 4,
+   "file": "parts/hand_r.png",
+   "limits": null,
+   "slack_px": 0.0,
+   "completed": [
+    "geometric"
+   ],
+   "approved": false,
+   "hidden": false,
+   "estimated": false
+  },
+  "shoulder_cap_l": {
+   "parent": "torso",
+   "pivot": [
+    1456.5672102247686,
+    721.0973997355663
+   ],
+   "z": 5,
+   "file": "parts/shoulder_cap_l.png",
+   "limits": [
+    -10.0,
+    10.0
+   ],
+   "slack_px": 0.0,
+   "completed": [
+    "geometric"
+   ],
+   "approved": false,
+   "hidden": false,
+   "estimated": false
+  },
+  "upper_arm_l": {
+   "parent": "shoulder_cap_l",
+   "pivot": [
+    1484.610354842082,
+    726.2797745962573
+   ],
+   "z": 2,
+   "file": "parts/upper_arm_l.png",
+   "limits": null,
+   "slack_px": 38.0,
+   "completed": [
+    "geometric"
+   ],
+   "approved": false,
+   "hidden": false,
+   "estimated": false
+  },
+  "elbow_l": {
+   "parent": "upper_arm_l",
+   "pivot": [
+    1724.815004666148,
+    722.6304125357411
+   ],
+   "z": 3,
+   "file": "parts/elbow_l.png",
+   "limits": [
+    -10.0,
+    10.0
+   ],
+   "slack_px": 0.0,
+   "completed": [
+    "geometric"
+   ],
+   "approved": false,
+   "hidden": false,
+   "estimated": false
+  },
+  "forearm_l": {
+   "parent": "elbow_l",
+   "pivot": [
+    1724.815004666148,
+    722.6304125357411
+   ],
+   "z": 2,
+   "file": "parts/forearm_l.png",
+   "limits": null,
+   "slack_px": 0.0,
+   "completed": [
+    "geometric"
+   ],
+   "approved": false,
+   "hidden": false,
+   "estimated": false
+  },
+  "hand_l": {
+   "parent": "forearm_l",
+   "pivot": [
+    1927.4306666666666,
+    721.1186666666666
+   ],
+   "z": 4,
+   "file": "parts/hand_l.png",
+   "limits": null,
+   "slack_px": 0.0,
+   "completed": [
+    "geometric"
+   ],
+   "approved": false,
+   "hidden": false,
+   "estimated": false
+  },
+  "leg_r": {
+   "parent": "torso",
+   "pivot": [
+    1084.6530194472875,
+    1188.131013306039
+   ],
+   "z": 1,
+   "file": "parts/leg_r.png",
+   "limits": [
+    -35.0,
+    35.0
+   ],
+   "slack_px": 0.0,
+   "completed": [
+    "geometric"
+   ],
+   "approved": false,
+   "hidden": false,
+   "estimated": false
+  },
+  "boot_r": {
+   "parent": "leg_r",
+   "pivot": [
+    1096.0240103828683,
+    1379.5561323815705
+   ],
+   "z": 2,
+   "file": "parts/boot_r.png",
+   "limits": [
+    -25.0,
+    25.0
+   ],
+   "slack_px": 0.0,
+   "completed": [
+    "geometric"
+   ],
+   "approved": false,
+   "hidden": false,
+   "estimated": false
+  },
+  "foot_r": {
+   "parent": "boot_r",
+   "pivot": [
+    1083.7691449814126,
+    1552.4408921933086
+   ],
+   "z": 3,
+   "file": "parts/foot_r.png",
+   "limits": [
+    -30.0,
+    30.0
+   ],
+   "slack_px": 0.0,
+   "completed": [
+    "geometric"
+   ],
+   "approved": false,
+   "hidden": false,
+   "estimated": false
+  },
+  "leg_l": {
+   "parent": "torso",
+   "pivot": [
+    1387.0187265917602,
+    1203.0990428630878
+   ],
+   "z": -1,
+   "file": "parts/leg_l.png",
+   "limits": [
+    -35.0,
+    35.0
+   ],
+   "slack_px": 0.0,
+   "completed": [
+    "geometric"
+   ],
+   "approved": false,
+   "hidden": false,
+   "estimated": false
+  },
+  "boot_l": {
+   "parent": "leg_l",
+   "pivot": [
+    1357.095964566929,
+    1375.9335629921259
+   ],
+   "z": 2,
+   "file": "parts/boot_l.png",
+   "limits": [
+    -25.0,
+    25.0
+   ],
+   "slack_px": 0.0,
+   "completed": [
+    "geometric"
+   ],
+   "approved": false,
+   "hidden": false,
+   "estimated": false
+  },
+  "foot_l": {
+   "parent": "boot_l",
+   "pivot": [
+    1342.5449080622348,
+    1526.351838755304
+   ],
+   "z": 3,
+   "file": "parts/foot_l.png",
+   "limits": [
+    -30.0,
+    30.0
+   ],
+   "slack_px": 0.0,
+   "completed": [
+    "geometric"
+   ],
+   "approved": false,
+   "hidden": false,
+   "estimated": false
+  }
+ }
+}

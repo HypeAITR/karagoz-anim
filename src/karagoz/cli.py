@@ -223,7 +223,8 @@ def cmd_mouth(args: argparse.Namespace) -> int:
 
 def cmd_draw(args: argparse.Namespace) -> int:
     try:
-        from karagoz.studio.draw import link_location_background, plan_draw, retire_stale, run_draw, sam_face_of
+        from karagoz.studio.draw import link_location_background, plan_draw, retire_stale, sam_face_of
+        from karagoz.studio.puppet_route import draw_shot
 
         if args.dry_run:
             jobs = plan_draw(Path(args.prod), args.episode, args.shot)
@@ -240,7 +241,18 @@ def cmd_draw(args: argparse.Namespace) -> int:
         link_location_background(Path(args.prod), args.episode, args.shot)
         jobs = plan_draw(Path(args.prod), args.episode, args.shot)
         retire_stale(jobs, Path(args.prod) / args.episode / "assets" / args.shot)
-        report = run_draw(jobs, MuseImage(MetaClient()), face_of=sam_face_of(Sam(MetaClient()), Path(args.prod)))
+        report, route = draw_shot(
+            Path(args.prod),
+            args.episode,
+            args.shot,
+            jobs,
+            MuseImage(MetaClient()),
+            face_of=sam_face_of(Sam(MetaClient()), Path(args.prod)),
+            use_puppet=not args.no_puppet,
+        )
+        for interval in route.intervals:
+            n_frames = len(interval.frames)
+            print(f"puppet {interval.character} {interval.a}->{interval.b}: {interval.decision}, {n_frames} frames")
         print(
             f"done {len(report.done)}, cached {len(report.cached)}, "
             f"failed {len(report.failed)}, calls {report.calls}, ~${report.cost_usd:.2f}"
@@ -497,6 +509,255 @@ def cmd_strip(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_puppet(args: argparse.Namespace) -> int:
+    """Build a layered puppet from one reference drawing (package K-0)."""
+    if args.puppet_command == "build":
+        return cmd_puppet_build(args)
+    if args.puppet_command == "build-set":
+        return cmd_puppet_build_set(args)
+    if args.puppet_command == "fit":
+        return cmd_puppet_fit(args)
+    if args.puppet_command == "chain":
+        return cmd_puppet_chain(args)
+    if args.puppet_command == "transition":
+        return cmd_puppet_transition(args)
+    if args.puppet_command == "repivot":
+        return cmd_puppet_repivot(args)
+    if args.puppet_command == "inbetween":
+        return cmd_puppet_inbetween(args)
+    raise ValueError(f"unknown puppet command: {args.puppet_command}")
+
+
+def cmd_puppet_fit(args: argparse.Namespace) -> int:
+    """Fit a built puppet set to one key drawing (package K-1)."""
+    from karagoz.engine.puppet.fit import fit_pose, load_drawing, write_fit_outputs
+
+    try:
+        rgb = load_drawing(Path(args.drawing))
+        pose, kept, totals = fit_pose(Path(args.set_dir), rgb)
+        loaded = kept[pose.view]
+        report = write_fit_outputs(loaded, pose, rgb, Path(args.out_dir), totals, drawing_name=Path(args.drawing).name)
+        print(f"view {pose.view} total {report['total']:.3f} -> {args.out_dir}")
+        print(f"root tx {pose.tx:.1f} ty {pose.ty:.1f} rot {pose.rotation:.1f} scale {pose.scale:.3f}")
+        for name, info in report["parts"].items():
+            print(
+                f"{name}: angle {info['angle']:+.1f} score {info['score']:.3f} "
+                f"conf {info['confidence']:.3f} chain {info['chain']}"
+            )
+        if report["needs_human"]:
+            print(f"needs human: {', '.join(report['needs_human'])}")
+        print(f"residual {report['residual_px']} px")
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_puppet_chain(args: argparse.Namespace) -> int:
+    """Fit every pose once, then every consecutive X->Y interval, in parallel (K-1)."""
+    from karagoz.engine.puppet.fit import fit_chain_poses
+
+    try:
+        paths = [Path(p) for p in args.paths]
+        if len(paths) < 3:
+            raise ValueError("chain needs at least two drawings plus the output directory")
+        *drawings, out_dir = paths
+        summary = fit_chain_poses(Path(args.set_dir), drawings, out_dir, workers=args.workers)
+        for interval in summary["intervals"]:
+            print(f"{interval['from']} -> {interval['to']}: {interval['decision']}")
+            print(f"  {interval['reason']}")
+        print(str(out_dir / "chain_summary.json"))
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_puppet_transition(args: argparse.Namespace) -> int:
+    """Fit X and Y once each, then report the X->Y transition (K-1)."""
+    from karagoz.engine.puppet.fit import (
+        fit_pose,
+        load_drawing,
+        load_view,
+        transition_from_poses,
+        write_transition_outputs,
+    )
+
+    try:
+        rgb_x = load_drawing(Path(args.x))
+        rgb_y = load_drawing(Path(args.y))
+        pose_x, _kept_x, _ = fit_pose(Path(args.set_dir), rgb_x)
+        pose_y, _kept_y, _ = fit_pose(Path(args.set_dir), rgb_y)
+        loaded = load_view(Path(args.set_dir), pose_y.view)
+        result = transition_from_poses(loaded, pose_x, pose_y, rgb_x, rgb_y)
+        doc = write_transition_outputs(
+            loaded, result, rgb_x, rgb_y, Path(args.out_dir), Path(args.x).name, Path(args.y).name
+        )
+        print(f"{args.x} -> {args.y}: {doc['decision']}")
+        print(f"locked: {', '.join(doc['locked']) or 'none'}")
+        for leaf, info in doc["changed_chains"].items():
+            deltas = ", ".join(f"{m} {d:+.1f}" for m, d in info["delta"].items())
+            print(f"changed {leaf}: {deltas}")
+        print(doc["reason"])
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_puppet_inbetween(args: argparse.Namespace) -> int:
+    """Render one X->Y interval as inbetween frames (package K-2d)."""
+    from karagoz.engine.puppet.inbetween import inbetween
+
+    try:
+        result = inbetween(
+            Path(args.set_dir),
+            Path(args.transition),
+            int(args.frames),
+            Path(args.out_dir),
+            kind=str(args.ease),
+            follow_through=int(args.follow_through),
+            hold_from_puppet=not bool(args.hold_from_key),
+            workers=args.workers,
+        )
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"{len(result.frames)} frames ok={result.ok} -> {args.out_dir}")
+    rows = result.report.get("frames", [])
+    worst_locked = max((row["locked_change_px"] for row in rows), default=0)
+    worst_gap = max((row["joint_paper_gap_px"] for row in rows), default=0)
+    print(f"locked change max {worst_locked} px, joint gap max {worst_gap} px")
+    print(f"z switches at {result.report.get('z_switch_frames', [])}")
+    cut = result.report.get("cut")
+    if isinstance(cut, dict):
+        for side in ("start", "end"):
+            part = cut.get(side, {})
+            print(f"cut {side}: silhouette {part.get('silhouette_px')} px, line {part.get('line_shift_px')}")
+    return 0
+
+
+def cmd_puppet_build(args: argparse.Namespace) -> int:
+    from karagoz.engine.puppet import build_puppet
+    from karagoz.meta.client import MetaClient
+    from karagoz.meta.image import MuseImage
+    from karagoz.meta.sam import Sam
+
+    try:
+        sam = None if args.no_sam else Sam(MetaClient())
+        files = build_puppet(
+            Path(args.reference),
+            Path(args.config),
+            Path(args.out_dir),
+            sam=sam,
+            image=MuseImage(MetaClient()),
+            max_image_calls=args.max_image_calls,
+        )
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    report = files.report
+    recomp = report["recomposition"]
+    print(f"parts {len(report['completed'])} -> {args.out_dir}")
+    print(f"sam calls {report['sam_calls']}, model calls {report['model_calls']}, ~${report['cost_usd']:.4f}")
+    print(
+        f"recomposition outside band {recomp['outside_band_gt40']} (must be 0), "
+        f"inside band {recomp['inside_band_gt40']}"
+    )
+    worst = min(info["border_line_coverage"] for info in report["outlines"].values())
+    print(f"worst outline coverage {worst:.3f} (target >= 0.95)")
+    worst_paper = max((max(j["paper_px"].values()) for j in report["joints"].values()), default=0)
+    print(f"worst rotation paper {worst_paper} px (target 0)")
+    worst_own = max((max(j["own_px"].values()) for j in report["joints"].values()), default=0)
+    print(f"worst rotation own-pixel {worst_own} px (target 0)")
+    for name, methods in report["completed"].items():
+        if "model" in methods:
+            print(f"model fill: {name}")
+    for name, info in report["outlines"].items():
+        if not info["islands_ok"]:
+            print(f"islands mismatch: {name} has {info['components']:.0f}, preset says {info['islands']}")
+    for entry in report["needs_human"]:
+        who = entry.get("assigned_to", entry.get("decision", ""))
+        print(f"needs human: {entry['kind']} region {entry.get('region')} ({who})")
+    problems = []
+    if recomp["outside_band_gt40"]:
+        problems.append("recomposition differs outside the line band")
+    if worst < 0.95:
+        problems.append("outline coverage below 0.95")
+    if worst_paper:
+        problems.append("rotation test shows paper")
+    if worst_own:
+        problems.append("rotation test leaves own pixels on paper")
+    if any(not info["islands_ok"] for info in report["outlines"].values()):
+        problems.append("outline island count differs from preset")
+    if report["needs_human"]:
+        problems.append("regions need a human decision")
+    for problem in problems:
+        print(f"warn: {problem}")
+    return 0
+
+
+def cmd_puppet_repivot(args: argparse.Namespace) -> int:
+    """Recompute a built set's pivots with the current rule (no paid calls)."""
+    from karagoz.engine.puppet.repivot import repivot_set
+
+    try:
+        changes = repivot_set(Path(args.set_dir), Path(args.out_dir))
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    n_joints = 0
+    n_moved = 0
+    for view, joints in changes.items():
+        for name, change in joints.items():
+            n_joints += 1
+            if change["moved"]:
+                n_moved += 1
+                old = change["old"]
+                new = change["new"]
+                print(f"{view}/{name}: ({old[0]:.1f}, {old[1]:.1f}) -> ({new[0]:.1f}, {new[1]:.1f})")
+                print(f"  dome {change['dome']} ring {change['ring']}")
+    for view, joints in changes.items():
+        limited = sorted(name for name, change in joints.items() if change.get("limited"))
+        if limited:
+            print(f"{view} limits +-10: {', '.join(limited)}")
+    print(f"views {len(changes)} joints {n_joints} moved {n_moved} -> {args.out_dir}")
+    return 0
+
+
+def cmd_puppet_build_set(args: argparse.Namespace) -> int:
+    from karagoz.engine.puppet import build_puppet_set
+
+    try:
+        files = build_puppet_set(
+            Path(args.set_config),
+            Path(args.out_dir),
+            workers=args.workers,
+            use_sam=not args.no_sam,
+            max_image_calls=args.max_image_calls,
+        )
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    report = files.report
+    print(f"views {len(report['views'])} + heads {len(report['head_views'])} -> {args.out_dir}")
+    for name, view in {**report["views"], **report["head_views"]}.items():
+        print(
+            f"{name}: declared {view['yaw_declared']:g} measured {view['yaw_measured']} "
+            f"diff {view['yaw_diff']} flag {view['yaw_flag']} ({view['yaw_method']})"
+        )
+    for name, info in report["parts"].items():
+        pal = ", ".join(f"{v} {d:.1f}" for v, d in info["palette"].items())
+        print(f"{name}: palette {pal}")
+    totals = report["totals"]
+    print(f"sam calls {totals['sam_calls']}, model calls {totals['model_calls']}, ~${totals['cost_usd']:.4f}")
+    flagged = [n for n, v in {**report["views"], **report["head_views"]}.items() if v["yaw_flag"]]
+    flagged += [f"{n}/{v}" for n, info in report["parts"].items() for v, f in info["palette_flag"].items() if f]
+    if flagged:
+        print(f"warn: flags on {', '.join(flagged)}")
+    return 0
+
+
 def cmd_gate(args: argparse.Namespace) -> int:
     """Flag one shot (needs placement.json from a render with a region map).
 
@@ -528,6 +789,25 @@ def cmd_gate(args: argparse.Namespace) -> int:
             frames = f" frames {flag['frames']}" if flag["frames"] is not None else ""
             print(f"{flag['id']}: {flag['message']}{frames}")
         print(f"{len(out['flags'])} shown, {len(out['silenced'])} silenced, {out['dropped']} dropped")
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_profile(args: argparse.Namespace) -> int:
+    """Summarize where a run's time went, from its timing spans."""
+    from karagoz.studio.profile import write_profile
+
+    try:
+        events = Path(args.events)
+        out = Path(args.out) if args.out else None
+        json_path = out.parent / "profile.json" if out is not None else Path("profile.json")
+        table, _summary = write_profile(events, out, json_path)
+        if out is None:
+            print(table, end="")
+        else:
+            print(f"{out}\n{json_path}")
     except Exception as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -595,6 +875,7 @@ def build_parser() -> argparse.ArgumentParser:
     draw.add_argument("episode", help="episode id")
     draw.add_argument("shot", help="shot id")
     draw.add_argument("--dry-run", dest="dry_run", action="store_true", help="list jobs without calling the model")
+    draw.add_argument("--no-puppet", dest="no_puppet", action="store_true", help="skip the puppet route")
     draw.set_defaults(func=cmd_draw)
 
     recut_p = sub.add_parser("recut", help="re-cut a shot's mouth/eye patches inside the face")
@@ -672,6 +953,53 @@ def build_parser() -> argparse.ArgumentParser:
     gate_p.add_argument("--limit", type=int, default=5, help="most flags shown (prop count always shown)")
     gate_p.set_defaults(func=cmd_gate)
 
+    puppet_p = sub.add_parser("puppet", help="build a layered puppet from a reference drawing")
+    puppet_sub = puppet_p.add_subparsers(dest="puppet_command", required=True)
+    puppet_build = puppet_sub.add_parser("build", help="split the reference into complete parts (SAM + seeds)")
+    puppet_build.add_argument("reference", help="reference drawing (flat colours, black outlines)")
+    puppet_build.add_argument("config", help="parts config YAML (names, parents, concepts, seeds)")
+    puppet_build.add_argument(
+        "out_dir", help="output directory (puppet.json, parts/, report.json, sheet.png, parts_green.png)"
+    )
+    puppet_build.add_argument("--no-sam", action="store_true", help="skip SAM, decide by seed points alone")
+    puppet_build.add_argument("--max-image-calls", type=int, default=3, help="most Muse Image fills (default 3)")
+    puppet_set = puppet_sub.add_parser("build-set", help="build every view of a puppet set in parallel (K-0c)")
+    puppet_set.add_argument("set_config", help="set config YAML (character, views, head views)")
+    puppet_set.add_argument("out_dir", help="output directory (views/, head_views/, set.json, set_report.json)")
+    puppet_set.add_argument("--workers", type=int, default=None, help="parallel view workers (default: half the CPUs)")
+    puppet_set.add_argument("--no-sam", action="store_true", help="skip SAM, decide by seed points alone")
+    puppet_set.add_argument("--max-image-calls", type=int, default=3, help="most Muse Image fills (default 3)")
+    puppet_fit = puppet_sub.add_parser("fit", help="fit a puppet set to one key drawing (K-1)")
+    puppet_fit.add_argument("set_dir", help="built puppet set directory (set.json, views/)")
+    puppet_fit.add_argument("drawing", help="key drawing to fit (PNG)")
+    puppet_fit.add_argument("out_dir", help="output directory (fit_report.json, fit_sheet.png)")
+    puppet_chain = puppet_sub.add_parser("chain", help="fit poses once, then every X->Y interval (K-1)")
+    puppet_chain.add_argument("set_dir", help="built puppet set directory (set.json, views/)")
+    puppet_chain.add_argument("paths", nargs="+", help="X.png [X1.png ...] Y.png <out_dir>")
+    puppet_chain.add_argument("--workers", type=int, default=None, help="parallel workers (default: half the CPUs)")
+    puppet_transition = puppet_sub.add_parser("transition", help="report one X->Y transition (K-1)")
+    puppet_transition.add_argument("set_dir", help="built puppet set directory (set.json, views/)")
+    puppet_transition.add_argument("x", help="first key drawing (PNG)")
+    puppet_transition.add_argument("y", help="second key drawing (PNG)")
+    puppet_transition.add_argument("out_dir", help="output directory (transition.json, transition_sheet.png)")
+    puppet_repivot = puppet_sub.add_parser("repivot", help="recompute a built set's pivots (no SAM, no image calls)")
+    puppet_repivot.add_argument("set_dir", help="built set directory (set.json, views/, head_views/)")
+    puppet_repivot.add_argument("out_dir", help="output directory (copy with refreshed pivots)")
+    puppet_inbetween = puppet_sub.add_parser("inbetween", help="render one X->Y interval as inbetween frames (K-2d)")
+    puppet_inbetween.add_argument("set_dir", help="built puppet set directory (set.json, views/)")
+    puppet_inbetween.add_argument("transition", help="K-1 transition.json (poses, locked, decision)")
+    puppet_inbetween.add_argument("out_dir", help="output directory (frames/, preview.mp4, inbetween_sheet.png)")
+    puppet_inbetween.add_argument("--frames", type=int, required=True, help="frame count including both ends")
+    puppet_inbetween.add_argument("--ease", default="inout", help="easing kind (inout, linear, in, out)")
+    puppet_inbetween.add_argument("--follow-through", type=int, default=0, help="child-joint lag in frames (K-2a)")
+    holds = puppet_inbetween.add_mutually_exclusive_group()
+    holds.add_argument(
+        "--hold-from-key", action="store_true", help="holds are the key drawings (default: the puppet renders)"
+    )
+    holds.add_argument("--hold-from-puppet", action="store_true", help="holds from the puppet (the default)")
+    puppet_inbetween.add_argument("--workers", type=int, default=None, help="render workers (default: up to 4)")
+    puppet_p.set_defaults(func=cmd_puppet)
+
     strip_p = sub.add_parser("strip", help="write a contact sheet of a run of video frames")
     strip_p.add_argument("video", help="video file")
     strip_p.add_argument("start", type=int, help="first frame (0-based, included)")
@@ -710,6 +1038,13 @@ def build_parser() -> argparse.ArgumentParser:
     context_p.add_argument("--remove", action="extend", nargs="+", default=None, metavar="ID", help="section to remove")
     context_p.add_argument("--reason", required=True, help="why the context changes")
     context_p.set_defaults(func=cmd_context)
+
+    profile_p = sub.add_parser("profile", help="summarize where a run's time went from its event log")
+    profile_p.add_argument("events", help="run/events.jsonl with timing spans")
+    profile_p.add_argument(
+        "--out", default=None, metavar="REPORT", help="Markdown report path (default: print to stdout)"
+    )
+    profile_p.set_defaults(func=cmd_profile)
     return parser
 
 
