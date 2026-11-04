@@ -29,6 +29,9 @@ uv run karagoz landmarks prod ep01 sh01 # measure every body drawing of the shot
 uv run karagoz render prod ep01         # shots to MP4, then joined into the episode
 ```
 
+For the whole workflow (production layout, running the studio, the timing profile, failures), read the
+[`karagoz` skill](.claude/skills/karagoz/SKILL.md); for puppet in-betweens, the [`puppet` skill](.claude/skills/puppet/SKILL.md).
+
 ## How it works
 
 Four layers: studio agents, the coordinate engine, model adapters, and render. The studio agents (Director, Continuity, Layout, Timer, checkers, orchestrator) write small YAML/JSON files with names, never x/y coordinates. The coordinate engine turns those names into positions, scale, frames and face patches. Time comes from the audio's per-letter timestamps, never from guesses. The mechanical gate and the checker agents flag problems on contact sheets, and a human approves.

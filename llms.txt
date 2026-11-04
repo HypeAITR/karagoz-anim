@@ -11,6 +11,7 @@ SAM 3.1, vision checks from Muse Spark, voices from ElevenLabs.
 
 - [README](README.md): what this is, quick start, how it works, commands, models and keys
 - [Agent guide](AGENTS.md): setup, checks and rules for coding agents
+- [Making an animation](.claude/skills/karagoz/SKILL.md): end-to-end use, from keys to MP4
 - [Architecture](ARCHITECTURE.md): the four layers and the code map of every module
 
 ## Studio guide
@@ -27,6 +28,11 @@ SAM 3.1, vision checks from Muse Spark, voices from ElevenLabs.
 - [Timer](.claude/skills/timer/SKILL.md): when each pose lands, anchored to words
 - [Checker](.claude/skills/checker/SKILL.md): movement review on contact sheets
 - [Draw prompts](.claude/skills/draw-prompts/SKILL.md): how drawing prompts are built and why
+- [Puppet](.claude/skills/puppet/SKILL.md): layered puppet sets, fitting, rig/split/ret, puppet in-betweens
+
+## Using the tool
+
+- [Making an animation](.claude/skills/karagoz/SKILL.md): keys, production layout, run, render, profile, failures
 
 ## Code
 

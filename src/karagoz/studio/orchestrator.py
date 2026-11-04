@@ -167,6 +167,23 @@ def _interview_on(prod: Path, episode: str) -> bool:
     return False
 
 
+def _character_refs(prod: Path) -> list[str]:
+    """Production-relative reference drawing paths named in characters.yaml (relative ones only)."""
+    try:
+        data = yaml.safe_load((prod / "characters.yaml").read_text(encoding="utf-8"))
+    except (OSError, yaml.YAMLError):
+        return []
+    chars = data.get("characters") if isinstance(data, dict) else None
+    if not isinstance(chars, dict):
+        return []
+    refs: list[str] = []
+    for entry in chars.values():
+        ref = entry.get("ref") if isinstance(entry, dict) else None
+        if isinstance(ref, str) and ref and not Path(ref).is_absolute() and ".." not in Path(ref).parts:
+            refs.append(ref)
+    return sorted(set(refs))
+
+
 def _default_checker(episode_dir: Path, outputs: list[str]) -> list[Finding]:
     wanted = set(outputs)
     return [f for f in check_episode(episode_dir) if f.file in wanted]  # check_episode reports episode-relative files
@@ -1600,6 +1617,15 @@ class Studio:
                 dst = workdir / rel
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 dst.write_bytes(src.read_bytes())
+        # characters.yaml names reference drawings by relative path; `karagoz check` in the workdir verifies they
+        # exist, so the copied file brings its references along (else every agent fails on "ref does not exist").
+        if "characters.yaml" in task.files_in:
+            for ref in _character_refs(self.prod):
+                src = self.prod / ref
+                dst = workdir / ref
+                if src.is_file() and not dst.exists():
+                    dst.parent.mkdir(parents=True, exist_ok=True)
+                    dst.write_bytes(src.read_bytes())
         previous: list[str] = []
         for rel in task.files_out:
             src = self.prod / rel
