@@ -26,13 +26,14 @@ from PIL import Image, ImageDraw, ImageFont
 
 from karagoz.engine.puppet.fit import load_drawing, load_view
 from karagoz.engine.puppet.frame_checks import (
+    PAPER_LUMA,
     cut_measure,
     joint_paper_gap_px,
     locked_change_px,
-    swept_joint_region,
 )
 from karagoz.engine.puppet.interp import frame_times, interpolate_sequence
 from karagoz.engine.puppet.model import Puppet
+from karagoz.engine.puppet.parts import LUMA
 from karagoz.engine.puppet.pose import Pose, output_size, part_matrix3, z_order
 from karagoz.engine.puppet.render_aa import PreparedParts, part_masks, prepare_parts, render_frame
 from karagoz.engine.render import encode
@@ -59,7 +60,9 @@ REPORT_KEYS = (
     "locked",
     "frames",
     "cut",
+    "paper_rgb",
     "z_switch_frames",
+    "z_switches",
     "render_sec_per_frame",
     "render_sec_total",
     "ok",
@@ -70,6 +73,13 @@ MIN_OVERLAP_PX = 50
 
 #: Bbox jump tolerance: slack on top of the angle-explained shift (output pixels).
 BBOX_TOL_PX = 2.0
+
+#: Visible-difference threshold for ``locked_change_px`` (review item 3).
+#:
+#: Probe-grounded (synth 1 px root drift over 24 frames): tol 16 still counts
+#: 195 px of sub-pixel edge churn, tol 20 counts 0 while a real 20x20 hole
+#: still counts its full 400 px.
+LOCKED_TOL_PX = 20
 
 
 @dataclass
@@ -180,12 +190,40 @@ def _rgba_from_rgb(rgb: NDArray[np.uint8]) -> NDArray[np.uint8]:
     return out
 
 
-def _over_white(rgba: NDArray[np.uint8]) -> NDArray[np.uint8]:
-    """Straight RGBA composited onto white paper (preview MP4, contact sheet)."""
+def _over_bg(rgba: NDArray[np.uint8], bg: tuple[int, int, int]) -> NDArray[np.uint8]:
+    """Straight RGBA composited onto a flat background colour (preview, sheet)."""
     img = np.asarray(rgba, dtype=np.uint8)
     alpha = img[..., 3:4].astype(np.float32) / 255.0
-    rgb = img[..., :3].astype(np.float32) * alpha + 255.0 * (1.0 - alpha)
+    back = np.asarray(bg, dtype=np.float32).reshape(1, 1, 3)
+    rgb = img[..., :3].astype(np.float32) * alpha + back * (1.0 - alpha)
     return np.asarray(np.rint(rgb), dtype=np.uint8)
+
+
+def _on_tone(rgba: NDArray[np.uint8], tone: tuple[int, int, int]) -> NDArray[np.uint8]:
+    """Puppet frame on the key's paper tone (review item 2): RGB composited, alpha kept."""
+    out = np.asarray(rgba, dtype=np.uint8).copy()
+    clear = out[..., 3] == 0
+    out[clear, :3] = np.asarray(tone, dtype=np.uint8)
+    return out
+
+
+def _paper_tone(keys: list[NDArray[np.uint8]]) -> tuple[int, int, int]:
+    """Median RGB of the keys' paper pixels (flat tone for compositing).
+
+    Paper = luma at or above ``frame_checks.PAPER_LUMA`` over all given keys;
+    falls back to white when no key has a paper pixel at all.
+    """
+    chips: list[NDArray[np.uint8]] = []
+    for key in keys:
+        rgb = np.asarray(key, dtype=np.uint8)
+        luma = np.asarray(rgb.astype(np.float32) @ LUMA)
+        paper = np.asarray(rgb[luma >= PAPER_LUMA].reshape(-1, 3), dtype=np.uint8)
+        if len(paper):
+            chips.append(paper)
+    if not chips:
+        return (255, 255, 255)
+    med = np.median(np.concatenate(chips, axis=0).astype(np.float32), axis=0)
+    return (int(med[0]), int(med[1]), int(med[2]))
 
 
 # ---------------------------------------------------------------------------
@@ -291,18 +329,23 @@ def _z_pairs(
     pose_x: Pose,
     pose_y: Pose,
     changed: set[str],
+    masks_x: dict[str, NDArray[np.bool_]],
     masks_y: dict[str, NDArray[np.bool_]],
+    rgb_x: NDArray[np.uint8],
     rgb_y: NDArray[np.uint8],
     images: dict[str, NDArray[np.uint8]],
 ) -> dict[tuple[str, str], str]:
     """Part pairs whose draw order must switch mid-interval, mapped to the end top.
 
-    Two sources: X/Y ``z_override`` values that order a pair differently, and a
-    changed part that must pass in front of another part (they overlap at Y and
-    the key drawing's pixels in the overlap agree with the changed part, like
-    K-1's ``resolve_z``). The value is the part that must be on top at the end.
+    A pair switches only with pixel support (review item 4): the z data must
+    order the pair differently at X and Y, the pair must overlap at Y, and the
+    Y key drawing must show the Y-top part on top in that overlap (K-1's
+    ``resolve_z`` rule). Without support the X order is kept for every frame:
+    an unobserved switch only risks a one-frame pop. The same holds for a
+    changed part passing in front (Y drawing shows it on top, X order buries
+    it). The value is the part that must be on top at the end.
     """
-    names = [n for n, p in puppet.parts.items() if not p.hidden and n in masks_y]
+    names = [n for n, p in puppet.parts.items() if not p.hidden and n in masks_x and n in masks_y]
     rank_x = {n: i for i, n in enumerate(z_order(puppet, pose_x))}
     rank_y = {n: i for i, n in enumerate(z_order(puppet, pose_y))}
     pairs: dict[tuple[str, str], str] = {}
@@ -311,8 +354,14 @@ def _z_pairs(
             if a >= b:
                 continue
             key = (a, b)
-            if (rank_x[a] < rank_x[b]) != (rank_y[a] < rank_y[b]):
-                pairs[key] = a if rank_y[a] > rank_y[b] else b
+            if (rank_x[a] < rank_x[b]) == (rank_y[a] < rank_y[b]):
+                continue
+            target = a if rank_y[a] > rank_y[b] else b
+            both = np.logical_and(masks_y[a], masks_y[b])
+            if int(both.sum()) < MIN_OVERLAP_PX:
+                continue
+            if _drawing_top(rgb_y, images, a, b, both) == target:
+                pairs[key] = target
     for moved in sorted(changed):
         if moved not in masks_y:
             continue
@@ -382,22 +431,39 @@ def _frame_z(
 # ---------------------------------------------------------------------------
 
 
-def _cur_swept(
+#: How near the joint a hole may be (output pixels, review item 1).
+#:
+#: K-2c's swept envelope hugs the seam (a few px bands); a bite-exposed wedge
+#: like es1's 26x36 px hole sits up to ~18 px from the joint ink, outside it.
+#: The pair span dilated this far still excludes motion strips (the end-cover
+#: rule) while containing set-scale holes.
+HOLE_NEAR_PX = 24
+
+
+def _hole_region(
     masks_prev: dict[str, NDArray[np.bool_]],
     masks_cur: dict[str, NDArray[np.bool_]],
+    end_union: NDArray[np.bool_],
     parent: str,
     child: str,
 ) -> NDArray[np.bool_]:
-    """This pair's swept region clipped to the current frame's own joint union.
+    """Paper near the joint that stays covered at both ends (review item 1).
 
-    K-2c note 3: the raw X->Y-style envelope counts the strip the limb just
-    vacated (paper there is motion, not a hole). Intersecting with the measured
-    frame's own ``parent | child`` union keeps the 0 baseline on good joints
-    while a real tear inside the joint still counts.
+    A gap counts where the joint neighbourhood is paper now AND the pixel
+    stays covered at both ends of the interval (the joint's closed reference
+    states). The neighbourhood is the pair span of both frames dilated by
+    ``HOLE_NEAR_PX``; its 1 px rim is shaved off so anti-aliased edge shimmer
+    (ka1's 6893 px at mean 0.63) stays silent. A trailing motion strip is
+    covered at most at one end, so it stays out; a wedge that opens
+    mid-interval and closes again (es1's 442 px) is in.
     """
-    swept = swept_joint_region(masks_prev, masks_cur, parent, child)
-    own = np.logical_or(masks_cur[parent], masks_cur[child])
-    return np.logical_and(swept, own)
+    span = np.logical_or(
+        np.logical_or(masks_prev[parent], masks_prev[child]),
+        np.logical_or(masks_cur[parent], masks_cur[child]),
+    )
+    grown = cv2.dilate(span.astype(np.uint8), np.ones((7, 7), np.uint8), iterations=8).astype(bool)
+    area = np.logical_and(np.asarray(end_union, dtype=np.bool_), grown)
+    return cv2.erode(area.astype(np.uint8), np.ones((3, 3), np.uint8), iterations=1).astype(bool)
 
 
 def _far_from(
@@ -492,15 +558,15 @@ def _peak_frame(poses: list[Pose], moving: list[tuple[str, str]]) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _write_preview(saved: list[NDArray[np.uint8]], out_dir: Path) -> Path:
-    """White-composited frames -> 24 fps ``preview.mp4`` (ffmpeg via render.encode)."""
+def _write_preview(saved: list[NDArray[np.uint8]], out_dir: Path, bg: tuple[int, int, int]) -> Path:
+    """Frames over a flat background -> 24 fps ``preview.mp4`` (ffmpeg via render.encode)."""
     tmp = out_dir / "_preview_frames"
     if tmp.exists():
         shutil.rmtree(tmp)
     tmp.mkdir(parents=True)
     try:
         for i, rgba in enumerate(saved):
-            Image.fromarray(_over_white(np.asarray(rgba, dtype=np.uint8))).save(tmp / f"{i:04d}.png")
+            Image.fromarray(_over_bg(np.asarray(rgba, dtype=np.uint8), bg)).save(tmp / f"{i:04d}.png")
         return encode(tmp, None, out_dir / "preview.mp4", pattern="%04d.png")
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
@@ -597,6 +663,7 @@ def inbetween(
     kind: str = "inout",
     follow_through: int = 0,
     hold_from_puppet: bool = False,
+    workers: int | None = None,
 ) -> InbetweenResult:
     """Render one X->Y interval as numbered frames plus preview, sheet and report.
 
@@ -605,10 +672,14 @@ def inbetween(
     returns ``ok=False`` with the reason. Otherwise the poses come from
     :func:`interpolate_sequence` (``locked`` keeps X), every frame is rendered
     with :func:`render_frame` in a process pool (one ``prepare_parts`` per
-    worker), z order switches per pair on the first non-overlap frame, holds
-    are the key drawings unless ``hold_from_puppet``, and per-frame measures
-    plus the two cuts land in ``report`` (also ``inbetween.json``). ``ok`` is
-    locked 0 everywhere, gap 0 everywhere and no bbox flag.
+    worker; ``workers`` caps the pool, None keeps min(4, n)), z order switches
+    per pair on the first non-overlap frame (only with pixel support, named in
+    ``z_switches``), holds are the key drawings unless ``hold_from_puppet``
+    (puppet frames sit on the keys' paper tone), and per-frame measures plus
+    the two cuts land in ``report`` (also ``inbetween.json``). The f0 and last
+    rows measure the key-vs-puppet cuts; ``ok`` judges the inner pairs only
+    (locked 0, gap 0, no bbox flag) since a key hold always differs by the fit
+    residual.
     """
     set_path, json_path, out_path = Path(set_dir), Path(transition_json), Path(out_dir)
     if n_frames < 2:
@@ -632,6 +703,7 @@ def inbetween(
     width, height = output_size(puppet, pose_x)
     rgb_x = _key_rgb(tdir, str(doc.get("x", "X.png")), (height, width))
     rgb_y = _key_rgb(tdir, str(doc.get("y", "Y.png")), (height, width))
+    paper: tuple[int, int, int] = _paper_tone([rgb_x, rgb_y])
 
     poses = interpolate_sequence(
         puppet, pose_x, pose_y, n_frames, kind=kind, follow_through=follow_through, locked=frozenset(locked)
@@ -641,7 +713,12 @@ def inbetween(
     masks_last = part_masks(puppet, prepared, poses[-1])
     moving = _moving_joints(puppet, poses[0], poses[-1], masks_first, masks_last)
     changed = _changed_parts(poses[0], poses[-1])
-    pairs = _z_pairs(puppet, poses[0], poses[-1], changed, masks_last, rgb_y, loaded.images)
+    pairs = _z_pairs(puppet, poses[0], poses[-1], changed, masks_first, masks_last, rgb_x, rgb_y, loaded.images)
+    end_unions: dict[tuple[str, str], NDArray[np.bool_]] = {}
+    for par, child in moving:
+        first = np.logical_or(masks_first[par], masks_first[child])
+        last = np.logical_or(masks_last[par], masks_last[child])
+        end_unions[(par, child)] = np.logical_and(first, last)
 
     counts: dict[tuple[str, str], list[int]] = {pair: [] for pair in pairs}
     for pose in poses:  # overlap is order-free: count before any rendering
@@ -651,8 +728,17 @@ def inbetween(
                 counts[pair].append(0)
             else:
                 counts[pair].append(int(np.logical_and(masks[pair[0]], masks[pair[1]]).sum()))
-    switches = _switches_from_counts(counts)
+    pairs = {pair: top for pair, top in pairs.items() if sum(counts[pair]) > 0}
+    switches = _switches_from_counts({pair: counts[pair] for pair in pairs})
     z_lists = [_frame_z(puppet, poses[0], pairs, switches, i) for i in range(n_frames)]
+    z_switches = [
+        {
+            "frame": int(switches[pair]),
+            "front": pairs[pair],
+            "back": pair[0] if pairs[pair] == pair[1] else pair[1],
+        }
+        for pair in sorted(pairs, key=lambda p: (switches[p], p))
+    ]
 
     frames_dir = out_path / "frames"
     frames_dir.mkdir(parents=True, exist_ok=True)
@@ -660,10 +746,12 @@ def inbetween(
         {"index": i, "out": str(frames_dir / f"{i:04d}.png"), "z": z_lists[i]} | _pose_payload(poses[i])
         for i in range(n_frames)
     ]
-    workers = min(4, n_frames)
+    pool_workers = min(4, n_frames) if workers is None else workers
+    if pool_workers < 1:
+        raise ValueError(f"workers must be >= 1, got {workers}")
     render_start = time.perf_counter()
     with ProcessPoolExecutor(
-        max_workers=workers, initializer=_init_render_worker, initargs=(str(set_path), pose_x.view)
+        max_workers=pool_workers, initializer=_init_render_worker, initargs=(str(set_path), pose_x.view)
     ) as pool:
         receipts = list(pool.map(_render_one, jobs))
     render_total = time.perf_counter() - render_start
@@ -675,10 +763,11 @@ def inbetween(
     ]
 
     rgba_x, rgba_y = _rgba_from_rgb(rgb_x), _rgba_from_rgb(rgb_y)
-    if hold_from_puppet:
-        saved = list(puppet_rgba)
-    else:
-        saved = [rgba_x, *puppet_rgba[1:-1], rgba_y] if n_frames > 2 else [rgba_x, rgba_y]
+    toned = [_on_tone(np.asarray(rgba, dtype=np.uint8), paper) for rgba in puppet_rgba]
+    saved: list[NDArray[np.uint8]] = list(toned)
+    if not hold_from_puppet:
+        saved[0] = rgba_x
+        saved[-1] = rgba_y
     frame_paths: list[Path] = []
     for i, rgba in enumerate(saved):
         path = frames_dir / f"{i:04d}.png"
@@ -688,7 +777,7 @@ def inbetween(
     frame_rows: list[dict[str, Any]] = []
     prev_masks: dict[str, NDArray[np.bool_]] | None = None
     prev_visible: NDArray[np.bool_] | None = None
-    prev_rgba: NDArray[np.uint8] | None = None
+    prev_saved: NDArray[np.uint8] | None = None
     locked_set = set(locked)
     locked_all_zero = True
     for i, pose in enumerate(poses):
@@ -706,20 +795,38 @@ def inbetween(
         # to 1 px past the 0.5 mask contour, and that fringe is motion too.
         grown = cv2.dilate(cover.astype(np.uint8), np.ones((3, 3), np.uint8), iterations=1).astype(bool)
         visible = np.logical_and(union, np.logical_not(grown))
-        if i == 0 or prev_masks is None or prev_visible is None or prev_rgba is None:
-            locked_px = 0
-            gap = sum(
-                int(joint_paper_gap_px(puppet_rgba[i], _cur_swept(masks, masks, par, child))) for par, child in moving
-            )
+        # Cut rows (key holds only) compare the key against the puppet render
+        # next to it; they are reported but excluded from ``ok`` (review item 3).
+        # Cut rows (key holds only): the start cut size (row 0) and the two
+        # playback steps touching a key (rows 1 and n-1). Reported but
+        # excluded from ``ok`` (review item 3).
+        is_cut = (not hold_from_puppet) and (i == 0 or i == 1 or i == n_frames - 1)
+        if i == 0 or prev_masks is None:
+            region = {
+                (par, child): _hole_region(masks, masks, end_unions[(par, child)], par, child) for par, child in moving
+            }
+            gap = sum(int(joint_paper_gap_px(saved[i], region[(par, child)])) for par, child in moving)
+            if hold_from_puppet:
+                locked_px = 0
+            else:
+                locked_px = int(locked_change_px(saved[0], puppet_rgba[0], visible, tol=LOCKED_TOL_PX))
             jump, expected, jumped = 0.0, 0.0, False
         else:
-            locked_px = int(locked_change_px(prev_rgba, puppet_rgba[i], np.logical_and(prev_visible, visible)))
-            gap = sum(
-                int(joint_paper_gap_px(puppet_rgba[i], _cur_swept(prev_masks, masks, par, child)))
+            region = {
+                (par, child): _hole_region(prev_masks, masks, end_unions[(par, child)], par, child)
                 for par, child in moving
-            )
+            }
+            gap = sum(int(joint_paper_gap_px(saved[i], region[(par, child)])) for par, child in moving)
+            if is_cut:
+                locked_px = int(locked_change_px(puppet_rgba[n_frames - 2], saved[i], visible, tol=LOCKED_TOL_PX))
+            else:
+                assert prev_saved is not None and prev_visible is not None
+                locked_px = int(
+                    locked_change_px(prev_saved, saved[i], np.logical_and(prev_visible, visible), tol=LOCKED_TOL_PX)
+                )
             jump, expected, jumped = _bbox_jump(puppet, poses[i - 1], pose, prev_masks, masks)
-        locked_all_zero = locked_all_zero and locked_px == 0
+        if not is_cut:
+            locked_all_zero = locked_all_zero and locked_px == 0
         frame_rows.append(
             {
                 "t": float(times[i]),
@@ -730,7 +837,7 @@ def inbetween(
                 "bbox_jump_flag": bool(jumped),
             }
         )
-        prev_masks, prev_visible, prev_rgba = masks, visible, puppet_rgba[i]
+        prev_masks, prev_visible, prev_saved = masks, visible, saved[i]
 
     gaps_zero = all(int(row["joint_paper_gap_px"]) == 0 for row in frame_rows)
     bbox_clean = not any(bool(row["bbox_jump_flag"]) for row in frame_rows)
@@ -757,7 +864,9 @@ def inbetween(
         "locked": locked,
         "frames": frame_rows,
         "cut": cut,
+        "paper_rgb": [int(v) for v in paper],
         "z_switch_frames": sorted(set(switches.values())),
+        "z_switches": z_switches,
         "render_sec_per_frame": [float(s) for s in secs],
         "render_sec_total": float(render_total),
         "ok": ok,
@@ -765,9 +874,9 @@ def inbetween(
     assert set(full_report) == set(REPORT_KEYS), set(full_report) ^ set(REPORT_KEYS)
     assert all(set(row) == set(FRAME_KEYS) for row in frame_rows)
     (out_path / "inbetween.json").write_text(json.dumps(full_report, indent=1) + "\n", encoding="utf-8")
-    _write_preview(saved, out_path)
+    _write_preview(saved, out_path, paper)
     _write_sheet(
-        [_over_white(np.asarray(rgba, dtype=np.uint8)) for rgba in saved],
+        [_over_bg(np.asarray(rgba, dtype=np.uint8), paper) for rgba in saved],
         puppet,
         poses,
         moving,

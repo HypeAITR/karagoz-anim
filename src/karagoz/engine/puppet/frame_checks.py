@@ -19,8 +19,19 @@ _LINE_DILATE_ITER = 3  # line-scale rim around each union (3x3 kernel, ~3 px eac
 _HULL_BAND_ITER = 16  # how far the swept hull may reach beyond the exact core
 
 
-def locked_change_px(prev: NDArray[np.uint8], cur: NDArray[np.uint8], locked_mask: NDArray[np.bool_]) -> int:
-    """Pixels inside ``locked_mask`` whose RGBA differs between two frames (any channel)."""
+def locked_change_px(
+    prev: NDArray[np.uint8],
+    cur: NDArray[np.uint8],
+    locked_mask: NDArray[np.bool_],
+    tol: int = 0,
+) -> int:
+    """Pixels inside ``locked_mask`` whose RGBA differs between two frames.
+
+    ``tol`` is the visible-difference threshold: a pixel counts when any
+    channel differs by more than ``tol``. The default 0 keeps the exact
+    K-2c semantics; the K-2d acceptance passes a perceptual value so ±1 LSB
+    anti-aliasing and sub-pixel root drift stay silent.
+    """
     before = np.asarray(prev, dtype=np.uint8)
     after = np.asarray(cur, dtype=np.uint8)
     if before.shape != after.shape:
@@ -30,7 +41,11 @@ def locked_change_px(prev: NDArray[np.uint8], cur: NDArray[np.uint8], locked_mas
     mask = np.asarray(locked_mask, dtype=np.bool_)
     if mask.shape != before.shape[:2]:
         raise ValueError(f"mask shape {mask.shape} != frame shape {before.shape[:2]}")
-    changed = np.logical_and(np.any(before != after, axis=2), mask)
+    if tol <= 0:
+        changed = np.logical_and(np.any(before != after, axis=2), mask)
+    else:
+        gap = np.abs(before.astype(np.int16) - after.astype(np.int16))
+        changed = np.logical_and(np.any(gap > int(tol), axis=2), mask)
     return int(changed.sum())
 
 
