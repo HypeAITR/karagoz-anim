@@ -79,6 +79,7 @@ parts:
   - name: leg_r
     parent: torso
     concepts: ["robot leg"]
+    limits: [-35.0, 35.0]
     seed: [[1090, 1290], [1090, 1200], [1096, 1365]]
     # K-0r: the reference draws this hip pad in front of the torso (its whole
     # oval outline shows); z above the torso, below the boot and the arms.
@@ -86,25 +87,30 @@ parts:
   - name: boot_r
     parent: leg_r
     concepts: ["robot boot"]
+    limits: [-25.0, 25.0]
     seed: [[1032, 1433], [1052, 1369]]
     z: 2
   - name: foot_r
     parent: boot_r
     concepts: ["robot foot"]
+    limits: [-30.0, 30.0]
     seed: [[1032, 1594], [1172, 1578], [1143, 1640]]
     z: 3
   - name: leg_l
     parent: torso
     concepts: ["robot leg"]
+    limits: [-35.0, 35.0]
     seed: [[1360, 1290], [1420, 1190], [1361, 1342]]
     z: -1
   - name: boot_l
     parent: leg_l
     concepts: ["robot boot"]
+    limits: [-25.0, 25.0]
     seed: [1355, 1433]
     z: 2
   - name: foot_l
     parent: boot_l
     concepts: ["robot foot"]
+    limits: [-30.0, 30.0]
     seed: [[1355, 1594], [1436, 1552], [1408, 1614]]
     z: 3

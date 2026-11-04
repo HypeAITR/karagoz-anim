@@ -89,10 +89,13 @@ def _covering_dome(
     """Centre and radius of the dome covering a child's joint end (K-0p).
 
     Candidates are the parent and any part strictly in front of the child
-    whose mask reaches the joint window. A candidate counts as a dome when
-    its one-owner outline fits a circle at the drawing's scale (radius at
-    least five line widths, residual within a tenth of the radius, arc past
-    a quarter turn). Outline on completed-then-covered paint (finished but
+    whose mask reaches the joint window. A candidate counts as a dome only
+    when it is painted strictly in front of the child (higher z): a part
+    behind the child cannot cover the child's joint end, so the child never
+    slides under it. A candidate counts as a dome when its one-owner outline
+    fits a circle at the drawing's scale (radius at least five line widths,
+    residual within a tenth of the radius, arc past a quarter turn). Outline
+    on completed-then-covered paint (finished but
     not visible) is completion ink, never the dome edge, and is excluded.
     Returns the dome's name with its mask centroid and the fitted radius;
     None when no candidate is dome-like, so the caller keeps today's pivot
@@ -108,13 +111,19 @@ def _covering_dome(
             other = np.asarray(masks.get(name, np.zeros(0, dtype=np.bool_)), dtype=np.bool_)
             if other.shape == win.shape and bool(np.logical_and(other, win).any()):
                 names.append(name)
-    # The parent always counts when it reaches the window (it is the joint
-    # the child hangs off); front parts only when they cover the window.
+    # The parent counts when it reaches the window and is painted in front
+    # of the child (it is the joint the child hangs off); front parts only
+    # when they cover the window.
     parent_mask = np.asarray(masks[parent], dtype=np.bool_)
     if parent_mask.shape != win.shape or not bool(np.logical_and(parent_mask, win).any()):
         names = names[1:]
     scored: list[tuple[float, str, float]] = []
     for name in names:
+        # Only a part painted in front of the child can cover its joint end
+        # (K-0s): a parent behind the child covers nothing, so the child
+        # never slides under it.
+        if z_of.get(name, child_z + 1) <= child_z:
+            continue
         spec = by_name.get(name)
         if isinstance(spec, PartSpec) and bool(spec.hidden):
             continue

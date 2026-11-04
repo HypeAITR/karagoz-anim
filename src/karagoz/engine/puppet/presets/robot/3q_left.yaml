@@ -87,16 +87,19 @@ parts:
   - name: leg_r
     parent: torso
     concepts: ["robot leg"]
+    limits: [-35.0, 35.0]
     seed: [[985, 1205], [1040, 1320]]
     z: -1
   - name: boot_r
     parent: leg_r
     concepts: ["robot boot"]
+    limits: [-25.0, 25.0]
     seed: [[990, 1358], [990, 1440]]
     z: 2
   - name: foot_r
     parent: boot_r
     concepts: ["robot foot"]
+    limits: [-30.0, 30.0]
     # [940, 1570]/[960, 1610] top face (R91/R95); [1090, 1575] dark front
     # face (R90) -- unseeded it joins the torso by reach (see _wp/RAPOR.md).
     seed: [[940, 1570], [960, 1610], [1090, 1575]]
@@ -104,6 +107,7 @@ parts:
   - name: leg_l
     parent: torso
     concepts: ["robot leg"]
+    limits: [-35.0, 35.0]
     seed: [[1255, 1235], [1300, 1285], [1305, 1325], [1300, 1365]]
     # K-0r: the reference draws this hip pad in front of the torso (its whole
     # oval outline shows); z above the torso, below the boot and the arms.
@@ -111,11 +115,13 @@ parts:
   - name: boot_l
     parent: leg_l
     concepts: ["robot boot"]
+    limits: [-25.0, 25.0]
     seed: [[1270, 1385], [1265, 1450]]
     z: 2
   - name: foot_l
     parent: boot_l
     concepts: ["robot foot"]
+    limits: [-30.0, 30.0]
     # [1240, 1590]/[1240, 1640] top face (R94/R96); [1355, 1600] dark front
     # face (R93) -- unseeded it joins the torso by reach (see _wp/RAPOR.md).
     seed: [[1240, 1590], [1240, 1640], [1355, 1600]]

@@ -643,6 +643,7 @@ def build_puppet(
                 approved=False,
                 hidden=cfg.by_name[name].hidden,
                 estimated=bool(pivots.estimated.get(name, False)),
+                limits=cfg.by_name[name].limits,
             )
             for name in split.order
         },
