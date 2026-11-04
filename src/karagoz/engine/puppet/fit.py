@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 import cv2
+import numba
 import numpy as np
 from numpy.typing import NDArray
 from PIL import Image, ImageDraw, ImageFont
@@ -86,6 +87,10 @@ SECOND_PASS = True
 # many candidates (K-0r: a joint decided against a T-pose limb parks at its
 # limit while the children compensate). 0 turns the beam off.
 GREEDY_BEAM = 3
+#: The beam runs only when the plain greedy left the narrow first joint this close to a limit (the trap).
+BEAM_LIMIT_DEG = 1.0
+#: Transitions skip the from-scratch chain refit on Y when no member is frozen (it repeats ``pose_Y``'s fit).
+TRANSITION_SKIP_REDUNDANT_FRESH = True
 
 
 @dataclass
@@ -674,6 +679,8 @@ def exclusive_total(
     paper_f = feat.paper_f
     rgb_f = feat.rgb_f
     members = [m for m in reversed(z_order(puppet, pose)) if m in chain and m in samples]
+    if USE_COMPILED:
+        return _exclusive_total_compiled(puppet, pose, members, samples, feat, tau, blocked, explained)
     coords: dict[str, tuple[NDArray[np.float64], NDArray[np.float64]]] = {}
     for name in members:
         samp = samples[name]
@@ -733,6 +740,152 @@ def _blocked_keys(blocked: NDArray[np.bool_] | None) -> NDArray[np.int64] | None
     return keys
 
 
+@numba.njit(cache=True, nogil=True)
+def _bilinear_nb(field: Any, width: int, height: int, x: float, y: float, outside: float) -> float:  # pragma: no cover
+    x0f = math.floor(x)
+    y0f = math.floor(y)
+    x0 = int(x0f)
+    y0 = int(y0f)
+    if x0 < 0 or y0 < 0 or x0 + 1 >= width or y0 + 1 >= height:
+        return outside
+    fx = x - x0f
+    fy = y - y0f
+    r0 = y0 * width
+    r1 = (y0 + 1) * width
+    val: float = (
+        (1.0 - fx) * (1.0 - fy) * field[r0 + x0]
+        + fx * (1.0 - fy) * field[r0 + x0 + 1]
+        + (1.0 - fx) * fy * field[r1 + x0]
+        + fx * fy * field[r1 + x0 + 1]
+    )
+    return val
+
+
+@numba.njit(cache=True, nogil=True)
+def _exclusive_core(  # pragma: no cover - compiled; equivalence tested against the numpy loop
+    line_xy: Any,
+    line_keys: Any,
+    line_off: Any,
+    flat_xy: Any,
+    flat_keys: Any,
+    flat_rgb: Any,
+    flat_off: Any,
+    cover_count: Any,
+    owner: Any,
+    dist_flat: Any,
+    paper_flat: Any,
+    rgb_flat: Any,
+    expl_flat: Any,
+    has_expl: bool,
+    width: int,
+    height: int,
+    tau: float,
+    decay: float,
+    w_line: float,
+    w_colour: float,
+    w_paper: float,
+    colour_tau: float,
+    stack_penalty: float,
+) -> float:
+    """The member loop of :func:`_exclusive_sum` in one compiled pass (same rules, same order)."""
+    total = 0.0
+    n_members = len(line_off) - 1
+    tau_c = max(tau, 1e-6)
+    for m in range(n_members):
+        l0, l1 = line_off[m], line_off[m + 1]
+        f0, f1 = flat_off[m], flat_off[m + 1]
+        n_line = l1 - l0
+        n_flat = f1 - f0
+        # owned = in canvas and no earlier (higher) member claimed the pixel; decided before this member claims
+        owned_l = np.zeros(n_line, np.bool_)
+        owned_f = np.zeros(n_flat, np.bool_)
+        n_own_l = 0
+        n_own_f = 0
+        n_in = 0
+        for i in range(n_line):
+            k = line_keys[l0 + i]
+            if k >= 0:
+                n_in += 1
+                if owner[k] == 0:
+                    owned_l[i] = True
+                    n_own_l += 1
+        for i in range(n_flat):
+            k = flat_keys[f0 + i]
+            if k >= 0:
+                n_in += 1
+                if owner[k] == 0:
+                    owned_f[i] = True
+                    n_own_f += 1
+        for i in range(n_line):
+            k = line_keys[l0 + i]
+            if k >= 0:
+                owner[k] = 1
+        for i in range(n_flat):
+            k = flat_keys[f0 + i]
+            if k >= 0:
+                owner[k] = 1
+        if (n_line + n_flat) > 0 and n_own_l + n_own_f == 0:
+            total -= stack_penalty
+            continue
+        if n_own_l:
+            acc = 0.0
+            for i in range(n_line):
+                if not owned_l[i]:
+                    continue
+                k = line_keys[l0 + i]
+                keep = 1.0
+                if has_expl and expl_flat[k]:
+                    keep = 1.0 - decay
+                if cover_count[k] > 1:
+                    keep = keep * (1.0 - decay)
+                d = _bilinear_nb(dist_flat, width, height, line_xy[l0 + i, 0], line_xy[l0 + i, 1], 50.0)
+                acc += keep * math.exp(-d / tau_c)
+            total += w_line * (acc / n_own_l)
+        if n_own_f:
+            acc = 0.0
+            pap = 0.0
+            for i in range(n_flat):
+                if not owned_f[i]:
+                    continue
+                k = flat_keys[f0 + i]
+                keep = 1.0
+                if has_expl and expl_flat[k]:
+                    keep = 1.0 - decay
+                if cover_count[k] > 1:
+                    keep = keep * (1.0 - decay)
+                x = flat_xy[f0 + i, 0]
+                y = flat_xy[f0 + i, 1]
+                cd = 0.0
+                x0f = math.floor(x)
+                y0f = math.floor(y)
+                x0 = int(x0f)
+                y0 = int(y0f)
+                inside = x0 >= 0 and y0 >= 0 and x0 + 1 < width and y0 + 1 < height
+                fx = x - x0f
+                fy = y - y0f
+                for c in range(3):
+                    if inside:
+                        r0 = y0 * width
+                        r1 = (y0 + 1) * width
+                        v = (
+                            (1.0 - fx) * (1.0 - fy) * rgb_flat[r0 + x0, c]
+                            + fx * (1.0 - fy) * rgb_flat[r0 + x0 + 1, c]
+                            + (1.0 - fx) * fy * rgb_flat[r1 + x0, c]
+                            + fx * fy * rgb_flat[r1 + x0 + 1, c]
+                        )
+                    else:
+                        v = 255.0
+                    cd += abs(v - flat_rgb[f0 + i, c])
+                cd = cd / 3.0
+                acc += keep * math.exp(-cd / colour_tau)
+                pap += _bilinear_nb(paper_flat, width, height, x, y, 1.0)
+            total += w_colour * (acc / n_own_f) - w_paper * (pap / n_own_f)
+        n_out = (n_line + n_flat) - n_in
+        if n_out:
+            total -= w_paper * n_out / max(n_line + n_flat, 1)
+    return total
+
+
 def _exclusive_sum(
     members: list[str],
     coords: dict[str, tuple[NDArray[np.float64], NDArray[np.float64]]],
@@ -747,6 +900,311 @@ def _exclusive_sum(
     explained: NDArray[np.bool_] | None,
 ) -> float:
     """The member loop of :func:`exclusive_total` (owner is written as members claim pixels)."""
+    if USE_COMPILED:
+        return _exclusive_sum_compiled(
+            members, coords, key_of, samples, cover_count, owner, dist_f, paper_f, rgb_f, tau, explained
+        )
+    return _exclusive_sum_numpy(
+        members, coords, key_of, samples, cover_count, owner, dist_f, paper_f, rgb_f, tau, explained
+    )
+
+
+#: Use the compiled member loop (`_exclusive_core`); False runs the reference numpy loop.
+USE_COMPILED = True
+
+_FLAT_FIELDS: list[tuple[int, NDArray[np.float64], NDArray[np.float64]]] = []
+
+
+def _flat_field(field: NDArray[np.float64]) -> NDArray[np.float64]:
+    """Contiguous flat view of a drawing field (cached by identity: the search reuses the same arrays)."""
+    for ident, ref, flat in _FLAT_FIELDS:
+        if ident == id(field) and ref is field:
+            return flat
+    flat = np.ascontiguousarray(field.reshape(field.shape[0] * field.shape[1], *field.shape[2:]), dtype=np.float64)
+    _FLAT_FIELDS.insert(0, (id(field), field, flat))
+    del _FLAT_FIELDS[8:]
+    return flat
+
+
+_EXPL_FLAT: list[tuple[NDArray[np.bool_], NDArray[np.bool_]]] = []
+
+
+def _expl_flat(expl: NDArray[np.bool_]) -> NDArray[np.bool_]:
+    for ref, flat in _EXPL_FLAT:
+        if ref is expl:
+            return flat
+    flat = np.ascontiguousarray(np.asarray(expl, dtype=np.bool_).reshape(-1))
+    _EXPL_FLAT.insert(0, (expl, flat))
+    del _EXPL_FLAT[4:]
+    return flat
+
+
+@numba.njit(cache=True, nogil=True)
+def _exclusive_full(  # pragma: no cover - compiled; equivalence tested against the numpy path
+    line_raw: Any,
+    flat_raw: Any,
+    flat_rgb: Any,
+    line_off: Any,
+    flat_off: Any,
+    mats: Any,
+    cover_count: Any,
+    owner: Any,
+    stamp: Any,
+    blocked_keys: Any,
+    dist_flat: Any,
+    paper_flat: Any,
+    rgb_flat: Any,
+    expl_flat: Any,
+    has_expl: bool,
+    width: int,
+    height: int,
+    tau: float,
+    decay: float,
+    w_line: float,
+    w_colour: float,
+    w_paper: float,
+    colour_tau: float,
+    stack_penalty: float,
+) -> float:
+    """:func:`exclusive_total` after the member order: warp, pixel keys, cover counts, member loop, reset."""
+    n_members = len(line_off) - 1
+    n_l = line_off[n_members]
+    n_f = flat_off[n_members]
+    line_xy = np.empty((n_l, 2), np.float64)
+    flat_xy = np.empty((n_f, 2), np.float64)
+    line_keys = np.empty(n_l, np.int64)
+    flat_keys = np.empty(n_f, np.int64)
+    for m in range(n_members):
+        a00, a01, a02 = mats[m, 0, 0], mats[m, 0, 1], mats[m, 0, 2]
+        a10, a11, a12 = mats[m, 1, 0], mats[m, 1, 1], mats[m, 1, 2]
+        for i in range(line_off[m], line_off[m + 1]):
+            x = line_raw[i, 0]
+            y = line_raw[i, 1]
+            line_xy[i, 0] = a00 * x + a01 * y + a02
+            line_xy[i, 1] = a10 * x + a11 * y + a12
+        for i in range(flat_off[m], flat_off[m + 1]):
+            x = flat_raw[i, 0]
+            y = flat_raw[i, 1]
+            flat_xy[i, 0] = a00 * x + a01 * y + a02
+            flat_xy[i, 1] = a10 * x + a11 * y + a12
+    for i in range(n_l):
+        xi = int(np.rint(line_xy[i, 0]))
+        yi = int(np.rint(line_xy[i, 1]))
+        line_keys[i] = yi * width + xi if (xi >= 0 and yi >= 0 and xi < width and yi < height) else -1
+    for i in range(n_f):
+        xi = int(np.rint(flat_xy[i, 0]))
+        yi = int(np.rint(flat_xy[i, 1]))
+        flat_keys[i] = yi * width + xi if (xi >= 0 and yi >= 0 and xi < width and yi < height) else -1
+    # cover count: each member's line set and flat set add one per distinct pixel (numpy fancy `+= 1` semantics)
+    for m in range(n_members):
+        sid = 2 * m + 1
+        for i in range(line_off[m], line_off[m + 1]):
+            k = line_keys[i]
+            if k >= 0 and stamp[k] != sid:
+                stamp[k] = sid
+                cover_count[k] += 1
+        sid = 2 * m + 2
+        for i in range(flat_off[m], flat_off[m + 1]):
+            k = flat_keys[i]
+            if k >= 0 and stamp[k] != sid:
+                stamp[k] = sid
+                cover_count[k] += 1
+    for i in range(len(blocked_keys)):
+        owner[blocked_keys[i]] = 1
+    total = _exclusive_core(
+        line_xy,
+        line_keys,
+        line_off,
+        flat_xy,
+        flat_keys,
+        flat_rgb,
+        flat_off,
+        cover_count,
+        owner,
+        dist_flat,
+        paper_flat,
+        rgb_flat,
+        expl_flat,
+        has_expl,
+        width,
+        height,
+        tau,
+        decay,
+        w_line,
+        w_colour,
+        w_paper,
+        colour_tau,
+        stack_penalty,
+    )
+    for i in range(n_l):
+        k = line_keys[i]
+        if k >= 0:
+            cover_count[k] = 0
+            owner[k] = 0
+            stamp[k] = 0
+    for i in range(n_f):
+        k = flat_keys[i]
+        if k >= 0:
+            cover_count[k] = 0
+            owner[k] = 0
+            stamp[k] = 0
+    for i in range(len(blocked_keys)):
+        owner[blocked_keys[i]] = 0
+    return total
+
+
+_STAMP: dict[int, NDArray[np.int32]] = {}
+_PACKED: list[tuple[int, tuple[str, ...], dict[str, PartSamples], tuple[NDArray[Any], ...]]] = []
+_NO_KEYS = np.zeros(0, np.int64)
+
+
+def _packed_samples(
+    samples: dict[str, PartSamples], members: list[str]
+) -> tuple[NDArray[Any], NDArray[Any], NDArray[Any], NDArray[Any], NDArray[Any]]:
+    """Members' samples concatenated once per (samples dict, member order); the search repeats both."""
+    key = tuple(members)
+    for ident, names, ref, packed in _PACKED:
+        if ident == id(samples) and ref is samples and names == key:
+            return packed  # type: ignore[return-value]
+    line = np.ascontiguousarray(np.concatenate([samples[m].line_xy.reshape(-1, 2) for m in members]), dtype=np.float64)
+    flat = np.ascontiguousarray(np.concatenate([samples[m].flat_xy.reshape(-1, 2) for m in members]), dtype=np.float64)
+    rgb = np.ascontiguousarray(np.concatenate([samples[m].flat_rgb.reshape(-1, 3) for m in members]), dtype=np.float64)
+    line_off = np.zeros(len(members) + 1, np.int64)
+    flat_off = np.zeros(len(members) + 1, np.int64)
+    for i, m in enumerate(members):
+        line_off[i + 1] = line_off[i] + len(samples[m].line_xy)
+        flat_off[i + 1] = flat_off[i] + len(samples[m].flat_xy)
+    packed = (line, flat, rgb, line_off, flat_off)
+    _PACKED.insert(0, (id(samples), key, samples, packed))
+    del _PACKED[64:]
+    return packed
+
+
+def _exclusive_total_compiled(
+    puppet: Puppet,
+    pose: Pose,
+    members: list[str],
+    samples: dict[str, PartSamples],
+    feat: DrawingFeatures,
+    tau: float,
+    blocked: NDArray[np.bool_] | None,
+    explained: NDArray[np.bool_] | None,
+) -> float:
+    if not members:
+        return 0.0
+    height, width = feat.line.shape
+    line, flat, rgb, line_off, flat_off = _packed_samples(samples, members)
+    mats = np.empty((len(members), 2, 3), np.float64)
+    for i, name in enumerate(members):
+        mats[i] = np.asarray(part_matrix3(puppet, pose, name)[:2], dtype=np.float64)
+    cover_count, owner = _scratch_buffers(height * width)
+    size = height * width
+    if size not in _STAMP:
+        _STAMP[size] = np.zeros(size, np.int32)
+    blocked_idx = _blocked_keys(blocked)
+    has_expl = explained is not None
+    expl = _expl_flat(explained) if explained is not None else np.zeros(1, np.bool_)
+    return float(
+        _exclusive_full(
+            line,
+            flat,
+            rgb,
+            line_off,
+            flat_off,
+            mats,
+            cover_count,
+            owner,
+            _STAMP[size],
+            blocked_idx if blocked_idx is not None else _NO_KEYS,
+            _flat_field(feat.dist_f),
+            _flat_field(feat.paper_f),
+            _flat_field(feat.rgb_f),
+            expl,
+            has_expl,
+            int(width),
+            int(height),
+            float(tau),
+            float(EXPLAIN_DECAY),
+            float(W_LINE),
+            float(W_COLOUR),
+            float(W_PAPER),
+            float(COLOUR_TAU),
+            float(STACK_PENALTY),
+        )
+    )
+
+
+def _exclusive_sum_compiled(
+    members: list[str],
+    coords: dict[str, tuple[NDArray[np.float64], NDArray[np.float64]]],
+    key_of: dict[str, tuple[NDArray[np.int64], NDArray[np.int64]]],
+    samples: dict[str, PartSamples],
+    cover_count: NDArray[np.int16],
+    owner: NDArray[np.int8],
+    dist_f: NDArray[np.float64],
+    paper_f: NDArray[np.float64],
+    rgb_f: NDArray[np.float64],
+    tau: float,
+    explained: NDArray[np.bool_] | None,
+) -> float:
+    height, width = dist_f.shape
+    if not members:
+        return 0.0
+    line_xy = np.concatenate([coords[m][0] for m in members]).reshape(-1, 2)
+    flat_xy = np.concatenate([coords[m][1] for m in members]).reshape(-1, 2)
+    line_keys = np.concatenate([key_of[m][0] for m in members]).astype(np.int64)
+    flat_keys = np.concatenate([key_of[m][1] for m in members]).astype(np.int64)
+    flat_rgb = np.concatenate([samples[m].flat_rgb.reshape(-1, 3) for m in members]).astype(np.float64)
+    line_off = np.zeros(len(members) + 1, np.int64)
+    flat_off = np.zeros(len(members) + 1, np.int64)
+    for i, m in enumerate(members):
+        line_off[i + 1] = line_off[i] + len(coords[m][0])
+        flat_off[i + 1] = flat_off[i] + len(coords[m][1])
+    has_expl = explained is not None
+    expl = _expl_flat(explained) if explained is not None else np.zeros(1, np.bool_)
+    return float(
+        _exclusive_core(
+            np.ascontiguousarray(line_xy, dtype=np.float64),
+            line_keys,
+            line_off,
+            np.ascontiguousarray(flat_xy, dtype=np.float64),
+            flat_keys,
+            flat_rgb,
+            flat_off,
+            cover_count,
+            owner,
+            _flat_field(dist_f),
+            _flat_field(paper_f),
+            _flat_field(rgb_f),
+            expl,
+            has_expl,
+            int(width),
+            int(height),
+            float(tau),
+            float(EXPLAIN_DECAY),
+            float(W_LINE),
+            float(W_COLOUR),
+            float(W_PAPER),
+            float(COLOUR_TAU),
+            float(STACK_PENALTY),
+        )
+    )
+
+
+def _exclusive_sum_numpy(
+    members: list[str],
+    coords: dict[str, tuple[NDArray[np.float64], NDArray[np.float64]]],
+    key_of: dict[str, tuple[NDArray[np.int64], NDArray[np.int64]]],
+    samples: dict[str, PartSamples],
+    cover_count: NDArray[np.int16],
+    owner: NDArray[np.int8],
+    dist_f: NDArray[np.float64],
+    paper_f: NDArray[np.float64],
+    rgb_f: NDArray[np.float64],
+    tau: float,
+    explained: NDArray[np.bool_] | None,
+) -> float:
+    """Reference numpy member loop (the compiled core follows it)."""
     total = 0.0
     for name in members:
         samp = samples[name]
@@ -1054,7 +1512,15 @@ def _greedy_beam(
     # blind: its own pixels barely change across the range, so the T-pose
     # downstream decides it. A wide first joint ranks on its own sweep.
     narrow = lim is not None and 0.0 <= float(lim[1]) - float(lim[0]) < PEAK_SEP_DEG
-    if first is not None and GREEDY_BEAM > 0 and narrow:
+    # The trap's signature is the plain run parking that joint at a limit (the children then compensate);
+    # a joint the plain run left inside its range was not decided by the T-pose downstream, so no beam.
+    at_limit = (
+        lim is not None
+        and first is not None
+        and min(abs(float(plain.get(first, 0.0)) - float(lim[0])), abs(float(plain.get(first, 0.0)) - float(lim[1])))
+        <= BEAM_LIMIT_DEG
+    )
+    if first is not None and GREEDY_BEAM > 0 and narrow and at_limit:
         cands = _sweep_cands(0.0, None, lim)[:GREEDY_BEAM]
         for a in cands:
             if abs(_ang_dist(float(a), float(plain.get(first, 0.0)))) < 1e-9:
@@ -2602,14 +3068,20 @@ def transition_from_poses(
         # frozen in both starts. The winner is picked below by feasible joint
         # total over three candidates (pull, fresh, pose_Y's own seating): a
         # folded candidate never wins over a feasible one.
-        fresh = fit_chain(
-            loaded.puppet,
-            start,
-            leaf,
-            np.asarray(rgb_y, dtype=np.uint8),
-            own,
-            feat_y,
-            frozen=frozen,
+        # With nothing frozen the from-scratch fit on Y repeats Y's own chain fit (the ``yside`` candidate below,
+        # same drawing, same search): it only adds a candidate when locked members change the search.
+        fresh = (
+            fit_chain(
+                loaded.puppet,
+                start,
+                leaf,
+                np.asarray(rgb_y, dtype=np.uint8),
+                own,
+                feat_y,
+                frozen=frozen,
+            )
+            if frozen or not TRANSITION_SKIP_REDUNDANT_FRESH
+            else None
         )
         tau_pick = _tau_for(loaded.puppet, base)
         blocked_pick = context_blocked(loaded.puppet, start, names[leaf], own, feat_y.line.shape)
@@ -2622,7 +3094,7 @@ def transition_from_poses(
         best, _ = _pick_chain_winner(
             loaded.puppet,
             names[leaf],
-            [pulled, fresh, yside],
+            [c for c in (pulled, fresh, yside) if c is not None],
             own,
             feat_y,
             tau_pick,
@@ -2792,6 +3264,25 @@ def write_transition_outputs(
     return doc
 
 
+def _rank_views_job(payload: dict[str, Any]) -> dict[str, Any]:
+    """Process-pool job: ``fit_pose``'s cheap root-only round over every view; the best two view names."""
+    set_dir = Path(str(payload["set_dir"]))
+    rgb = load_drawing(Path(str(payload["image"])))
+    feat = drawing_features(rgb)
+    root_scores: dict[str, float] = {}
+    for name in list(load_set(set_dir).views):
+        loaded = load_view(set_dir, name)
+        own = extract_part_samples(loaded.puppet, loaded.images)
+        dh, dw = feat.line.shape
+        root_pose = fit_root(loaded.puppet, Pose(view=name, canvas=[int(dw), int(dh)]), rgb, own, feat)
+        tau = _tau_for(loaded.puppet, root_pose)
+        mat = np.asarray(part_matrix3(loaded.puppet, root_pose, loaded.puppet.root)[:2], dtype=np.float64)
+        root_scores[name] = float(score_samples(own[loaded.puppet.root], mat, feat, tau, None))
+        del loaded, own
+    ranked = sorted(root_scores, key=lambda n: root_scores[n], reverse=True)[:2]
+    return {"image": str(payload["image"]), "ranked": ranked}
+
+
 def _fit_view_job(payload: dict[str, Any]) -> dict[str, Any]:
     """Process-pool job: fit one view to one drawing; plain data in and out."""
     loaded = load_view(Path(str(payload["set_dir"])), str(payload["view"]))
@@ -2850,11 +3341,53 @@ def carry_locked(pose_x: dict[str, Any], prev_doc: dict[str, Any]) -> dict[str, 
     return out
 
 
+#: Memory one fit worker needs (a loaded view plus the drawing fields), for the worker count.
+WORKER_MEMORY_BYTES = 700 * 1024 * 1024
+
+
+def _available_memory_bytes() -> int | None:
+    """Free physical memory, or None when the platform does not say (no extra dependency)."""
+    import os
+    import sys
+
+    if sys.platform == "win32":
+        import ctypes
+
+        class _MemStatus(ctypes.Structure):
+            _fields_ = [  # noqa: RUF012 - ctypes layout
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        stat = _MemStatus()
+        stat.dwLength = ctypes.sizeof(_MemStatus)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+            return int(stat.ullAvailPhys)
+        return None
+    try:
+        return int(os.sysconf("SC_AVPHYS_PAGES")) * int(os.sysconf("SC_PAGE_SIZE"))
+    except (ValueError, OSError, AttributeError):
+        return None
+
+
 def default_workers() -> int:
-    """Half the CPUs, at least one, at most four (one view is hundreds of MB)."""
+    """Fit workers for this machine: ``KARAGOZ_WORKERS`` if set, else every CPU but one, capped by free memory."""
     import os
 
-    return max(1, min(4, max(1, (os.cpu_count() or 2) // 2)))
+    env = os.environ.get("KARAGOZ_WORKERS", "").strip()
+    if env.isdigit() and int(env) > 0:
+        return int(env)
+    by_cpu = max(1, (os.cpu_count() or 2) - 1)
+    free = _available_memory_bytes()
+    by_mem = max(1, free // WORKER_MEMORY_BYTES) if free is not None else by_cpu
+    return int(max(1, min(by_cpu, by_mem)))
 
 
 def fit_chain_poses(
@@ -2874,14 +3407,19 @@ def fit_chain_poses(
     out = Path(out_dir)
     out.mkdir(parents=True, exist_ok=True)
     pset = load_set(base)
-    view_names = list(pset.views)
-    jobs: list[dict[str, Any]] = []
-    for img in images:
-        for view in view_names:
-            jobs.append({"set_dir": str(base), "view": view, "image": str(img)})
+    if not list(pset.views):
+        raise ValueError("the set has no views to fit")
+    unique = list(dict.fromkeys(str(img) for img in images))
     won: dict[str, dict[str, Any]] = {}
     n_workers = workers or default_workers()
     with ProcessPoolExecutor(max_workers=max(1, n_workers)) as pool:
+        # As ``fit_pose``: a cheap root-only round over every view, then full fits of the best two views only
+        # (fitting every view in full did 2.5x the work for the same winner).
+        ranked = {
+            str(got["image"]): list(got["ranked"])
+            for got in pool.map(_rank_views_job, [{"set_dir": str(base), "image": img} for img in unique])
+        }
+        jobs = [{"set_dir": str(base), "view": view, "image": img} for img in unique for view in ranked[img]]
         for got in pool.map(_fit_view_job, jobs):
             key = str(got["image"])
             if key not in won or float(got["total"]) > float(won[key]["total"]):
