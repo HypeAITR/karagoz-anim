@@ -1416,7 +1416,22 @@ def _mouth_fill(
                 cv2.dilate(np.asarray(mouth_arr, dtype=np.uint8), touch_k, iterations=reach),
                 dtype=np.bool_,
             )
-            cover_tone = _local_flat(rgb, tone_own, tone_near, touch_k) or owner_flat
+            # K-0r: the ring right at the mouth is the entering part's
+            # anti-aliased outline halo; the tone comes from the dome's
+            # surface a few line widths away and clear of any line.
+            dist_m = np.asarray(
+                cv2.distanceTransform(np.asarray(~mouth_arr, dtype=np.uint8), cv2.DIST_L2, 3), dtype=np.float64
+            )
+            clear = (
+                np.asarray(
+                    cv2.distanceTransform(np.asarray(~line_arr, dtype=np.uint8), cv2.DIST_L2, 3), dtype=np.float64
+                )
+                > line_width
+            )
+            far_ring = np.asarray(
+                tone_own & clear & (dist_m > line_width) & (dist_m <= 3.0 * line_width), dtype=np.bool_
+            )
+            cover_tone = _flat_colour(rgb, far_ring) or _local_flat(rgb, tone_own, tone_near, touch_k) or owner_flat
     tip_xy: list[float] | None = None
     if tip is not None and frame is not None:
         axis, _cross, centre, _half = frame
@@ -1530,6 +1545,555 @@ def _mirror_pair_verdict(own_left: NDArray[np.bool_], own_right: NDArray[np.bool
         _tube_frame(np.asarray(own_left, dtype=np.bool_)) is not None
         and _tube_frame(np.asarray(own_right, dtype=np.bool_)) is not None
     )
+
+
+# A cover sitting sideways to a tube (a collar under a lid) leaves the
+# tube-axis strip pointing the wrong way: the strip runs along the tube
+# while the cover hides the region across it, so a turning cover reveals
+# paper there and the tube's own cut rim shows. Covers within this cosine
+# of the tube axis are end-on (the axis strip already reaches them).
+SIDE_COVER_COS = 0.7
+# A transverse run with more than this fraction of its length standing over
+# the part's own drawn body is a tip or a detail, never a partition cut.
+CUT_KEEP_FRAC = 0.2
+
+
+def _cover_strips(
+    rgb: NDArray[np.uint8],
+    line: NDArray[np.bool_],
+    out_masks: dict[str, NDArray[np.bool_]],
+    drawn: dict[str, NDArray[np.bool_]],
+    canvas: NDArray[np.uint8],
+    rgba: NDArray[np.uint8],
+    conts: dict[str, NDArray[np.bool_]],
+    name: str,
+    covers: list[str],
+    reach: int,
+    grown_zone: NDArray[np.bool_],
+    line_width: float,
+    methods: dict[str, list[str]],
+    notes: dict[str, str],
+) -> None:
+    """Continue a tube toward a sideways cover; heal the cut rim (K-0q).
+
+    General, no part names: for each covering part sitting sideways to this
+    tube part, grow a flat strip (no outline) from the tube's cover-side end
+    toward the cover, up to the joint reach, clipped to the cover and the
+    grown zone, keeping only components that touch the part. The cover draws
+    the boundary at rest (every added pixel hides under it), rotation
+    reveals tube flat instead of paper. Then straight ink runs crossing the
+    strip sideways at the tube's drawn end are partition cuts where the part
+    was sliced from its cover: they heal to flat. Runs with body past them
+    (tips, details) and lengthwise walls are kept. Non-tubes keep the hull
+    behaviour (a torso must never follow an arm: the K-0j lesson), and
+    end-on covers keep the axis strip (limbs are byte-identical). The
+    whisker pass runs for every cover: thin transverse ink leaving the
+    body slab past its sides, strictly inside the cover near the
+    cover-side end, is a piece of the cover's own contour captured at
+    split and is removed (transparent), while walls, tips and free
+    details stay.
+    """
+    height, width = rgb.shape[:2]
+    line_arr = np.asarray(line, dtype=np.bool_)
+    drawn_body = np.asarray(np.asarray(drawn[name], dtype=np.bool_) & ~line_arr, dtype=np.bool_)
+    if not bool(drawn_body.any()):
+        return
+    frame = _tube_frame(drawn_body)
+    if frame is None:
+        return
+    tube_axis = np.asarray(frame[0], dtype=np.float64)
+    bys, bxs = np.nonzero(drawn_body)
+    bpts = np.stack([bxs.astype(np.float64), bys.astype(np.float64)], axis=1)
+    centre = bpts.mean(axis=0)
+    mask_now = np.asarray(out_masks[name], dtype=np.bool_)
+    for cover in covers:
+        cover_mask = np.asarray(out_masks[cover], dtype=np.bool_)
+        joint = np.asarray(mask_now & cover_mask, dtype=np.bool_)
+        if not bool(joint.any()):
+            continue
+        # Aimed at the joint itself (the overlap), never at the cover's
+        # far side: an asymmetric cover would tilt the frame and make a
+        # straight whisker read thick.
+        jys, jxs = np.nonzero(joint)
+        to_cover = np.array([float(jxs.mean()) - centre[0], float(jys.mean()) - centre[1]])
+        if float(np.hypot(to_cover[0], to_cover[1])) < 1e-9:
+            continue
+        direction = to_cover / float(np.hypot(to_cover[0], to_cover[1]))
+        # K-0r: snap the frame to the tube's own axes. The overlap's centroid
+        # leans with a slanted cover edge (a 3/4 chin: 17 degrees on the
+        # robot), which tilts a straight whisker or cut rim out of the
+        # window; the tube's own axis or cross direction does not lean.
+        tube_cross = np.array([-tube_axis[1], tube_axis[0]], dtype=np.float64)
+        if abs(float(direction @ tube_axis)) > SIDE_COVER_COS:
+            direction = tube_axis * (1.0 if float(direction @ tube_axis) > 0 else -1.0)
+        else:
+            direction = tube_cross * (1.0 if float(direction @ tube_cross) > 0 else -1.0)
+        across_vec = np.array([-direction[1], direction[0]], dtype=np.float64)
+        rel = bpts - centre[None, :]
+        half = float(np.percentile(np.abs(rel @ across_vec), 90)) + line_width
+        end = float((rel @ direction).max())
+        lo = float((rel @ direction).min())
+        yy, xx = np.mgrid[0:height, 0:width].astype(np.float64)
+        along = (xx - centre[0]) * direction[0] + (yy - centre[1]) * direction[1]
+        across = np.abs((xx - centre[0]) * across_vec[0] + (yy - centre[1]) * across_vec[1])
+        edge = float(np.percentile(np.abs(rel @ across_vec), 90)) + line_width / 2.0
+        wthin = max(2.0, 1.5 * line_width + 1.0)
+        wspan = max(1.5 * line_width, 6.0)
+        work = np.asarray(canvas)
+        dark_now = np.asarray(mask_now & (work[..., :3].max(axis=2) < 40), dtype=np.bool_)
+        win_w = np.asarray((along >= end - 2.0 * line_width) & (along <= end + reach), dtype=np.bool_)
+        pins = np.asarray(win_w & (across > edge) & cover_mask & dark_now, dtype=np.bool_)
+        if bool(pins.any()):
+            _pn, plab_any = cv2.connectedComponents(pins.astype(np.uint8), connectivity=8)
+            plab = np.asarray(plab_any, dtype=np.int32)
+            whisked = 0
+            for pid in range(1, int(plab.max()) + 1):
+                cells = plab == pid
+                ring = np.asarray(cv2.dilate(cells.astype(np.uint8), np.ones((3, 3), np.uint8)), dtype=np.uint8) > 0
+                if int((ring & dark_now & ~cells).sum()) < 3:
+                    continue
+                cys, cxs = np.nonzero(cells)
+                ac = (cxs - centre[0]) * across_vec[0] + (cys - centre[1]) * across_vec[1]
+                al = (cxs - centre[0]) * direction[0] + (cys - centre[1]) * direction[1]
+                srt = np.argsort(ac, kind="stable")
+                bins = np.floor(ac[srt] + 0.5).astype(np.int64)
+                als = al[srt]
+                oxs, oys = cxs[srt], cys[srt]
+                ub = np.unique(bins)
+                ext = {}
+                for b in ub:
+                    e = als[bins == b]
+                    ext[b] = float(e.max() - e.min())
+                # A wall column inside the component reads thick: it ends
+                # the segment but must not veto the thin spur beside it.
+                groups: list[list[np.int64]] = []
+                for b in [bb for bb in ub if ext[bb] <= wthin]:
+                    if groups and b == groups[-1][-1] + 1:
+                        groups[-1].append(b)
+                    else:
+                        groups.append([b])
+                for g in groups:
+                    ga = np.asarray(g)
+                    sel = np.isin(bins, ga)
+                    if not bool(sel.any()):
+                        continue
+                    if float(als[sel].max() - als[sel].min()) > wthin:
+                        continue
+                    if float(ga.max() - ga.min() + 1) < wspan:
+                        continue
+                    target = np.zeros(mask_now.shape, np.bool_)
+                    target[oys[sel], oxs[sel]] = True
+                    mask_now &= ~target
+                    out_masks[name] = mask_now
+                    np.asarray(rgba)[..., 3][target] = 0
+                    conts[name] = np.asarray(np.asarray(conts[name], dtype=np.bool_) & ~target, dtype=np.bool_)
+                    whisked += int(target.sum())
+            if whisked:
+                note = f"whisker of {whisked} px past body removed under {cover} (transparent)"
+                notes[name] = f"{notes[name]}; {note}" if name in notes else note
+        if abs(float(direction @ tube_axis)) > SIDE_COVER_COS:
+            continue
+        band = np.asarray((along > end) & (along <= end + reach) & (across <= half), dtype=np.bool_)
+        strip = np.asarray(band & cover_mask & np.asarray(grown_zone, dtype=np.bool_) & ~mask_now, dtype=np.bool_)
+        if not bool(strip.any()):
+            continue
+        _sn, slab_any = cv2.connectedComponents(np.asarray(strip, dtype=np.uint8), connectivity=8)
+        slab = np.asarray(slab_any, dtype=np.int32)
+        touch = np.asarray(cv2.dilate(mask_now.astype(np.uint8), np.ones((3, 3), np.uint8)), dtype=np.uint8) > 0
+        keep = np.zeros(strip.shape, np.bool_)
+        for cid in range(1, int(slab.max()) + 1):
+            cells = slab == cid
+            if bool((cells & touch).any()):
+                keep |= cells
+        strip = np.asarray(keep, dtype=np.bool_)
+        if not bool(strip.any()):
+            continue
+        flat: tuple[int, int, int] | None = _band_flat(
+            rgb,
+            drawn_body,
+            line_arr,
+            direction,
+            across_vec,
+            centre,
+            half,
+            end,
+            lo,
+            line_width,
+        )
+        if flat is None:
+            flat = _local_flat(rgb, drawn_body, strip, np.ones((3, 3), np.uint8))
+        if flat is None:
+            flat = _flat_colour(rgb, drawn_body)
+        if flat is None:
+            continue
+        paint = np.asarray(canvas)
+        paint[strip] = flat
+        # In place: the loop's ``mask`` is the same array and the final
+        # canvas write keys on it, so rebinding here would strand pixels.
+        mask_now |= np.asarray(strip, dtype=np.bool_)
+        out_masks[name] = mask_now
+        conts[name] = np.asarray(np.asarray(conts[name], dtype=np.bool_) | strip, dtype=np.bool_)
+        if "geometric" not in methods.setdefault(name, []):
+            methods[name].append("geometric")
+        note = f"cover strip of {int(strip.sum())} px toward {cover} (flat, no rim)"
+        notes[name] = f"{notes[name]}; {note}" if name in notes else note
+        ink_now = np.asarray(mask_now & (paint[..., :3].max(axis=2) < 40), dtype=np.bool_)
+        healed = 0
+        for x0, y0, x1, y1 in _ink_runs(ink_now, line_width):
+            vec = np.array([x1 - x0, y1 - y0], dtype=np.float64)
+            ln = max(float(np.linalg.norm(vec)), 1e-9)
+            if abs(float(vec @ direction)) / ln >= 0.5:
+                continue
+            steps = max(int(round(ln)), 1)
+            run_pts = np.stack([np.linspace(x0, x1, steps + 1), np.linspace(y0, y1, steps + 1)], axis=1)
+            cells = np.clip(np.round(run_pts).astype(int), [0, 0], [width - 1, height - 1])
+            palong = (cells[:, 0] - centre[0]) * direction[0] + (cells[:, 1] - centre[1]) * direction[1]
+            pacross = np.abs((cells[:, 0] - centre[0]) * across_vec[0] + (cells[:, 1] - centre[1]) * across_vec[1])
+            if bool(((palong < end - 2.0 * line_width) | (palong > end + reach)).any()):
+                continue
+            if bool((pacross > half + line_width + 2.0).any()):
+                continue
+            past = np.clip(
+                np.round(cells + direction[None, :] * (2.0 * line_width)).astype(int),
+                [0, 0],
+                [width - 1, height - 1],
+            )
+            if float(np.asarray(drawn_body[past[:, 1], past[:, 0]], dtype=np.float64).mean()) > CUT_KEEP_FRAC:
+                continue
+            rad = max(1, int(round(line_width / 2.0)))
+            dot = np.zeros((height, width), np.uint8)
+            dot[cells[:, 1], cells[:, 0]] = 1
+            zone = (
+                np.asarray(
+                    cv2.dilate(dot, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * rad + 1, 2 * rad + 1))),
+                    dtype=np.uint8,
+                )
+                > 0
+            )
+            target = np.asarray(
+                zone
+                & mask_now
+                & cover_mask
+                & (along >= end - 2.0 * line_width)
+                & (along <= end + reach)
+                & (across <= half + line_width + 2.0),
+                dtype=np.bool_,
+            )
+            if not bool(target.any()):
+                continue
+            paint[target] = flat
+            healed += int(target.sum())
+        if healed:
+            note = f"cut rim of {healed} px healed under {cover} (flat)"
+            notes[name] = f"{notes[name]}; {note}" if name in notes else note
+
+
+def _clip_to_extrusion(
+    name: str,
+    covers: list[str],
+    own: NDArray[np.bool_],
+    drawn_mask: NDArray[np.bool_],
+    mask: NDArray[np.bool_],
+    canvas: NDArray[np.uint8],
+    rgba: NDArray[np.uint8],
+    out_masks: dict[str, NDArray[np.bool_]],
+    ink: tuple[int, int, int],
+    line_width: float,
+    notes: dict[str, str],
+) -> None:
+    """Keep a tube's pixels under each cover inside its own extruded body (K-0r).
+
+    General rule for a tube part (no names): under a covering part, the
+    tube owns only the continuation of its own body toward that cover.
+    An end-on cover (sitting along the tube axis, a cap over an arm end)
+    allows the slab between the tube's walls; a side cover (sitting across
+    the axis, a lid over a collar) allows the span between the tube's two
+    drawn ends. Pixels of the part that lie inside the cover but outside
+    that extrusion are shared contour pieces or completion slivers
+    (whiskers past a collar's sides, stubs and bumps past an arm's walls):
+    they become transparent. Removal happens only inside the cover, so the
+    rest pose (cover drawn on top) stays pixel-identical. An end-on
+    extension that the joint can reveal ends closed: rounded with the
+    tube's own outer half width and outlined with a line-width ink band
+    on its completed walls and end (drawn art is never repainted).
+    ``mask`` and ``canvas`` are edited in place; ``rgba`` loses alpha
+    where pixels are removed.
+    """
+    frame = _tube_frame(own)
+    if frame is None:
+        return
+    axis = np.asarray(frame[0], dtype=np.float64)
+    cross = np.asarray(frame[1], dtype=np.float64)
+    oys, oxs = np.nonzero(own)
+    centre = np.array([float(oxs.mean()), float(oys.mean())])
+    height, width = mask.shape
+    yy, xx = np.mgrid[0:height, 0:width].astype(np.float64)
+    along = (xx - centre[0]) * axis[0] + (yy - centre[1]) * axis[1]
+    across = (xx - centre[0]) * cross[0] + (yy - centre[1]) * cross[1]
+    drawn_arr = np.asarray(drawn_mask, dtype=np.bool_)
+    removed_total = 0
+    capped_total = 0
+    for cover in covers:
+        cover_mask = np.asarray(out_masks[cover], dtype=np.bool_)
+        joint = np.asarray(drawn_arr & cover_mask, dtype=np.bool_)
+        if not bool(joint.any()):
+            continue
+        jys, jxs = np.nonzero(joint)
+        to_cover = np.array([float(jxs.mean()) - centre[0], float(jys.mean()) - centre[1]])
+        norm = float(np.hypot(to_cover[0], to_cover[1]))
+        if norm < 1e-9:
+            continue
+        cos_axis = float((to_cover / norm) @ axis)
+        free = np.asarray(drawn_arr & ~cover_mask, dtype=np.bool_)
+        if int(free.sum()) < 32:
+            continue
+        fys, fxs = np.nonzero(free)
+        f_along = along[fys, fxs]
+        f_across = across[fys, fxs]
+        inside = np.asarray(mask & cover_mask, dtype=np.bool_)
+        if abs(cos_axis) > SIDE_COVER_COS:
+            side = 1.0 if cos_axis > 0 else -1.0
+            t_free = float((side * f_along).max())
+            near_end = side * f_along >= t_free - 4.0 * line_width
+            if int(near_end.sum()) < 8:
+                continue
+            h_out = float(np.percentile(np.abs(f_across[near_end]), 99))
+            cut = np.asarray(
+                inside & (np.abs(across) > h_out + 1.0) & (side * along >= t_free - 2.0 * line_width),
+                dtype=np.bool_,
+            )
+            # Rounded closed end of the extension beyond the visible end.
+            ext = np.asarray(inside & ~cut & (side * along > t_free), dtype=np.bool_)
+            if bool(ext.any()):
+                eys, exs = np.nonzero(ext)
+                tip = float((side * along[eys, exs]).max())
+                c_al = tip - h_out
+                beyond = side * along > c_al
+                outside_round = beyond & ((side * along - c_al) ** 2 + across**2 > h_out**2)
+                cut |= np.asarray(ext & outside_round, dtype=np.bool_)
+        else:
+            # The span comes from the body the cover leaves free, next to
+            # the cover (a knob lower down the side does not widen it):
+            # drawn pixels the cover shares are its contour, not the sides.
+            side = 1.0 if float(to_cover @ cross) > 0 else -1.0
+            top = float((side * f_across).max())
+            near_cover = side * f_across >= top - 1.5 * line_width
+            if int(near_cover.sum()) < 8:
+                continue
+            a_lo, a_hi = float(f_along[near_cover].min()), float(f_along[near_cover].max())
+            cut = np.asarray(inside & ((along < a_lo - 1.0) | (along > a_hi + 1.0)), dtype=np.bool_)
+            ext = np.zeros(mask.shape, np.bool_)
+        if bool(cut.any()):
+            mask &= ~cut
+            np.asarray(rgba)[..., 3][cut] = 0
+            removed_total += int(cut.sum())
+        if bool(ext.any()):
+            # Outline the completed part of the extension: walls and the
+            # rounded end, one line width deep, never over drawn pixels.
+            dist = np.asarray(cv2.distanceTransform(np.asarray(mask, dtype=np.uint8), cv2.DIST_L2, 3), dtype=np.float64)
+            band = np.asarray(ext & mask & ~drawn_arr & (dist <= line_width), dtype=np.bool_)
+            if bool(band.any()):
+                canvas[band] = ink
+                capped_total += int(band.sum())
+    if removed_total:
+        # A cut must not strand crumbs: small islands of the part left
+        # wholly inside its covers (cut from the body) go too.
+        cover_all = np.zeros(mask.shape, np.bool_)
+        for cover in covers:
+            cover_all |= np.asarray(out_masks[cover], dtype=np.bool_)
+        n_lab, lab_any, stats_any, _c = cv2.connectedComponentsWithStats(
+            np.asarray(mask, dtype=np.uint8), connectivity=8
+        )
+        lab = np.asarray(lab_any, dtype=np.int32)
+        stats = np.asarray(stats_any)
+        if n_lab > 2:
+            main = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
+            max_area = int((2.0 * line_width + 1.0) ** 2)
+            for cid in range(1, n_lab):
+                if cid == main or int(stats[cid, cv2.CC_STAT_AREA]) > max_area:
+                    continue
+                crumb = lab == cid
+                if bool((crumb & ~cover_all).any()):
+                    continue
+                mask &= ~crumb
+                np.asarray(rgba)[..., 3][crumb] = 0
+                removed_total += int(crumb.sum())
+        note = f"{removed_total} px outside own extrusion under cover removed (transparent)"
+        notes[name] = f"{notes[name]}; {note}" if name in notes else note
+    if capped_total:
+        note = f"closed end outline of {capped_total} px under cover"
+        notes[name] = f"{notes[name]}; {note}" if name in notes else note
+
+
+def _local_dome_circle(
+    edge: NDArray[np.bool_],
+    dist_mouth: NDArray[np.float64],
+    mouth: NDArray[np.bool_],
+    own_mask: NDArray[np.bool_],
+    lw: float,
+) -> tuple[NDArray[np.float64], float] | None:
+    """Dome edge through a cover's paper-side outline beside its mouth, or None.
+
+    Seeds are the cover's edge pixels a few line widths from the mouth on
+    both sides; two outlier-drop refits; the circle must fit tightly, be
+    wider than a few lines, have its centre inside the cover and have the
+    mouth on its rim side.
+    """
+    height, width = own_mask.shape
+    seed = np.asarray(edge & (dist_mouth > 1.5 * lw) & (dist_mouth <= 6.0 * lw), dtype=np.bool_)
+    ys, xs = np.nonzero(seed)
+    if len(xs) < 12:
+        return None
+    pts = np.stack([xs.astype(np.float64), ys.astype(np.float64)], axis=1)
+    fit = _kasa_circle(pts)
+    for _ in range(2):
+        if fit is None:
+            return None
+        cx, cy, rr, _rms = fit
+        resid = np.abs(np.hypot(pts[:, 0] - cx, pts[:, 1] - cy) - rr)
+        keep = resid <= max(1.5, lw / 2.0)
+        if int(keep.sum()) < 12:
+            return None
+        pts = pts[keep]
+        fit = _kasa_circle(pts)
+    if fit is None:
+        return None
+    cx, cy, r_out, rms = fit
+    if rms > max(1.5, 0.05 * r_out) or r_out < 3.0 * lw:
+        return None
+    icx, icy = int(round(cx)), int(round(cy))
+    if not (0 <= icx < width and 0 <= icy < height) or not bool(own_mask[icy, icx]):
+        return None
+    mys, mxs = np.nonzero(mouth)
+    if float(np.median(np.hypot(mxs - cx, mys - cy))) < 0.5 * r_out:
+        return None
+    yy, xx = np.mgrid[0:height, 0:width].astype(np.float64)
+    sd = np.asarray(np.hypot(xx - cx, yy - cy) - r_out, dtype=np.float64)
+    return sd, r_out
+
+
+def _finish_cap_mouth(
+    owner: str,
+    under: str,
+    mouth: NDArray[np.bool_],
+    rgb: NDArray[np.uint8],
+    line: NDArray[np.bool_],
+    out_masks: dict[str, NDArray[np.bool_]],
+    canvases: dict[str, NDArray[np.uint8]],
+    drawn: dict[str, NDArray[np.bool_]],
+    line_width: float,
+    seam_wins: dict[str, NDArray[np.bool_]],
+    notes: dict[str, str],
+    dome: bool = True,
+) -> None:
+    """Close a cover's side mouth as one clean dome (K-0r).
+
+    General rule (no names): where a lower part entered a dome-shaped cover
+    in the reference pose, the closed cover must read as the dome alone.
+    The dome's outline is fitted locally (a circle through the cover's own
+    paper-side outline on both sides of the mouth, outliers dropped), and
+    inside a window around the mouth the silhouette follows that circle:
+    pixels outside it go (stubs of the entering part's contour), a
+    line-width ink band runs along it, and inside it the surface takes the
+    dome's own tone sampled away from the mouth and from any line (the
+    entering part's anti-aliased outline halo would otherwise set a darker
+    patch). Halo pixels darker than that tone inside the window take the
+    tone too. Silent when the local outline is not a clean arc. Every
+    changed pixel joins the entering part's rest win, like the arc.
+    """
+    own_mask = np.asarray(out_masks[owner], dtype=np.bool_)
+    img = np.asarray(canvases[owner])
+    mouth_arr = np.asarray(mouth, dtype=np.bool_)
+    if not bool(mouth_arr.any()) or not bool(own_mask.any()):
+        return
+    height, width = own_mask.shape
+    lw = float(line_width)
+    k3 = np.ones((3, 3), np.uint8)
+    others = np.zeros((height, width), np.bool_)
+    for other, om in out_masks.items():
+        if other != owner:
+            others |= np.asarray(om, dtype=np.bool_)
+    outside = np.asarray(~own_mask & ~others, dtype=np.bool_)
+    edge = np.asarray(
+        own_mask & (np.asarray(cv2.dilate(outside.astype(np.uint8), k3), dtype=np.uint8) > 0), dtype=np.bool_
+    )
+    dist_mouth = np.asarray(
+        cv2.distanceTransform(np.asarray(~mouth_arr, dtype=np.uint8), cv2.DIST_L2, 3), dtype=np.float64
+    )
+    yy, xx = np.mgrid[0:height, 0:width].astype(np.float64)
+    circle = _local_dome_circle(edge, dist_mouth, mouth_arr, own_mask, lw) if dome else None
+    if circle is not None:
+        # Signed distance to the dome's outer edge (negative inside).
+        sd, r_out = circle
+    else:
+        # Surface only: the silhouette stays as built.
+        r_out = float("inf")
+        sd = np.full((height, width), -np.inf, np.float64)
+    line_arr = np.asarray(line, dtype=np.bool_)
+    near_line = (
+        np.asarray(cv2.distanceTransform(np.asarray(~line_arr, dtype=np.uint8), cv2.DIST_L2, 3), dtype=np.float64) <= lw
+    )
+    owner_drawn = np.asarray(drawn[owner], dtype=np.bool_)
+    under_drawn = np.asarray(drawn[under], dtype=np.bool_)
+    ring = np.asarray(
+        owner_drawn
+        & ~line_arr
+        & ~near_line
+        & ~under_drawn
+        & (dist_mouth > lw)
+        & (dist_mouth <= 3.0 * lw)
+        & (sd <= -lw),
+        dtype=np.bool_,
+    )
+    tone = _flat_colour(rgb, ring)
+    if tone is None:
+        return
+    ink = _line_colour(rgb, np.asarray(owner_drawn & line_arr, dtype=np.bool_))
+    zone = np.asarray(dist_mouth <= 3.0 * lw, dtype=np.bool_)
+    tone_arr = np.asarray(tone, dtype=np.float64)
+    pix = img[..., :3].astype(np.float64)
+    luma_w = np.array([0.299, 0.587, 0.114])
+    darker = (pix @ luma_w) < float(tone_arr @ luma_w) - 4.0
+    off_tone = np.abs(pix - tone_arr).max(axis=2) > BAND_COLOUR_TOL / 2.0
+    inside = sd <= -lw
+    band = (sd > -lw) & (sd <= 0.5)
+    cut = np.asarray(zone & own_mask & (sd > 0.5), dtype=np.bool_)
+    ink_px = np.asarray(zone & band & (own_mask | mouth_arr | (sd <= 0.0)), dtype=np.bool_)
+    if circle is None:
+        # Keep the built outline: never repaint ink, never grow.
+        inside = np.asarray(own_mask & (pix.max(axis=2) >= 40), dtype=np.bool_)
+    # The entering part's outline halo: cover pixels right beside the
+    # entering part's drawn pixels that are off the dome tone at all
+    # (anti-aliasing mixes the tube's grey and ink into the dome colour).
+    near_under = (
+        np.asarray(cv2.distanceTransform(np.asarray(~under_drawn, dtype=np.uint8), cv2.DIST_L2, 3), dtype=np.float64)
+        <= 1.5 * lw
+    )
+    halo = own_mask & near_under & (np.abs(pix - tone_arr).max(axis=2) > 6.0)
+    surface = np.asarray(
+        zone & inside & (~own_mask | mouth_arr | ~owner_drawn | (own_mask & darker & off_tone) | halo),
+        dtype=np.bool_,
+    )
+    changed = np.asarray(cut | ink_px | surface, dtype=np.bool_)
+    if not bool(changed.any()):
+        return
+    img[..., 3][cut] = 0
+    img[ink_px, :3] = ink
+    img[ink_px, 3] = 255
+    img[surface, :3] = tone
+    img[surface, 3] = 255
+    new_mask = np.asarray((own_mask & ~cut) | ink_px | surface, dtype=np.bool_)
+    out_masks[owner] = new_mask
+    prev = seam_wins.get(under)
+    seam_wins[under] = changed if prev is None else np.asarray(prev | changed, dtype=np.bool_)
+    if circle is not None:
+        note = (
+            f"cap mouth closed on local dome edge (r {r_out:.1f}): {int(surface.sum())} px tone, "
+            f"{int(ink_px.sum())} px outline, {int(cut.sum())} px stub removed"
+        )
+    else:
+        note = f"cover mouth surface healed: {int(surface.sum())} px tone"
+    notes[owner] = f"{notes[owner]}; {note}" if owner in notes else note
 
 
 def _continuation(
@@ -1752,6 +2316,24 @@ def complete_parts(
             if bool((cells & adjacent).any()):
                 comps.append(np.asarray(cells, dtype=np.bool_))
         if not comps and not seam_here:
+            # Whiskers need no hidden fill: still run the cover pass
+            # (strip/heal are rest-hidden either way).
+            _cover_strips(
+                rgb,
+                line,
+                out_masks,
+                drawn,
+                canvas,
+                canvases[name],
+                conts,
+                name,
+                covers,
+                reach,
+                grown_zone,
+                line_width,
+                methods,
+                notes,
+            )
             continue
         hidden = (
             np.asarray(np.logical_or.reduce(comps), dtype=np.bool_)
@@ -1809,6 +2391,22 @@ def complete_parts(
         else:
             if comps:
                 notes[name] = "no visible interior to copy; left as is"
+        _cover_strips(
+            rgb,
+            line,
+            out_masks,
+            drawn,
+            canvas,
+            canvases[name],
+            conts,
+            name,
+            covers,
+            reach,
+            grown_zone,
+            line_width,
+            methods,
+            notes,
+        )
         mouth_found = _dome_mouth(mask, out_masks, order, z_of, name, touch_k)
         if mouth_found is not None:
             mouth, under_name = mouth_found
@@ -1938,6 +2536,7 @@ def complete_parts(
     _drop_covered_runs(
         out_masks, canvases, methods, notes, dome_chord_list, dome_fronts, rgb, line, line_width, seam_wins
     )
+    arc_domes: set[tuple[str, str]] = set()
     for arc_owner, arc_under, arc_mouth in arc_jobs:
         # Spanning arc (review note 4): the dome's own outline continues
         # across its mouth on the owner's canvas, so rotation shows a
@@ -1992,6 +2591,63 @@ def complete_parts(
             methods[arc_owner].append("geometric")
         note = f"dome arc of {int(draw.sum())} px over {arc_under}"
         notes[arc_owner] = f"{notes[arc_owner]}; {note}" if arc_owner in notes else note
+        arc_domes.add((arc_owner, arc_under))
+    for arc_owner, arc_under, arc_mouth in arc_jobs:
+        # Only a mouth the arc rule accepted as a dome gets its silhouette
+        # redrawn; every other cover mouth (a cuff, a hip plate) keeps its
+        # outline and only has its surface healed.
+        _finish_cap_mouth(
+            arc_owner,
+            arc_under,
+            arc_mouth,
+            rgb,
+            line,
+            out_masks,
+            canvases,
+            drawn,
+            line_width,
+            seam_wins,
+            notes,
+            dome=(arc_owner, arc_under) in arc_domes,
+        )
+    # K-0r: every tube keeps, under each cover, only its own extruded body
+    # (and an end-on extension ends closed). Run last, on final masks, so no
+    # earlier step (tip detection, chords, mouths) sees a clipped part.
+    for name in order:
+        if config.by_name[name].hidden:
+            continue
+        part_mask = np.asarray(out_masks[name], dtype=np.bool_)
+        covers_now = [
+            other
+            for other in order
+            if z_of[other] > z_of[name]
+            and bool(
+                np.logical_and(
+                    np.asarray(cv2.dilate(out_masks[other].astype(np.uint8), touch_k), dtype=np.uint8) > 0,
+                    part_mask,
+                ).any()
+            )
+        ]
+        if not covers_now:
+            continue
+        own_split = np.asarray(np.asarray(drawn[name], dtype=np.bool_) & ~line, dtype=np.bool_)
+        if not bool(own_split.any()):
+            continue
+        part_rgba = canvases[name]
+        _clip_to_extrusion(
+            name,
+            covers_now,
+            own_split,
+            drawn[name],
+            part_mask,
+            part_rgba[..., :3],
+            part_rgba,
+            out_masks,
+            _line_colour(rgb, np.asarray(np.asarray(drawn[name], dtype=np.bool_) & line, dtype=np.bool_)),
+            line_width,
+            notes,
+        )
+        out_masks[name] = part_mask
     return CompletionResult(
         masks=out_masks,
         methods=methods,
