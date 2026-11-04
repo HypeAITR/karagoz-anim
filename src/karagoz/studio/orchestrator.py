@@ -1180,15 +1180,24 @@ class Studio:
         self._stop = False
         try:
             while True:
-                self.step()
+                changes = self.step()
                 if self._stop:
                     break
                 if not any(self._runnable(t) for t in self.board.ready()):
-                    break
+                    # step() plans new tasks only at its start: a task this step finished (the director writing
+                    # shots.yaml) may have made new ones, so a step that changed something gets one more step.
+                    if not changes:
+                        break
+                    if not self._plan_adds_tasks():
+                        break
         finally:
             self._until = None
             self._only = None
             self._stop = False
+
+    def _plan_adds_tasks(self) -> bool:
+        """True when the current files plan a task the board does not have yet."""
+        return any(task.id not in self.board.tasks for task in plan_tasks(self.prod, self.episode))
 
     def approve(self, task_id: str) -> None:
         self._record(self.board.approve(task_id, task_digest=self._task_digest))

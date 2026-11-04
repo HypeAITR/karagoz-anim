@@ -433,3 +433,16 @@ def test_raised_cap_in_studio_yaml_applies_to_a_saved_budget(prod: Path, skills:
     (prod / EP / "studio.yaml").write_text("version: 1\nhuman: off\nbudget: { unit_usd: 3.0, episode_usd: 9.0 }\n")
     s2 = studio(prod, skills, tmp_path, FakeAgent())
     assert (s2.budget.unit_cap_usd, s2.budget.episode_cap_usd) == (3.0, 9.0) and s2.budget.spent == spent
+
+
+def test_human_off_run_does_not_stop_after_the_director(prod: Path, skills: Path, tmp_path: Path) -> None:
+    """4 Nov demo run: with human off, one `run` goes past the director (its shots.yaml plans the shot tasks)."""
+    (prod / EP / "studio.yaml").write_text(
+        "version: 1\nhuman: off\nbudget: { unit_usd: 1.0, episode_usd: 10.0 }\n", encoding="utf-8"
+    )
+    agent = FakeAgent()
+    s = studio(prod, skills, tmp_path, agent, FakeCode())
+    s.run(until="layout")
+    st = states(s)
+    assert st["ep/director"] is State.DONE
+    assert "sh01/layout" in st and st["sh01/layout"] is not State.WAITING
