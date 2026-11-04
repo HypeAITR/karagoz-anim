@@ -184,3 +184,63 @@ def test_k0p_cover_close_uses_owner_fill_without_rim() -> None:
         wins = {name: np.asarray(w, dtype=np.bool_) for name, w in done.seam_wins.items()}
         rest = recompose(images, order, wins)
         assert np.array_equal(np.asarray(rest[mouth]), np.asarray(rgb[mouth]))
+
+def _overlap_scene() -> tuple:
+    """Entry scene with the tube wall overlapping the cap beside the slot."""
+    img = Image.new("RGB", (W, H), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    draw.rectangle([60, 20, 140, 80], fill=MAROON)
+    draw.rectangle([88, 50, 111, 95], fill=(255, 255, 255))
+    draw.rectangle([80, 60, 120, 140], fill=GREY)
+    draw.rectangle([148, 60, 164, 140], fill=GREY)
+    draw.rectangle([111, 81, 175, 130], fill=GREY)
+    draw.line([60, 20, 140, 20], fill=BLACK, width=2)
+    draw.line([60, 20, 60, 80], fill=BLACK, width=2)
+    draw.line([140, 20, 140, 80], fill=BLACK, width=2)
+    draw.line([60, 80, 87, 80], fill=BLACK, width=2)
+    draw.line([112, 80, 140, 80], fill=BLACK, width=2)
+    draw.line([88, 50, 88, 80], fill=BLACK, width=2)
+    draw.line([111, 50, 111, 80], fill=BLACK, width=2)
+    draw.line([80, 60, 80, 140], fill=BLACK, width=2)
+    draw.line([120, 60, 120, 140], fill=BLACK, width=2)
+    draw.rectangle([148, 60, 164, 140], outline=BLACK, width=2)
+    draw.rectangle([111, 81, 175, 130], outline=BLACK, width=2)
+    rgb = np.asarray(img, dtype=np.uint8)
+    ys, xs = np.mgrid[0:H, 0:W]
+    cap = (xs >= 60) & (xs <= 140) & (ys >= 20) & (ys <= 80)
+    slot = (xs >= 88) & (xs <= 111) & (ys >= 50) & (ys <= 95)
+    arm = (xs >= 80) & (xs <= 120) & (ys >= 60) & (ys <= 140)
+    twin = (xs >= 148) & (xs <= 164) & (ys >= 60) & (ys <= 140)
+    plate = (xs >= 111) & (xs <= 175) & (ys >= 81) & (ys <= 130)
+    masks = {
+        "plate": np.asarray(plate, dtype=np.bool_),
+        "arm_r": np.asarray(arm, dtype=np.bool_),
+        "arm_l": np.asarray(twin, dtype=np.bool_),
+        "cap": np.asarray(cap & ~slot, dtype=np.bool_),
+    }
+    return rgb, masks
+
+
+def test_k0p_entry_copy_cleared_to_owner_flat() -> None:
+    """Tube wall/edge copied into the cap beside the eye goes owner-flat."""
+    from karagoz.engine.puppet.build import recompose
+
+    rgb, masks = _overlap_scene()
+    line = rgb.astype(int).sum(axis=2) < 180
+    cfg = _cover_cfg()
+    order = ["plate", "arm_r", "arm_l", "cap"]
+    done = complete_parts(rgb, line, dict(masks), cfg, LW, image=None, max_image_calls=0)
+    cap_img = np.asarray(done.images["cap"])
+    strip_l = np.zeros((H, W), np.bool_)
+    strip_l[60:80, 80:88] = True
+    strip_r = np.zeros((H, W), np.bool_)
+    strip_r[60:80, 112:120] = True
+    strip = strip_l | strip_r
+    assert bool(strip.any())
+    assert bool((cap_img[..., :3][strip] == np.asarray(MAROON)).all())
+    win = np.asarray(done.seam_wins["arm_r"], dtype=np.bool_)
+    assert float(np.asarray(win & strip).sum()) / float(strip.sum()) > 0.95
+    images = {name: np.asarray(done.images[name], dtype=np.uint8) for name in order}
+    wins = {name: np.asarray(w, dtype=np.bool_) for name, w in done.seam_wins.items()}
+    rest = recompose(images, order, wins)
+    assert np.array_equal(np.asarray(rest[strip]), np.asarray(rgb[strip]))

@@ -1264,6 +1264,7 @@ def _mouth_fill(
     extra: NDArray[np.bool_] | None = None,
     win_out: list[NDArray[np.bool_]] | None = None,
     cover_close: bool = False,
+    under_canvas: NDArray[np.uint8] | None = None,
 ) -> tuple[int, str, list[float] | None]:
     """Paint one mouthful without covering drawn art; report paint and source.
 
@@ -1376,6 +1377,23 @@ def _mouth_fill(
         keep = np.asarray(keep | xfill, dtype=np.bool_)
     if cover_close and owner_flat is not None:
         keep = np.asarray(fill | xfill, dtype=np.bool_)
+        if win_out is not None and under_canvas is not None:
+            # Entry-side copies: the cover's canvas still shows the entering
+            # child's pixels (tube colour or outline partitioned into the
+            # cover beside the eye). The cover's surface takes them: exact
+            # coincidence only, so rest paint stays pixel-identical (the
+            # child draws the same pixels underneath via the win), paper is
+            # never touched, and the dome's own outline (not coincident
+            # with the child) survives.
+            under_arr = np.asarray(under_canvas)
+            same = np.all(np.asarray(canvas)[..., :3] == under_arr[..., :3], axis=2)
+            child_own = (under_arr[..., 3] > 127) & (under_arr[..., :3].min(axis=2) < 250)
+            strip = (
+                np.asarray(mask, dtype=np.bool_)
+                & np.asarray(same, dtype=np.bool_)
+                & np.asarray(child_own, dtype=np.bool_)
+            )
+            keep = np.asarray(keep | strip, dtype=np.bool_)
     tip_xy: list[float] | None = None
     if tip is not None and frame is not None:
         axis, _cross, centre, _half = frame
@@ -1629,6 +1647,7 @@ def complete_parts(
                     drawn,
                     line_width,
                     cover_close=cover_close,
+                    under_canvas=canvases[under_name],
                 )
                 if tip_xy is not None:
                     tips[under_name] = tip_xy
@@ -1660,6 +1679,7 @@ def complete_parts(
                         extra=extra,
                         win_out=tie_won,
                         cover_close=cover_close,
+                        under_canvas=canvases[under_name],
                     )
                     if tip_xy is not None:
                         tips[under_name] = tip_xy
@@ -1771,6 +1791,7 @@ def complete_parts(
                 drawn,
                 line_width,
                 cover_close=cover_close,
+                under_canvas=canvases[under_name],
             )
             if tip_xy is not None:
                 tips[under_name] = tip_xy
@@ -1804,6 +1825,7 @@ def complete_parts(
                     extra=extra,
                     win_out=tied_won,
                     cover_close=cover_close,
+                    under_canvas=canvases[under_name],
                 )
                 if tip_xy is not None:
                     tips[under_name] = tip_xy
