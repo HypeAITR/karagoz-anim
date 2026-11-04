@@ -501,9 +501,7 @@ def _seam_extensions(
             yy, xx = np.mgrid[0:height, 0:width]
             disk = (xx - cx) ** 2 + (yy - cy) ** 2 <= rr**2
             cand = np.asarray(
-                np.asarray(disk, dtype=np.bool_)
-                & np.asarray(out_masks[chord.other], dtype=np.bool_)
-                & ~mask,
+                np.asarray(disk, dtype=np.bool_) & np.asarray(out_masks[chord.other], dtype=np.bool_) & ~mask,
                 dtype=np.bool_,
             )
             if not bool(cand.any()):
@@ -704,7 +702,8 @@ def seam_fronts(
     edge_of = {
         name: np.asarray(
             np.asarray(mask, dtype=np.bool_)
-            & ~np.asarray(cv2.erode(np.asarray(mask, dtype=np.uint8), er_k), dtype=np.uint8) > 0,
+            & ~np.asarray(cv2.erode(np.asarray(mask, dtype=np.uint8), er_k), dtype=np.uint8)
+            > 0,
             dtype=np.bool_,
         )
         for name, mask in masks.items()
@@ -726,9 +725,7 @@ def seam_fronts(
             continue
         direction = vec / length
         plate_dist = np.asarray(
-            cv2.distanceTransform(
-                (~np.asarray(edge_of[chord.other], dtype=np.bool_)).astype(np.uint8), cv2.DIST_L2, 3
-            ),
+            cv2.distanceTransform((~np.asarray(edge_of[chord.other], dtype=np.bool_)).astype(np.uint8), cv2.DIST_L2, 3),
             dtype=np.float64,
         )
         mid = [e0 + direction * t for t in np.arange(0.2 * length, 0.8 * length + 1.0, 1.0)]
@@ -805,6 +802,156 @@ def _local_flat(
     """
     near = np.asarray(cv2.dilate(np.asarray(hcomp, dtype=np.uint8), grow_k), dtype=np.uint8) > 0
     return _flat_colour(rgb, np.asarray(near & own, dtype=np.bool_))
+
+
+MOTION_DEFAULT_DEG = 10.0
+
+
+def _motion_sweep_px(limits: list[float] | None, diag_px: float) -> float:
+    """Px a joint can reveal: |angle| times part size, default +-10 deg."""
+    lim = limits if limits else [-MOTION_DEFAULT_DEG, MOTION_DEFAULT_DEG]
+    return max(abs(float(lim[0])), abs(float(lim[1]))) * np.pi / 180.0 * diag_px
+
+
+def _motion_complete_part(
+    rgb: NDArray[np.uint8],
+    line: NDArray[np.bool_],
+    name: str,
+    out_masks: dict[str, NDArray[np.bool_]],
+    canvases: dict[str, NDArray[np.uint8]],
+    config: PuppetConfig,
+    z_of: dict[str, int],
+    order: list[str],
+    line_width: float,
+    touch_k: NDArray[np.uint8],
+    methods: dict[str, list[str]],
+    notes: dict[str, str],
+) -> None:
+    """Cover the joint motion reveal (note 5); runs after all mouth work."""
+    height, width = rgb.shape[:2]
+    mask = np.asarray(out_masks[name], dtype=np.bool_)
+    covers = [
+        other
+        for other in order
+        if z_of[other] > z_of[name]
+        and bool(
+            np.logical_and(
+                np.asarray(cv2.dilate(out_masks[other].astype(np.uint8), touch_k), dtype=np.uint8) > 0,
+                mask,
+            ).any()
+        )
+    ]
+    if not covers:
+        return
+    cover_union = np.zeros((height, width), np.bool_)
+    for other in covers:
+        cover_union |= np.asarray(out_masks[other], dtype=np.bool_)
+    overlap = np.asarray(mask & cover_union, dtype=np.bool_)
+    if not bool(overlap.any()):
+        return
+    sweep = line_width
+    for mover in [name, *covers]:
+        mover_mask = np.asarray(out_masks[mover], dtype=np.bool_)
+        if not bool(mover_mask.any()):
+            continue
+        mys, mxs = np.nonzero(mover_mask)
+        diag = float(np.hypot(float(mxs.max() - mxs.min() + 1), float(mys.max() - mys.min() + 1)))
+        lim = config.by_name[mover].limits if mover in config.by_name else None
+        sweep += _motion_sweep_px(lim, diag)
+    blank = (~overlap).astype(np.uint8)
+    reach_zone = np.asarray(cv2.distanceTransform(blank, cv2.DIST_L2, 3) <= sweep, dtype=np.bool_)
+    reveal = np.asarray(reach_zone & cover_union & ~mask, dtype=np.bool_)
+    adjacent = np.asarray(cv2.dilate(mask.astype(np.uint8), touch_k), dtype=np.uint8) > 0
+    _, rlab_any = cv2.connectedComponents(np.asarray(reveal, dtype=np.uint8), connectivity=8)
+    rlab = np.asarray(rlab_any, dtype=np.int32)
+    own = np.asarray(mask & ~line, dtype=np.bool_)
+    open_own = np.asarray(own & ~cover_union, dtype=np.bool_)
+    if not bool(open_own.any()):
+        open_own = own
+    canvas = np.asarray(canvases[name])
+    grown = 0
+    for rid in range(1, int(rlab.max()) + 1):
+        hcomp = np.asarray(rlab == rid, dtype=np.bool_)
+        if not bool((hcomp & adjacent).any()):
+            continue
+        flat = _local_flat(rgb, open_own, hcomp, touch_k) or _flat_colour(rgb, open_own)
+        if flat is None:
+            continue
+        canvas[hcomp, :3] = flat
+        canvas[hcomp, 3] = 255
+        out_masks[name] = np.asarray(mask | hcomp, dtype=np.bool_)
+        mask = np.asarray(out_masks[name], dtype=np.bool_)
+        grown += int(hcomp.sum())
+    if not grown:
+        return
+    if "geometric" not in methods[name]:
+        methods[name].append("geometric")
+    note = f"motion reveal of {grown} px under {','.join(sorted(covers))}"
+    notes[name] = f"{notes[name]}; {note}" if name in notes else note
+    frame = _tube_frame(own) if bool(own.any()) else None
+    if frame is None:
+        return
+    axis, cross, half_w = frame
+    ax = np.asarray(axis, dtype=np.float64)
+    an = float(np.hypot(ax[0], ax[1]))
+    if not an > 0.0:
+        return
+    ax = ax / an
+    # Cut ink sits under the cover where motion can uncover it: dark runs
+    # across the part (short along its axis, long across it). Walls run
+    # along the axis and stay.
+    cx = np.asarray(cross, dtype=np.float64)
+    cn = float(np.hypot(cx[0], cx[1]))
+    if not cn > 0.0:
+        return
+    cx = cx / cn
+    out_dist = np.asarray(
+        cv2.distanceTransform(cover_union.astype(np.uint8), cv2.DIST_L2, 3),
+        dtype=np.float64,
+    )
+    near_out = np.asarray(out_dist <= sweep, dtype=np.bool_)
+    dark_now = np.asarray(canvas[..., :3].max(axis=-1) < 40, dtype=np.bool_)
+    cand = np.asarray(mask & cover_union & dark_now & near_out, dtype=np.bool_)
+    if not bool(cand.any()):
+        return
+    # Keep ink that continues along the tube (walls); clear the cut.
+    max_short = int(2.0 * line_width + 2.0)
+    cys, cxs = np.nonzero(cand)
+    clear = np.zeros(cand.shape, np.bool_)
+    for qy, qx in zip(cys.tolist(), cxs.tolist(), strict=False):
+        run_a = 1
+        for sgn in (1.0, -1.0):
+            step = 1
+            while run_a <= max_short:
+                wy = int(round(qy + sgn * step * ax[1]))
+                wx = int(round(qx + sgn * step * ax[0]))
+                if wy < 0 or wx < 0 or wy >= height or wx >= width:
+                    break
+                if not bool(cand[wy, wx]):
+                    break
+                run_a += 1
+                step += 1
+        if run_a > max_short:
+            continue
+        run_c = 1
+        for sgn in (1.0, -1.0):
+            step = 1
+            while run_c <= max_short:
+                wy = int(round(qy + sgn * step * cx[1]))
+                wx = int(round(qx + sgn * step * cx[0]))
+                if wy < 0 or wx < 0 or wy >= height or wx >= width:
+                    break
+                if not bool(cand[wy, wx]):
+                    break
+                run_c += 1
+                step += 1
+        if run_c > max_short:
+            clear[qy, qx] = True
+    if bool(clear.any()):
+        near = np.asarray(cv2.dilate(clear.astype(np.uint8), touch_k), dtype=np.uint8) > 0
+        clear_flat = _local_flat(rgb, open_own, near, touch_k) or _flat_colour(rgb, open_own)
+        if clear_flat is not None:
+            canvas[clear, :3] = clear_flat
 
 
 def _line_colour(rgb: NDArray[np.uint8], lines: NDArray[np.bool_]) -> tuple[int, int, int]:
@@ -1754,9 +1901,7 @@ def complete_parts(
         if not comps and not seam_here:
             continue
         hidden = (
-            np.asarray(np.logical_or.reduce(comps), dtype=np.bool_)
-            if comps
-            else np.zeros((height, width), np.bool_)
+            np.asarray(np.logical_or.reduce(comps), dtype=np.bool_) if comps else np.zeros((height, width), np.bool_)
         )
         frame = _tube_frame(own) if bool(own.any()) else None
         axis: NDArray[np.float64] | None = None
@@ -1938,6 +2083,21 @@ def complete_parts(
     _drop_covered_runs(
         out_masks, canvases, methods, notes, dome_chord_list, dome_fronts, rgb, line, line_width, seam_wins
     )
+    for under_name in order:
+        _motion_complete_part(
+            rgb,
+            line,
+            under_name,
+            out_masks,
+            canvases,
+            config,
+            z_of,
+            order,
+            line_width,
+            touch_k,
+            methods,
+            notes,
+        )
     for arc_owner, arc_under, arc_mouth in arc_jobs:
         # Spanning arc (review note 4): the dome's own outline continues
         # across its mouth on the owner's canvas, so rotation shows a
