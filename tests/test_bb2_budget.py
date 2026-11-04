@@ -31,7 +31,7 @@ def test_failed_calls_charge_nothing(tmp_path: Path) -> None:
     def fail_500(url: str, body: dict[str, Any], headers: dict[str, str], timeout: float) -> Any:
         return 500, {"error": {"message": "boom"}}
 
-    failing = MetaClient(transport=fail_500, sleep=lambda s: None)
+    failing = MetaClient(api_key="k", transport=fail_500, sleep=lambda s: None)
     install_cost_hook(failing, budget, log, "sh01/draw")
     with pytest.raises(MetaApiError):
         failing.post("/images/generations", {"model": "muse-image-1.0", "n": 1}, "t")
@@ -40,7 +40,7 @@ def test_failed_calls_charge_nothing(tmp_path: Path) -> None:
     def down(url: str, body: dict[str, Any], headers: dict[str, str], timeout: float) -> Any:
         raise OSError("no route to host")
 
-    offline = MetaClient(transport=down, sleep=lambda s: None)
+    offline = MetaClient(api_key="k", transport=down, sleep=lambda s: None)
     install_cost_hook(offline, budget, log, "sh01/draw")
     with pytest.raises(MetaApiError):
         offline.post("/images/generations", {"model": "muse-image-1.0", "n": 1}, "t")
