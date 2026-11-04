@@ -827,7 +827,7 @@ def _greedy_from(
     pair_grid: bool = False,
     frozen: dict[str, float] | None = None,
     explained: NDArray[np.bool_] | None = None,
-) -> tuple[dict[str, float], float]:
+) -> tuple[dict[str, float], dict[str, list[float]], float]:
     """Forward greedy: each joint takes the angle that best serves its downstream.
 
     Candidates compete for unexplained pixels only (exclusive ownership): the
@@ -837,6 +837,11 @@ def _greedy_from(
     on a coarse 2D grid. ``frozen`` members keep their angle throughout (a
     transition pull freezing the locked members of a changed chain).
     ``explained`` decays agreement on pixels other parts already explain.
+    A slack joint in a from-scratch search ranks each angle with its own
+    disc-best offset (a hang needing its offset is invisible at any fixed
+    one); the winning offsets return alongside the angles so the caller
+    scores the winner as ranked. Narrow-window pulls keep the fixed-offset
+    ranking exactly.
     """
     stay = dict(frozen or {})
     best = dict(from_angles)
@@ -871,21 +876,68 @@ def _greedy_from(
                 if value > solo[0]:
                     solo = (value, a)
             best[name] = float(solo[1])
-    for name in chain:
+    off_now: dict[str, list[float]] = {
+        k: [float(v[0]), float(v[1])] for k, v in work.offset.items() if isinstance(v, (list, tuple)) and len(v) == 2
+    }
+    for j, name in enumerate(chain):
         if name in stay:
             continue
         cands = _sweep_cands(float(best.get(name, 0.0)), local_deg, _limits_of(puppet, name))
         target = float(center.get(name, 0.0))
+        base = dict(best)
+        if local_deg is None:
+            # From scratch the coarse downstream guesses are noise (a folded
+            # grid pick would poison every upstream ranking); rest is the
+            # restart basis, so condition on that instead. Pulls keep today.
+            for m in chain[j:]:
+                if m not in stay:
+                    base[m] = float(from_angles.get(m, 0.0))
+        part = puppet.parts.get(name)
+        slack = float(part.slack_px) if part is not None else 0.0
+        if slack > 0.0 and local_deg is None:
+            # Joint angle×offset ranking: a hang needing its offset is
+            # invisible at any fixed offset, so each angle competes with its
+            # own disc best. The disc holds (0, 0), so no angle ranks below
+            # today's fixed-offset value; the winning offset carries to the
+            # members below and back to the caller with the angles.
+            win_a, win_v = float(cands[0]), -math.inf
+            win_o = [0.0, 0.0]
+            for a in cands:
+                angled = work.model_copy(update={"angles": {**base, name: float(a)}})
+                for dx, dy in _offset_disc(slack, tau):
+                    value = _offset_value(
+                        puppet,
+                        _trial_offset(angled, name, dx, dy),
+                        chain,
+                        samples,
+                        feat,
+                        tau,
+                        center,
+                        blocked,
+                        explained,
+                    )
+                    if value > win_v:
+                        win_a, win_v, win_o = float(a), value, [float(dx), float(dy)]
+            best[name] = win_a
+            if win_o[0] * win_o[0] + win_o[1] * win_o[1] < 1e-18:
+                off_now.pop(name, None)
+            else:
+                off_now[name] = win_o
+            continue
         vals: list[float] = []
         for a in cands:
-            trial = work.model_copy(update={"angles": {**best, name: float(a)}})
+            trial = work.model_copy(update={"angles": {**base, name: float(a)}, "offset": dict(off_now)})
             vals.append(
                 exclusive_total(puppet, trial, chain, samples, feat, tau, blocked, explained)
                 - REST_PRIOR * abs(_ang_dist(float(a), target))
             )
         best[name] = float(cands[int(np.argmax(np.asarray(vals, dtype=np.float64)))])
-    trial = work.model_copy(update={"angles": dict(best)})
-    return best, chain_objective(puppet, trial, chain, samples, feat, tau, center, blocked, explained)
+    trial = work.model_copy(update={"angles": dict(best), "offset": dict(off_now)})
+    return (
+        best,
+        {m: list(v) for m, v in off_now.items()},
+        chain_objective(puppet, trial, chain, samples, feat, tau, center, blocked, explained),
+    )
 
 
 def _offset_disc(slack: float, tau: float) -> list[tuple[float, float]]:
@@ -1256,7 +1308,7 @@ def fit_chain(
             work.offset[m] = list(offsets_a[m])
         else:
             work.offset.pop(m, None)
-    greedy_a, _ = _greedy_from(
+    greedy_a, off_ga, _ = _greedy_from(
         puppet,
         work,
         chain,
@@ -1271,11 +1323,11 @@ def fit_chain(
         frozen=stay,
         explained=explained,
     )
-    trial_ga = work.model_copy(update={"angles": {**work.angles, **greedy_a}, "offset": dict(offsets_a)})
+    trial_ga = work.model_copy(update={"angles": {**work.angles, **greedy_a}, "offset": dict(off_ga)})
     feas_ga, _ = chain_feasible(puppet, trial_ga, chain, samples, feat.line.shape)
     value_ga = _offset_value(puppet, trial_ga, chain, samples, feat, tau, center, blocked, explained)
     if feas_ga and value_ga > best_total:
-        best_total, best_angles, best_offsets = value_ga, dict(greedy_a), dict(offsets_a)
+        best_total, best_angles, best_offsets = value_ga, dict(greedy_a), dict(off_ga)
     if offsets_b:
         # HB: the input-pose offsets refined at the B baseline, then the same
         # restart under them; the feasibility-gated value picks the hypothesis.
@@ -1294,7 +1346,7 @@ def fit_chain(
                 work.offset[m] = list(offsets_hb[m])
             else:
                 work.offset.pop(m, None)
-        greedy_b, _ = _greedy_from(
+        greedy_b, off_gb, _ = _greedy_from(
             puppet,
             work,
             chain,
@@ -1309,11 +1361,11 @@ def fit_chain(
             frozen=stay,
             explained=explained,
         )
-        trial_gb = work.model_copy(update={"angles": {**work.angles, **greedy_b}, "offset": dict(offsets_hb)})
+        trial_gb = work.model_copy(update={"angles": {**work.angles, **greedy_b}, "offset": dict(off_gb)})
         feas_gb, _ = chain_feasible(puppet, trial_gb, chain, samples, feat.line.shape)
         value_gb = _offset_value(puppet, trial_gb, chain, samples, feat, tau, center, blocked, explained)
         if feas_gb and value_gb > best_total:
-            best_total, best_angles, best_offsets = value_gb, dict(greedy_b), dict(offsets_hb)
+            best_total, best_angles, best_offsets = value_gb, dict(greedy_b), dict(off_gb)
     # Restore the winner into work for the descent below.
     for m in chain:
         work.angles[m] = float(best_angles[m])
