@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 import wave
 from dataclasses import dataclass
 from pathlib import Path
@@ -164,6 +165,7 @@ def encode(
     comment: str | None = None,
 ) -> Path:
     """Encode numbered PNG frames (+ optional audio) into a deterministic MP4."""
+    encode_start = time.time()
     glob = _pattern_to_glob(pattern)
     try:
         found = any(frames_dir.glob(glob))
@@ -252,6 +254,9 @@ def encode(
         str(out_mp4),
     ]
     _run(cmd, "encode")
+    from karagoz.studio.timing_log import record as _record_span
+
+    _record_span("encode", encode_start, time.time(), out=str(out_mp4))
     return out_mp4
 
 

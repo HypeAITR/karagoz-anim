@@ -95,10 +95,12 @@ A scene is a stack of layers, each with one behaviour managed by the engine: **h
 | `src/karagoz/studio/failures.py` | structured failures: every failure reaches the agent that caused it |
 | `src/karagoz/studio/loop.py` | orchestrator loop: one review per shot, keep/redraw/retake, at most three rounds |
 | `src/karagoz/studio/orchestrator.py` | studio orchestrator: task board, isolated working directories, carriers, budget, log |
+| `src/karagoz/studio/profile.py` | timing report: per-span totals, wall share, critical path, parallelism, slowest spans |
 | `src/karagoz/studio/puppet_route.py` | puppet in-between routing: key chains through the puppet fit, rig holds and frames |
 | `src/karagoz/studio/questions.py` | question allowance: every question logged by difficulty, department and topic |
 | `src/karagoz/studio/review.py` | checker agents: one whole movement per checker, in parallel, without the gate's flags |
 | `src/karagoz/studio/tasks.py` | task board and state machine for the studio (pure logic) |
+| `src/karagoz/studio/timing_log.py` | timing spans: where a run's time went, written step by step by the engine itself |
 
 ### meta — Meta Model API adapters
 

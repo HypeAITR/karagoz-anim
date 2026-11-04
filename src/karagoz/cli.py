@@ -795,6 +795,25 @@ def cmd_gate(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_profile(args: argparse.Namespace) -> int:
+    """Summarize where a run's time went, from its timing spans."""
+    from karagoz.studio.profile import write_profile
+
+    try:
+        events = Path(args.events)
+        out = Path(args.out) if args.out else None
+        json_path = out.parent / "profile.json" if out is not None else Path("profile.json")
+        table, _summary = write_profile(events, out, json_path)
+        if out is None:
+            print(table, end="")
+        else:
+            print(f"{out}\n{json_path}")
+    except Exception as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="karagoz", description=__doc__)
     parser.add_argument("--version", action="version", version=__version__)
@@ -1019,6 +1038,13 @@ def build_parser() -> argparse.ArgumentParser:
     context_p.add_argument("--remove", action="extend", nargs="+", default=None, metavar="ID", help="section to remove")
     context_p.add_argument("--reason", required=True, help="why the context changes")
     context_p.set_defaults(func=cmd_context)
+
+    profile_p = sub.add_parser("profile", help="summarize where a run's time went from its event log")
+    profile_p.add_argument("events", help="run/events.jsonl with timing spans")
+    profile_p.add_argument(
+        "--out", default=None, metavar="REPORT", help="Markdown report path (default: print to stdout)"
+    )
+    profile_p.set_defaults(func=cmd_profile)
     return parser
 
 

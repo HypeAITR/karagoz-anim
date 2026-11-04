@@ -22,6 +22,7 @@ from uuid import uuid4
 
 from karagoz.meta.client import MetaClient, data_url
 from karagoz.studio.carriers import PRICE_PER_MTOK, Brief, OnEvent, RunResult, Usage
+from karagoz.studio.timing_log import record
 
 API_MODEL = "muse-spark-1.3-contributor"
 
@@ -184,6 +185,7 @@ class ApiCarrier:
 
     def run(self, brief: Brief, on_event: OnEvent | None = None) -> RunResult:
         start = time.monotonic()
+        wall_start = time.time()
         model = brief.model or self.model
         if not model.endswith("-contributor"):
             return RunResult(ok=False, error=f"{model}: only Spark Contributor models are allowed")
@@ -358,6 +360,16 @@ class ApiCarrier:
                 continue
             ok = True
             break
+        record(
+            f"model:{brief.task_id.rpartition('/')[2]}",
+            wall_start,
+            time.time(),
+            task=brief.task_id,
+            model=model,
+            input_tokens=total_in,
+            output_tokens=total_out,
+            retries=max(0, len(calls) - 1),
+        )
         seconds = time.monotonic() - start
         cost_usd = round((total_in * PRICE_PER_MTOK["input"] + total_out * PRICE_PER_MTOK["output"]) / 1e6, 6)
         if on_event is not None:
