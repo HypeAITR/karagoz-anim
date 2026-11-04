@@ -2210,6 +2210,29 @@ def fit_chain(
     return work
 
 
+def _bbox_seed(
+    samples: dict[str, PartSamples], feat: DrawingFeatures, cx: float, cy: float
+) -> tuple[float, float, float] | None:
+    """Root scale and translation that put the puppet's rest box on the drawing's foreground box (by height)."""
+    pts = [np.asarray(s.flat_xy, dtype=np.float64) for s in samples.values() if len(s.flat_xy)]
+    pts += [np.asarray(s.line_xy, dtype=np.float64) for s in samples.values() if len(s.line_xy)]
+    if not pts:
+        return None
+    allp = np.concatenate(pts)
+    px0, py0 = allp.min(axis=0)
+    px1, py1 = allp.max(axis=0)
+    ys, xs = np.nonzero(np.asarray(~feat.paper, dtype=np.bool_))
+    if len(xs) == 0 or py1 - py0 < 1:
+        return None
+    dx0, dx1, dy0, dy1 = float(xs.min()), float(xs.max()), float(ys.min()), float(ys.max())
+    s = (dy1 - dy0) / float(py1 - py0)
+    if not np.isfinite(s) or s <= 0.2:
+        return None
+    pcx, pcy = (px0 + px1) / 2.0, (py0 + py1) / 2.0
+    dcx, dcy = (dx0 + dx1) / 2.0, (dy0 + dy1) / 2.0
+    return (float(s), float(dcx - (s * (pcx - cx) + cx)), float(dcy - (s * (pcy - cy) + cy)))
+
+
 def fit_root(
     puppet: Puppet,
     pose: Pose,
@@ -2254,13 +2277,24 @@ def fit_root(
     best = (float(scale0), 0.0, float(t0x), float(t0y))
     best_s = root_score(*best)
     grid: list[tuple[float, float, float, float, float]] = []
-    scales = [scale0 + k * 0.03 for k in range(-4, 5) if scale0 + k * 0.03 > 0.2]
+    # Seeds: the canvas ratio (a drawing framed like the reference), then the character's bounding box matched to
+    # the puppet's rest box (a drawing framed differently: a portrait key with the character filling the frame).
+    seeds: list[tuple[float, float, float]] = [(float(scale0), float(t0x), float(t0y))]
+    box_seed = _bbox_seed(samples, feat, cx, cy)
+    if box_seed is not None and abs(box_seed[0] - scale0) > 0.12 * scale0:
+        seeds.append(box_seed)
     params: list[tuple[float, float, float, float]] = []
-    for scale in scales:
-        for rot in (-10.0, -5.0, 0.0, 5.0, 10.0):
-            for tx in (t0x - span, t0x - span / 2, t0x, t0x + span / 2, t0x + span):
-                for ty in (t0y - span, t0y - span / 2, t0y, t0y + span / 2, t0y + span):
-                    params.append((float(scale), float(rot), float(tx), float(ty)))
+    for seed_s, seed_x, seed_y in seeds:
+        # The canvas seed keeps its absolute steps; the box seed steps by 4% of its own scale.
+        if (seed_s, seed_x, seed_y) == seeds[0]:
+            scales = [scale0 + k * 0.03 for k in range(-4, 5)]
+        else:
+            scales = [seed_s * (1.0 + 0.04 * k) for k in range(-4, 5)]
+        for scale in [sc for sc in scales if sc > 0.2]:
+            for rot in (-10.0, -5.0, 0.0, 5.0, 10.0):
+                for tx in (seed_x - span, seed_x - span / 2, seed_x, seed_x + span / 2, seed_x + span):
+                    for ty in (seed_y - span, seed_y - span / 2, seed_y, seed_y + span / 2, seed_y + span):
+                        params.append((float(scale), float(rot), float(tx), float(ty)))
     by_scale: dict[float, list[int]] = {}
     for i, (scale, _rot, _tx, _ty) in enumerate(params):
         by_scale.setdefault(scale, []).append(i)
