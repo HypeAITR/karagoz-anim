@@ -45,7 +45,7 @@ Four layers: studio agents, the coordinate engine, model adapters, and render. T
 - `karagoz answer` — answer a task's question
 - `karagoz done` — finish a human task
 - `karagoz mouth` — write mouth tracks from letter timings
-- `karagoz draw` — draw every asset a shot needs
+- `karagoz draw` — draw every asset a shot needs (`--no-puppet` draws every in-between with the image model; a character with a `puppet:` set in `characters.yaml` gets puppet in-betweens and holds)
 - `karagoz recut` — re-cut a shot's mouth/eye patches inside the face
 - `karagoz render` — render a shot or episode to MP4
 - `karagoz regress` — compare rendered frames with the golden ones; log time and cost

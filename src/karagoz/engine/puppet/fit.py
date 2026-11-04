@@ -2903,7 +2903,7 @@ def fit_chain_poses(
         del loaded
         del own
     intervals: list[dict[str, Any]] = []
-    for left, right in zip(images, images[1:], strict=True):
+    for left, right in zip(images, images[1:], strict=False):
         key = f"{Path(str(left)).stem}__{Path(str(right)).stem}"
         view = pose_views[str(left)] if pose_views[str(left)] == pose_views[str(right)] else pose_views[str(right)]
         intervals.append(

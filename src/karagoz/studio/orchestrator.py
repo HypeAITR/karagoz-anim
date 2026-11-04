@@ -661,7 +661,8 @@ def code_work(
             from karagoz.meta.client import MetaClient
             from karagoz.meta.image import MuseImage
             from karagoz.studio import claims as claims_module
-            from karagoz.studio.draw import link_location_background, plan_draw, retire_stale, run_draw
+            from karagoz.studio.draw import link_location_background, plan_draw, retire_stale
+            from karagoz.studio.puppet_route import draw_shot
 
             claims_thread: threading.Thread | None = None
             claims_holder: dict[str, Any] = {}
@@ -745,7 +746,7 @@ def code_work(
                         },
                     }
                 )
-            report = run_draw(jobs, draw_active, on_event=on_event)
+            report, _ = draw_shot(prod, episode, task.unit, jobs, draw_active, on_event=on_event)
             draw_image_cost = 0.0 if hooked_image else report.cost_usd
             if report.failed:
                 error = ", ".join(f"{path}: {message}" for path, message in report.failed)
