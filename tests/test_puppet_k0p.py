@@ -185,6 +185,7 @@ def test_k0p_cover_close_uses_owner_fill_without_rim() -> None:
         rest = recompose(images, order, wins)
         assert np.array_equal(np.asarray(rest[mouth]), np.asarray(rgb[mouth]))
 
+
 def _overlap_scene() -> tuple:
     """Entry scene with the tube wall overlapping the cap beside the slot."""
     img = Image.new("RGB", (W, H), (255, 255, 255))
@@ -316,7 +317,7 @@ def _arc_scene() -> tuple:
     draw.rectangle([111, 81, 175, 130], outline=BLACK, width=2)
     rgb = np.asarray(img, dtype=np.uint8)
     ys, xs = np.mgrid[0:H, 0:W]
-    disc = (xs - 100) ** 2 + (ys - 30) ** 2 <= 55 ** 2
+    disc = (xs - 100) ** 2 + (ys - 30) ** 2 <= 55**2
     slot = (xs >= 88) & (xs <= 111) & (ys >= 50) & (ys <= 95)
     arm = (xs >= 88) & (xs <= 110) & (ys >= 60) & (ys <= 140)
     twin = (xs >= 148) & (xs <= 164) & (ys >= 60) & (ys <= 140)
@@ -328,6 +329,7 @@ def _arc_scene() -> tuple:
         "cap": np.asarray(disc & ~slot, dtype=np.bool_),
     }
     return rgb, masks
+
 
 def _arc_cfg() -> PuppetConfig:
     return _cfg(

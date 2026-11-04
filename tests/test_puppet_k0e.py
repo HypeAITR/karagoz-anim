@@ -419,9 +419,7 @@ def test_occluded_dome_extends_under_cover() -> None:
             {**_one_part("cover", z=5), "parent": "dome", "seed": [[150, 80]]},
         ]
     )
-    done = complete_parts(
-        rgb, line, {"dome": dome, "cover": cover}, cfg, 3.0, image=None, max_image_calls=0
-    )
+    done = complete_parts(rgb, line, {"dome": dome, "cover": cover}, cfg, 3.0, image=None, max_image_calls=0)
     assert "geometric" in done.methods["dome"]
     assert "dome" in done.notes["dome"]
     grown = np.asarray(done.masks["dome"] & ~dome, dtype=np.bool_)
@@ -446,6 +444,8 @@ def test_swept_cut_counts_rotated_chord() -> None:
     still = swept_cut_px(masks, canvases, [], pivots, line, moving, 3.0)
     assert still["joint"]["+45"] == 0
     assert still["joint"]["-45"] == 0
+
+
 def test_coincident_curved_stroke_belongs_to_cover() -> None:
     """A shared-boundary stroke that never runs straight still belongs to the cover."""
     from karagoz.engine.puppet.complete import _coincident_run_ink

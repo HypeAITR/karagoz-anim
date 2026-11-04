@@ -28,7 +28,7 @@ from karagoz.spec import Align, Lines, Poses, Shots, Style, Xsheet, load
 from karagoz.studio.draw import DrawJob, DrawReport, MuseImageLike
 from karagoz.studio.timing_log import record, span
 
-ROUTE_VERSION = 2  # 2: root fit seeds from the character's box (portrait keys)
+ROUTE_VERSION = 3  # 2: root fit seeds from the character box (portrait keys); 3: view chosen by explained share
 
 
 @dataclass

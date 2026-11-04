@@ -501,9 +501,7 @@ def _seam_extensions(
             yy, xx = np.mgrid[0:height, 0:width]
             disk = (xx - cx) ** 2 + (yy - cy) ** 2 <= rr**2
             cand = np.asarray(
-                np.asarray(disk, dtype=np.bool_)
-                & np.asarray(out_masks[chord.other], dtype=np.bool_)
-                & ~mask,
+                np.asarray(disk, dtype=np.bool_) & np.asarray(out_masks[chord.other], dtype=np.bool_) & ~mask,
                 dtype=np.bool_,
             )
             if not bool(cand.any()):
@@ -704,7 +702,8 @@ def seam_fronts(
     edge_of = {
         name: np.asarray(
             np.asarray(mask, dtype=np.bool_)
-            & ~np.asarray(cv2.erode(np.asarray(mask, dtype=np.uint8), er_k), dtype=np.uint8) > 0,
+            & ~np.asarray(cv2.erode(np.asarray(mask, dtype=np.uint8), er_k), dtype=np.uint8)
+            > 0,
             dtype=np.bool_,
         )
         for name, mask in masks.items()
@@ -726,9 +725,7 @@ def seam_fronts(
             continue
         direction = vec / length
         plate_dist = np.asarray(
-            cv2.distanceTransform(
-                (~np.asarray(edge_of[chord.other], dtype=np.bool_)).astype(np.uint8), cv2.DIST_L2, 3
-            ),
+            cv2.distanceTransform((~np.asarray(edge_of[chord.other], dtype=np.bool_)).astype(np.uint8), cv2.DIST_L2, 3),
             dtype=np.float64,
         )
         mid = [e0 + direction * t for t in np.arange(0.2 * length, 0.8 * length + 1.0, 1.0)]
@@ -2336,9 +2333,7 @@ def complete_parts(
             )
             continue
         hidden = (
-            np.asarray(np.logical_or.reduce(comps), dtype=np.bool_)
-            if comps
-            else np.zeros((height, width), np.bool_)
+            np.asarray(np.logical_or.reduce(comps), dtype=np.bool_) if comps else np.zeros((height, width), np.bool_)
         )
         frame = _tube_frame(own) if bool(own.any()) else None
         axis: NDArray[np.float64] | None = None

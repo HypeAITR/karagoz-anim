@@ -245,9 +245,7 @@ def recompose(
     return canvas
 
 
-def sweep_radius(
-    pivot: tuple[float, float], masks: dict[str, NDArray[np.bool_]], line_width: float
-) -> float:
+def sweep_radius(pivot: tuple[float, float], masks: dict[str, NDArray[np.bool_]], line_width: float) -> float:
     """Swept radius of a moving subtree about a joint pivot (K-0e C1).
 
     The farthest rest pixel any moving part claims, plus a line-width

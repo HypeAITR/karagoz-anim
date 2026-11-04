@@ -90,6 +90,8 @@ GREEDY_BEAM = 3
 #: The beam runs when the plain greedy left the narrow first joint this close to a limit. 360 = always: limiting
 #: it to 1 deg lost the better arm on kollar_asagi_1 (+28% residual) and el_salla_2 (+19%), K-1 kabul 4 Nov.
 BEAM_LIMIT_DEG = 360.0
+#: Two fitted views whose unexplained shares differ by at most this are tied; the part-score total decides then.
+VIEW_SHARE_TIE = 0.002
 #: A key whose fit leaves more than this share of its drawing unexplained cannot be done by the puppet (``ret``).
 #: Measured 4 Nov: poses the puppet seats 0.3-0.9%; knee bends, foreshortened arms, lifted body 6.2-11.9%.
 FIT_RESIDUAL_MAX = 0.03
@@ -2704,6 +2706,7 @@ def fit_pose(
     ranked = sorted(root_scores, key=lambda n: root_scores[n], reverse=True)[:2]
     best_pose: Pose | None = None
     best_total = -math.inf
+    best_share = math.inf
     totals: dict[str, float] = {}
     kept: dict[str, LoadedView] = {}
     for name in ranked:
@@ -2711,13 +2714,28 @@ def fit_pose(
         own = samples_of[name]
         pose = fit_view_pose(loaded, rgb, own, feat)
         total = pose_total(pose)
+        share = residual_share(loaded, pose, rgb, feat)
         totals[name] = total
         kept[name] = loaded
-        if total > best_total:
+        if best_pose is None or view_beats(share, total, best_share, best_total):
             best_total = total
+            best_share = share
             best_pose = pose
     assert best_pose is not None
     return best_pose, kept, totals
+
+
+def view_beats(share: float, total: float, best_share: float, best_total: float) -> bool:
+    """Does a fully fitted view beat the best so far? The one explaining more of the drawing wins.
+
+    The part-score total is biased against views with hidden parts (a 3/4 view's far shoulder cap scores below
+    zero behind the torso), so a near-symmetric back view could out-total the right 3/4 view while explaining far
+    less of the drawing (4 Nov demo: 3q_right 2.0% unexplained vs back 6.8%, but back had the higher total).
+    The total only breaks ties in the explained share.
+    """
+    if abs(share - best_share) > VIEW_SHARE_TIE:
+        return share < best_share
+    return total > best_total
 
 
 def _font(px: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
@@ -3370,6 +3388,7 @@ def _fit_view_job(payload: dict[str, Any]) -> dict[str, Any]:
         "view": str(payload["view"]),
         "pose": pose.model_dump(mode="json"),
         "total": pose_total(pose),
+        "share": residual_share(loaded, pose, rgb),
     }
 
 
@@ -3499,7 +3518,9 @@ def fit_chain_poses(
         jobs = [{"set_dir": str(base), "view": view, "image": img} for img in unique for view in ranked[img]]
         for got in pool.map(_fit_view_job, jobs):
             key = str(got["image"])
-            if key not in won or float(got["total"]) > float(won[key]["total"]):
+            if key not in won or view_beats(
+                float(got["share"]), float(got["total"]), float(won[key]["share"]), float(won[key]["total"])
+            ):
                 won[key] = got
     poses: dict[str, Pose] = {}
     pose_views: dict[str, str] = {}
