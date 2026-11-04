@@ -194,6 +194,21 @@ def _check_characters_file(episode_dir: Path, shots: Shots | None, findings: lis
                     f"Character '{name}' natural_facing must be 'left' or 'right'.",
                 )
             )
+        puppet = entry.get("puppet")
+        if puppet is not None:
+            puppet_ok = isinstance(puppet, str) and bool(puppet) and (prod / puppet).is_dir()
+            if puppet_ok:
+                puppet_ok = ((prod / puppet) / "set.json").is_file()
+            if not puppet_ok:
+                findings.append(
+                    Finding(
+                        "error",
+                        "production.characters_invalid",
+                        rel,
+                        f"{base}.puppet",
+                        f"Character '{name}' puppet '{puppet}' must name a directory with a set.json.",
+                    )
+                )
         if "mirror_ok" in entry and not isinstance(entry["mirror_ok"], bool):
             findings.append(
                 Finding(

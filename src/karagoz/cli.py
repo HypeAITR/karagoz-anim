@@ -223,7 +223,8 @@ def cmd_mouth(args: argparse.Namespace) -> int:
 
 def cmd_draw(args: argparse.Namespace) -> int:
     try:
-        from karagoz.studio.draw import link_location_background, plan_draw, retire_stale, run_draw, sam_face_of
+        from karagoz.studio.draw import link_location_background, plan_draw, retire_stale, sam_face_of
+        from karagoz.studio.puppet_route import draw_shot
 
         if args.dry_run:
             jobs = plan_draw(Path(args.prod), args.episode, args.shot)
@@ -240,7 +241,18 @@ def cmd_draw(args: argparse.Namespace) -> int:
         link_location_background(Path(args.prod), args.episode, args.shot)
         jobs = plan_draw(Path(args.prod), args.episode, args.shot)
         retire_stale(jobs, Path(args.prod) / args.episode / "assets" / args.shot)
-        report = run_draw(jobs, MuseImage(MetaClient()), face_of=sam_face_of(Sam(MetaClient()), Path(args.prod)))
+        report, route = draw_shot(
+            Path(args.prod),
+            args.episode,
+            args.shot,
+            jobs,
+            MuseImage(MetaClient()),
+            face_of=sam_face_of(Sam(MetaClient()), Path(args.prod)),
+            use_puppet=not args.no_puppet,
+        )
+        for interval in route.intervals:
+            n_frames = len(interval.frames)
+            print(f"puppet {interval.character} {interval.a}->{interval.b}: {interval.decision}, {n_frames} frames")
         print(
             f"done {len(report.done)}, cached {len(report.cached)}, "
             f"failed {len(report.failed)}, calls {report.calls}, ~${report.cost_usd:.2f}"
@@ -844,6 +856,7 @@ def build_parser() -> argparse.ArgumentParser:
     draw.add_argument("episode", help="episode id")
     draw.add_argument("shot", help="shot id")
     draw.add_argument("--dry-run", dest="dry_run", action="store_true", help="list jobs without calling the model")
+    draw.add_argument("--no-puppet", dest="no_puppet", action="store_true", help="skip the puppet route")
     draw.set_defaults(func=cmd_draw)
 
     recut_p = sub.add_parser("recut", help="re-cut a shot's mouth/eye patches inside the face")

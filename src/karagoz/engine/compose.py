@@ -210,7 +210,9 @@ class ShotAssets:
         key = (character, drawing)
         if key in self._drawing_cache:
             return self._drawing_cache[key]
-        path = self.root / character / f"{drawing}.png"
+        path = self.root / character / f"{drawing}.puppet.png"
+        if not path.is_file():
+            path = self.root / character / f"{drawing}.png"
         if not path.is_file():
             self._drawing_cache[key] = None
             return None
