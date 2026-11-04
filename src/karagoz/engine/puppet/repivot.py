@@ -134,10 +134,16 @@ def repivot_view(view_dir: Path) -> dict[str, dict[str, Any]]:
             joints[limited]["limits"] = [float(lim[0]), float(lim[1])]
         if limited in puppet.parts:
             puppet.parts[limited].limits = [float(lim[0]), float(lim[1])]
-    # a child under a dome may slide by half the dome's radius (joint slack, K-1 fit)
+    # A child under a dome may slide by half the dome's radius (joint slack,
+    # K-1 fit), never by more than a fraction of the child's own size (K-0s):
+    # a spuriously large dome fit must not grant a matching slide. The
+    # fraction keeps every measured true-dome slack (largest ratio 0.558).
     for child in result.domes:
         if child in puppet.parts:
-            puppet.parts[child].slack_px = round(0.5 * float(result.radii[child]), 1)
+            dome_half = 0.5 * float(result.radii[child])
+            seen = np.asarray(finished.get(child, np.zeros(0, dtype=np.bool_)), dtype=np.bool_)
+            own_frac = 0.6 * float(np.sqrt(int(seen.sum()) / np.pi)) if int(seen.sum()) > 0 else dome_half
+            puppet.parts[child].slack_px = round(min(dome_half, own_frac), 1)
     changes: dict[str, dict[str, Any]] = {}
     for name, part in puppet.parts.items():
         if part.parent is None or part.hidden:

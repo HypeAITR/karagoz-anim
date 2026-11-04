@@ -87,30 +87,36 @@ parts:
   - name: leg_r
     parent: torso
     concepts: ["robot leg"]
+    limits: [-35.0, 35.0]
     seed: [[1070, 1300], [1070, 1350]]
     z: -1
   - name: boot_r
     parent: leg_r
     concepts: ["robot boot"]
+    limits: [-25.0, 25.0]
     seed: [1075, 1480]
     z: 2
   - name: foot_r
     parent: boot_r
     concepts: ["robot foot"]
+    limits: [-30.0, 30.0]
     seed: [[1060, 1590], [1060, 1640]]
     z: 3
   - name: leg_l
     parent: torso
     concepts: ["robot leg"]
+    limits: [-35.0, 35.0]
     seed: [[1330, 1320], [1330, 1370]]
     z: -1
   - name: boot_l
     parent: leg_l
     concepts: ["robot boot"]
+    limits: [-25.0, 25.0]
     seed: [1330, 1480]
     z: 2
   - name: foot_l
     parent: boot_l
     concepts: ["robot foot"]
+    limits: [-30.0, 30.0]
     seed: [[1345, 1590], [1345, 1640]]
     z: 3
