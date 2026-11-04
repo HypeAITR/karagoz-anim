@@ -87,8 +87,12 @@ SECOND_PASS = True
 # many candidates (K-0r: a joint decided against a T-pose limb parks at its
 # limit while the children compensate). 0 turns the beam off.
 GREEDY_BEAM = 3
-#: The beam runs only when the plain greedy left the narrow first joint this close to a limit (the trap).
-BEAM_LIMIT_DEG = 1.0
+#: The beam runs when the plain greedy left the narrow first joint this close to a limit. 360 = always: limiting
+#: it to 1 deg lost the better arm on kollar_asagi_1 (+28% residual) and el_salla_2 (+19%), K-1 kabul 4 Nov.
+BEAM_LIMIT_DEG = 360.0
+#: A key whose fit leaves more than this share of its drawing unexplained cannot be done by the puppet (``ret``).
+#: Measured 4 Nov: poses the puppet seats 0.3-0.9%; knee bends, foreshortened arms, lifted body 6.2-11.9%.
+FIT_RESIDUAL_MAX = 0.03
 #: Transitions skip the from-scratch chain refit on Y when no member is frozen (it repeats ``pose_Y``'s fit).
 TRANSITION_SKIP_REDUNDANT_FRESH = True
 
@@ -2710,6 +2714,20 @@ def explained_alpha(
     return np.asarray(rendered[..., 3] > 127, dtype=np.bool_)
 
 
+def residual_share(
+    loaded: LoadedView,
+    pose: Pose,
+    drawing: NDArray[np.uint8],
+    features: DrawingFeatures | None = None,
+) -> float:
+    """Share of the drawing's foreground the posed puppet leaves unexplained (``residual_mask`` / foreground)."""
+    feat = features if features is not None else drawing_features(np.asarray(drawing, dtype=np.uint8))
+    covered = explained_alpha(loaded.puppet, pose, loaded.images, feat.line.shape)
+    residual = residual_mask(feat, covered, float(loaded.puppet.line_width_px) * float(pose.scale))
+    foreground = int(np.asarray(~feat.paper, dtype=np.bool_).sum())
+    return float(int(residual.sum()) / max(foreground, 1))
+
+
 def residual_mask(
     feat: DrawingFeatures,
     covered: NDArray[np.bool_],
@@ -3069,7 +3087,8 @@ def transition_from_poses(
         # total over three candidates (pull, fresh, pose_Y's own seating): a
         # folded candidate never wins over a feasible one.
         # With nothing frozen the from-scratch fit on Y repeats Y's own chain fit (the ``yside`` candidate below,
-        # same drawing, same search): it only adds a candidate when locked members change the search.
+        # same drawing, same search): it only adds a candidate when locked members change the search, or when
+        # pose_Y carries no scores for the chain (a pose not made by the fit).
         fresh = (
             fit_chain(
                 loaded.puppet,
@@ -3080,7 +3099,9 @@ def transition_from_poses(
                 feat_y,
                 frozen=frozen,
             )
-            if frozen or not TRANSITION_SKIP_REDUNDANT_FRESH
+            if frozen
+            or not TRANSITION_SKIP_REDUNDANT_FRESH
+            or not all(m in pose_y.scores for m in names[leaf] if m in own and not loaded.puppet.parts[m].hidden)
             else None
         )
         tau_pick = _tau_for(loaded.puppet, base)
@@ -3150,6 +3171,28 @@ def transition_from_poses(
             reason=(
                 f"chain(s) cannot reach Y ({'; '.join(sorted(set(bad)))}): "
                 "needs a substitution drawing (K-3) or the drawn in-between path"
+            ),
+            scores=scores,
+            needs_human=needs_human(base, loaded.puppet),
+        )
+    # Fit quality: a key the puppet cannot represent (a knee bend, an arm foreshortened toward the viewer, a lean)
+    # leaves much of its drawing unexplained. Splitting the interval cannot help then: the in-betweens are drawn.
+    shares = {
+        "X": residual_share(loaded, pose_x, arr_x),
+        "Y": residual_share(loaded, base, arr_y, feat_y),
+    }
+    poor = {k: v for k, v in shares.items() if v > FIT_RESIDUAL_MAX}
+    if poor:
+        what = ", ".join(f"{k} {100.0 * v:.1f}%" for k, v in sorted(poor.items()))
+        return TransitionResult(
+            pose_x=pose_x,
+            pose_y=base,
+            locked=locked,
+            changed_chains=deltas,
+            decision="ret",
+            reason=(
+                f"the puppet cannot represent the drawing ({what} of the drawing unexplained, over "
+                f"{100.0 * FIT_RESIDUAL_MAX:.0f}%): the drawn in-between path"
             ),
             scores=scores,
             needs_human=needs_human(base, loaded.puppet),
