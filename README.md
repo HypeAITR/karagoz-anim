@@ -36,6 +36,14 @@ For the whole workflow (production layout, running the studio, the timing profil
 
 Four layers: studio agents, the coordinate engine, model adapters, and render. The studio agents (Director, Continuity, Layout, Timer, checkers, orchestrator) write small YAML/JSON files with names, never x/y coordinates. The coordinate engine turns those names into positions, scale, frames and face patches. Time comes from the audio's per-letter timestamps, never from guesses. The mechanical gate and the checker agents flag problems on contact sheets, and a human approves.
 
+## Not in the engine yet
+
+- **Effects.** There is no effect system yet: no particles, no animated background layers. A location's background
+  is one still drawing. The demo's moving starfield behind the cockpit window was written for that scene only, on a
+  separate branch (`wp/K-8`), and is not part of this code. A general effect layer is planned.
+- **Knees and foreshortening in puppets.** A puppet rotates its parts. Poses it cannot build (a crouch on a rig with
+  no knee, an arm pointing at the camera) are detected and drawn by the image model instead (see the `puppet` skill).
+
 ## Commands
 
 - `karagoz doctor` — check keys and tools (never prints secret values)
