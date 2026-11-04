@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from karagoz import config
+from karagoz.studio.timing_log import record
 
 MUSE_MODEL = "muse-spark-1.3-contributor"
 PRICE_PER_MTOK = {"input": 0.10, "output": 0.20}
@@ -97,6 +98,7 @@ class MuseExecCarrier:
 
     def run(self, brief: Brief, on_event: OnEvent | None = None) -> RunResult:
         start = self.clock()
+        wall_start = time.time()
         model = brief.model or self.model
         if not model.endswith("-contributor"):
             return RunResult(
@@ -169,6 +171,16 @@ class MuseExecCarrier:
 
         stderr_text: str = proc.stderr.read()
         code: int = proc.wait()
+        record(
+            f"model:{brief.task_id.rpartition('/')[2]}",
+            wall_start,
+            time.time(),
+            task=brief.task_id,
+            model=model,
+            input_tokens=usage.input_tokens,
+            output_tokens=usage.output_tokens,
+            retries=max(0, usage.calls - 1),
+        )
         seconds = self.clock() - start
 
         final_text = terminal_text if terminal_text is not None else "".join(deltas)

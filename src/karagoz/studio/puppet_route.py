@@ -26,6 +26,7 @@ from karagoz.engine.timing import resolve_episode
 from karagoz.engine.xsheet import expand
 from karagoz.spec import Align, Lines, Poses, Shots, Style, Xsheet, load
 from karagoz.studio.draw import DrawJob, DrawReport, MuseImageLike
+from karagoz.studio.timing_log import record, span
 
 ROUTE_VERSION = 1
 
@@ -359,6 +360,7 @@ def route_inbetweens(
                     if existing:
                         cached_end[b] = existing[-1]
                 cached_keep: set[Path] = set()
+                holds_wall_start = time.time()
                 for pose in chain:
                     src = cached_end.get(pose) or cached_start.get(pose)
                     if src is None or not src.is_file():
@@ -368,6 +370,13 @@ def route_inbetweens(
                     cached_keep.add(dst)
                     report.holds.append(dst)
                 report.holds = sorted(set(report.holds))
+                record(
+                    f"puppet:holds:{character}",
+                    holds_wall_start,
+                    time.time(),
+                    character=character,
+                    files=len(cached_keep),
+                )
                 _save_manifest(assets, manifest)
                 continue
             # The work dir is named by the chain key (set + key drawings + frame counts): a finished fit there is
@@ -377,7 +386,8 @@ def route_inbetweens(
             )
             try:
                 if not fitted:
-                    chain_fit(set_dir, key_pngs, work_dir, workers=workers)
+                    with span(f"puppet:fit:{character}", character=character, chain="-".join(chain)):
+                        chain_fit(set_dir, key_pngs, work_dir, workers=workers)
             except Exception as exc:
                 reason = str(exc)
                 for a, b, _ in per_interval:
@@ -435,10 +445,19 @@ def route_inbetweens(
                     if not target.is_file():
                         shutil.copyfile(assets / character / f"{pose}.png", target)
                 start = time.perf_counter()
+                render_wall_start = time.time()
                 result = render(
                     set_dir, tdoc, n_frames, work_dir / f"{a}__{b}" / "ib", hold_from_puppet=True, workers=workers
                 )
                 seconds = time.perf_counter() - start
+                record(
+                    f"puppet:render:{character}:{a}->{b}",
+                    render_wall_start,
+                    time.time(),
+                    character=character,
+                    frames=n_frames,
+                    ok=bool(result.ok),
+                )
                 by_k: dict[int, DrawJob] = {}
                 for job in matched:
                     parsed = _parse_inbetween_cell(job.drawing)
@@ -486,6 +505,7 @@ def route_inbetweens(
                         }
                     )
             keep: set[Path] = set()
+            holds_wall_start = time.time()
             for pose in chain:
                 src = end_map.get(pose) or start_map.get(pose)
                 if src is None or not Path(src).is_file():
@@ -495,6 +515,13 @@ def route_inbetweens(
                 keep.add(dst)
                 report.holds.append(dst)
             report.holds = sorted(set(report.holds))
+            record(
+                f"puppet:holds:{character}",
+                holds_wall_start,
+                time.time(),
+                character=character,
+                files=len(keep),
+            )
             _save_manifest(assets, manifest)
     _prune_holds(assets, set(report.holds))
     return report

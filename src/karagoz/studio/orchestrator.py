@@ -41,6 +41,7 @@ from karagoz.studio.context import (
 from karagoz.studio.events import Clock, EventLog
 from karagoz.studio.questions import QuestionPolicy, allowance, difficulty, parse_question
 from karagoz.studio.tasks import Board, Change, State, Task, TransitionError
+from karagoz.studio.timing_log import activate, record_wait, span
 
 if TYPE_CHECKING:
     from karagoz.engine.regions import SamLike
@@ -816,7 +817,8 @@ def code_work(
         if department == "render":
             from karagoz.engine.shot import render_shot
 
-            rendered = render_shot(prod, episode, task.unit)
+            with span(f"render:{task.unit}", task=task.id, shot=task.unit):
+                rendered = render_shot(prod, episode, task.unit)
             for warning in rendered.warnings:
                 if on_event is not None:
                     on_event({"payload_type": "code.note", "payload": {"text": warning}})
@@ -1288,6 +1290,7 @@ class Studio:
         changes.append(self.board.start(task.id, self._digest, task_digest=self._task_digest))
         task.input_files = file_digests(self.prod, task)
         self._record(changes[-1])
+        record_wait(self.log, task.id, department=task.department, attempt=task.attempts)
         try:
             workdir = self._prepare_workdir(task)
         except Exception as exc:  # noqa: BLE001 - a workdir-prep failure fails the task, not the studio
@@ -1302,9 +1305,21 @@ class Studio:
             model=self._models_map.get(task.department),
         )
         try:
-            result = carrier.run(brief, on_event=lambda obj: self._on_carrier_event(task.id, obj))
+            # Tasks may run on worker threads (a fresh context each): activate the run's log here.
+            with (
+                activate(self.log),
+                span(
+                    f"task:{task.id}",
+                    task=task.id,
+                    department=task.department,
+                    carrier=carrier_name,
+                    attempt=task.attempts,
+                ) as task_span,
+            ):
+                result = carrier.run(brief, on_event=lambda obj: self._on_carrier_event(task.id, obj))
         except Exception as exc:  # noqa: BLE001 - a carrier crash fails the task, not the studio
             result = RunResult(ok=False, error=f"{type(exc).__name__}: {exc}")
+        task_span.set(ok=result.ok)
         return self._complete_agent_run(task, workdir, result, changes, carrier)
 
     def _complete_agent_run(
@@ -1432,19 +1447,31 @@ class Studio:
             dst = self.prod / rel
             previous[rel] = dst.read_bytes() if dst.is_file() else None
         try:
-            result = self.code(
-                self.prod,
-                self.episode,
-                task,
-                on_event=lambda obj: self._on_carrier_event(task.id, obj),
-                work_root=self.work_root,
-                guide_dir=self._effective_guide_dir(),
-                skills_dir=self.skills_dir,
-                budget=self.budget,
-                event_log=self.log,
-            )
+            with (
+                activate(self.log),
+                span(
+                    f"task:{task.id}",
+                    task=task.id,
+                    department=task.department,
+                    carrier="code",
+                    attempt=task.attempts,
+                ) as code_span,
+            ):
+                record_wait(self.log, task.id, parent=None, department=task.department, attempt=task.attempts)
+                result = self.code(
+                    self.prod,
+                    self.episode,
+                    task,
+                    on_event=lambda obj: self._on_carrier_event(task.id, obj),
+                    work_root=self.work_root,
+                    guide_dir=self._effective_guide_dir(),
+                    skills_dir=self.skills_dir,
+                    budget=self.budget,
+                    event_log=self.log,
+                )
         except Exception as exc:  # noqa: BLE001 - a code crash fails the task, not the studio
             result = RunResult(ok=False, error=f"{type(exc).__name__}: {exc}")
+        code_span.set(ok=result.ok)
         self.log.append(task.id, "cost", usd=result.cost_usd, seconds=result.seconds, session=result.session_id)
         self.budget.charge(task.unit, result.cost_usd)
         if result.pending:

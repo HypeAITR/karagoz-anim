@@ -49,6 +49,7 @@ Four layers: studio agents, the coordinate engine, model adapters, and render. T
 - `karagoz recut` — re-cut a shot's mouth/eye patches inside the face
 - `karagoz render` — render a shot or episode to MP4
 - `karagoz regress` — compare rendered frames with the golden ones; log time and cost
+- `karagoz profile` — summarize where a run's time went, from its timing spans (Markdown table + `profile.json`)
 - `karagoz questions` — count the questions agents asked (department, difficulty, topic)
 - `karagoz regions` — build a location's region map from its background (SAM)
 - `karagoz landmarks` — measure the landmarks of every body drawing of a shot (SAM)
