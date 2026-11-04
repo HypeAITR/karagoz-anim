@@ -29,7 +29,6 @@ import numpy as np
 from numpy.typing import NDArray
 from PIL import Image, ImageDraw, ImageFont
 
-from karagoz.engine.puppet.limb_measure import detect_unchanged_chain_members
 from karagoz.engine.puppet.model import Puppet, load_set
 from karagoz.engine.puppet.parts import line_mask
 from karagoz.engine.puppet.pose import Pose, chains, part_matrix3, render_pose, tree_order, z_order
@@ -238,11 +237,14 @@ def _bilinear(
     ys = np.clip(y0, 0, height - 1)
     xn = np.minimum(xs + 1, width - 1)
     yn = np.minimum(ys + 1, height - 1)
+    flat = field.reshape(-1)  # one flat gather per corner: same values, cheaper than 2D fancy indexing
+    r0 = ys * width
+    r1 = yn * width
     val = (
-        (1.0 - fx) * (1.0 - fy) * field[ys, xs]
-        + fx * (1.0 - fy) * field[ys, xn]
-        + (1.0 - fx) * fy * field[yn, xs]
-        + fx * fy * field[yn, xn]
+        (1.0 - fx) * (1.0 - fy) * flat[r0 + xs]
+        + fx * (1.0 - fy) * flat[r0 + xn]
+        + (1.0 - fx) * fy * flat[r1 + xs]
+        + fx * fy * flat[r1 + xn]
     )
     return np.asarray(np.where(valid, val, outside), dtype=np.float64)
 
@@ -674,18 +676,73 @@ def exclusive_total(
         mat = np.asarray(part_matrix3(puppet, pose, name)[:2], dtype=np.float64)
         coords[name] = (_warp_points(samp.line_xy, mat), _warp_points(samp.flat_xy, mat))
     key_of: dict[str, tuple[NDArray[np.int64], NDArray[np.int64]]] = {}
-    cover_count = np.zeros(height * width, np.int16)
+    # Reused canvas buffers (all zero between calls): only the touched keys are
+    # written and reset, instead of allocating and filling two canvases per call.
+    cover_count, owner = _scratch_buffers(height * width)
+    touched: list[NDArray[np.int64]] = []
     for name in members:
         line_idx0 = _pixel_keys(coords[name][0], height, width)
         flat_idx0 = _pixel_keys(coords[name][1], height, width)
         key_of[name] = (line_idx0, flat_idx0)
         if int((line_idx0 >= 0).sum()):
             cover_count[line_idx0[line_idx0 >= 0]] += 1
+            touched.append(line_idx0[line_idx0 >= 0])
         if int((flat_idx0 >= 0).sum()):
             cover_count[flat_idx0[flat_idx0 >= 0]] += 1
-    owner = np.zeros(height * width, np.int8)
-    if blocked is not None:
-        owner[np.asarray(blocked, dtype=np.bool_)] = 1
+            touched.append(flat_idx0[flat_idx0 >= 0])
+    blocked_idx = _blocked_keys(blocked)
+    if blocked_idx is not None:
+        owner[blocked_idx] = 1
+    try:
+        return _exclusive_sum(
+            members, coords, key_of, samples, cover_count, owner, dist_f, paper_f, rgb_f, tau, explained
+        )
+    finally:
+        for keys in touched:
+            cover_count[keys] = 0
+            owner[keys] = 0
+        if blocked_idx is not None:
+            owner[blocked_idx] = 0
+
+
+_SCRATCH: dict[int, tuple[NDArray[np.int16], NDArray[np.int8]]] = {}
+_BLOCKED_CACHE: list[tuple[NDArray[np.bool_], NDArray[np.int64]]] = []
+
+
+def _scratch_buffers(size: int) -> tuple[NDArray[np.int16], NDArray[np.int8]]:
+    """Per-process zeroed ``cover_count`` / ``owner`` canvases, reused across calls."""
+    if size not in _SCRATCH:
+        _SCRATCH[size] = (np.zeros(size, np.int16), np.zeros(size, np.int8))
+    return _SCRATCH[size]
+
+
+def _blocked_keys(blocked: NDArray[np.bool_] | None) -> NDArray[np.int64] | None:
+    """Flat keys of a blocked mask; the search passes the same mask object many times."""
+    if blocked is None:
+        return None
+    for mask, keys in _BLOCKED_CACHE:
+        if mask is blocked:
+            return keys
+    keys = np.flatnonzero(np.asarray(blocked, dtype=np.bool_)).astype(np.int64)
+    _BLOCKED_CACHE.insert(0, (blocked, keys))
+    del _BLOCKED_CACHE[4:]
+    return keys
+
+
+def _exclusive_sum(
+    members: list[str],
+    coords: dict[str, tuple[NDArray[np.float64], NDArray[np.float64]]],
+    key_of: dict[str, tuple[NDArray[np.int64], NDArray[np.int64]]],
+    samples: dict[str, PartSamples],
+    cover_count: NDArray[np.int16],
+    owner: NDArray[np.int8],
+    dist_f: NDArray[np.float64],
+    paper_f: NDArray[np.float64],
+    rgb_f: NDArray[np.float64],
+    tau: float,
+    explained: NDArray[np.bool_] | None,
+) -> float:
+    """The member loop of :func:`exclusive_total` (owner is written as members claim pixels)."""
     total = 0.0
     for name in members:
         samp = samples[name]
@@ -2256,6 +2313,9 @@ def transition_from_poses(
     # Rule 2(b): Lock chain members whose limb did not change in the drawing
     # between X and Y (provided both poses seat the chain above SCORE_MIN and
     # no ancestor in the chain made a large rotation).
+    # Imported here: only transitions use the limb measures, so pose fits do not depend on that module.
+    from karagoz.engine.puppet.limb_measure import detect_unchanged_chain_members
+
     unchanged_draw = detect_unchanged_chain_members(loaded.puppet, loaded.images, pose_x, arr_x, pose_y, arr_y)
     tau_y0 = _tau_for(loaded.puppet, pose_y)
     for _leaf, members in names.items():
