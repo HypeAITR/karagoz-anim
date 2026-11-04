@@ -244,3 +244,116 @@ def test_k0p_entry_copy_cleared_to_owner_flat() -> None:
     wins = {name: np.asarray(w, dtype=np.bool_) for name, w in done.seam_wins.items()}
     rest = recompose(images, order, wins)
     assert np.array_equal(np.asarray(rest[strip]), np.asarray(rgb[strip]))
+
+
+SHADE = (95, 20, 70)
+
+
+def _shaded_arc_scene() -> tuple:
+    """Arc geometry with a shaded dome foot: mouth sits in the shade."""
+    img = Image.new("RGB", (W, H), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    draw.ellipse([45, -25, 155, 85], fill=MAROON)
+    draw.rectangle([45, 50, 155, 85], fill=SHADE)
+    draw.ellipse([45, -25, 155, 85], outline=BLACK, width=6)
+    draw.rectangle([88, 50, 111, 95], fill=(255, 255, 255))
+    draw.rectangle([88, 60, 110, 140], fill=GREY)
+    draw.rectangle([148, 60, 164, 140], fill=GREY)
+    draw.rectangle([111, 81, 175, 130], fill=GREY)
+    draw.line([88, 50, 88, 80], fill=BLACK, width=2)
+    draw.line([111, 50, 111, 80], fill=BLACK, width=2)
+    draw.line([88, 60, 88, 140], fill=BLACK, width=2)
+    draw.line([110, 60, 110, 140], fill=BLACK, width=2)
+    draw.rectangle([148, 60, 164, 140], outline=BLACK, width=2)
+    draw.rectangle([111, 81, 175, 130], outline=BLACK, width=2)
+    rgb = np.asarray(img, dtype=np.uint8)
+    ys, xs = np.mgrid[0:H, 0:W]
+    disc = (xs - 100) ** 2 + (ys - 30) ** 2 <= 55**2
+    slot = (xs >= 88) & (xs <= 111) & (ys >= 50) & (ys <= 95)
+    arm = (xs >= 88) & (xs <= 110) & (ys >= 60) & (ys <= 140)
+    twin = (xs >= 148) & (xs <= 164) & (ys >= 60) & (ys <= 140)
+    plate = (xs >= 111) & (xs <= 175) & (ys >= 81) & (ys <= 130)
+    masks = {
+        "plate": np.asarray(plate, dtype=np.bool_),
+        "arm_r": np.asarray(arm, dtype=np.bool_),
+        "arm_l": np.asarray(twin, dtype=np.bool_),
+        "cap": np.asarray(disc & ~slot, dtype=np.bool_),
+    }
+    return rgb, masks
+
+
+def test_k0p_cover_fill_takes_local_tone() -> None:
+    """A cover mouth in a shaded foot heals to the shade, not the part median."""
+    rgb, masks = _shaded_arc_scene()
+    line = rgb.astype(int).sum(axis=2) < 180
+    done = complete_parts(rgb, line, dict(masks), _arc_cfg(), 6.0, image=None, max_image_calls=0)
+    cap_img = np.asarray(done.images["cap"])
+    box = np.zeros((H, W), np.bool_)
+    box[66:78, 93:107] = True
+    opaque = cap_img[..., 3] > 127
+    flat = opaque & (cap_img[..., :3].max(axis=2) >= 40)
+    zone = np.asarray(box & flat, dtype=np.bool_)
+    assert int(zone.sum()) > 50
+    luma = cap_img[..., :3].astype(float) @ np.array([0.299, 0.587, 0.114])
+    assert float(np.median(luma[zone])) < 55.0
+
+
+def _arc_scene() -> tuple:
+    """Circular dome with a bottom slot and an entering tube (tiebreak)."""
+    img = Image.new("RGB", (W, H), (255, 255, 255))
+    draw = ImageDraw.Draw(img)
+    draw.ellipse([45, -25, 155, 85], fill=MAROON)
+    draw.ellipse([45, -25, 155, 85], outline=BLACK, width=2)
+    draw.rectangle([88, 50, 111, 95], fill=(255, 255, 255))
+    draw.rectangle([88, 60, 110, 140], fill=GREY)
+    draw.rectangle([148, 60, 164, 140], fill=GREY)
+    draw.rectangle([111, 81, 175, 130], fill=GREY)
+    draw.line([88, 50, 88, 80], fill=BLACK, width=2)
+    draw.line([111, 50, 111, 80], fill=BLACK, width=2)
+    draw.line([88, 60, 88, 140], fill=BLACK, width=2)
+    draw.line([110, 60, 110, 140], fill=BLACK, width=2)
+    draw.rectangle([148, 60, 164, 140], outline=BLACK, width=2)
+    draw.rectangle([111, 81, 175, 130], outline=BLACK, width=2)
+    rgb = np.asarray(img, dtype=np.uint8)
+    ys, xs = np.mgrid[0:H, 0:W]
+    disc = (xs - 100) ** 2 + (ys - 30) ** 2 <= 55 ** 2
+    slot = (xs >= 88) & (xs <= 111) & (ys >= 50) & (ys <= 95)
+    arm = (xs >= 88) & (xs <= 110) & (ys >= 60) & (ys <= 140)
+    twin = (xs >= 148) & (xs <= 164) & (ys >= 60) & (ys <= 140)
+    plate = (xs >= 111) & (xs <= 175) & (ys >= 81) & (ys <= 130)
+    masks = {
+        "plate": np.asarray(plate, dtype=np.bool_),
+        "arm_r": np.asarray(arm, dtype=np.bool_),
+        "arm_l": np.asarray(twin, dtype=np.bool_),
+        "cap": np.asarray(disc & ~slot, dtype=np.bool_),
+    }
+    return rgb, masks
+
+def _arc_cfg() -> PuppetConfig:
+    return _cfg(
+        [
+            {**_one_part("plate", z=0), "seed": [[150, 120]]},
+            {**_one_part("arm_r", z=2, parent="cap"), "seed": [[100, 120]]},
+            {**_one_part("arm_l", z=2, parent="plate"), "seed": [[158, 125]]},
+            {**_one_part("cap", z=5, parent="plate"), "seed": [[100, 40]]},
+        ]
+    )
+
+
+def test_k0p_dome_arc_spans_mouth() -> None:
+    """A cover mouth gets the dome's own outline drawn across it."""
+    from karagoz.engine.puppet.build import recompose
+
+    rgb, masks = _arc_scene()
+    line = rgb.astype(int).sum(axis=2) < 180
+    order = ["plate", "arm_r", "arm_l", "cap"]
+    done = complete_parts(rgb, line, dict(masks), _arc_cfg(), LW, image=None, max_image_calls=0)
+    cap_img = np.asarray(done.images["cap"])
+    span = np.zeros((H, W), np.bool_)
+    span[70:100, 88:111] = True
+    dark = (cap_img[..., 3] > 127) & (cap_img[..., :3].max(axis=2) < 40)
+    assert int(np.asarray(dark & span).sum()) > 30
+    images = {name: np.asarray(done.images[name], dtype=np.uint8) for name in order}
+    wins = {name: np.asarray(w, dtype=np.bool_) for name, w in done.seam_wins.items()}
+    rest = recompose(images, order, wins)
+    assert np.array_equal(np.asarray(rest[span]), np.asarray(rgb[span]))

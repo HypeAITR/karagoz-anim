@@ -1265,6 +1265,8 @@ def _mouth_fill(
     win_out: list[NDArray[np.bool_]] | None = None,
     cover_close: bool = False,
     under_canvas: NDArray[np.uint8] | None = None,
+    owner_name: str | None = None,
+    arc_jobs: list[tuple[str, str, NDArray[np.bool_]]] | None = None,
 ) -> tuple[int, str, list[float] | None]:
     """Paint one mouthful without covering drawn art; report paint and source.
 
@@ -1375,6 +1377,7 @@ def _mouth_fill(
         keep |= shaft
     if bool(xfill.any()):
         keep = np.asarray(keep | xfill, dtype=np.bool_)
+    cover_tone: tuple[int, int, int] | None = None
     if cover_close and owner_flat is not None:
         keep = np.asarray(fill | xfill, dtype=np.bool_)
         if win_out is not None and under_canvas is not None:
@@ -1394,6 +1397,26 @@ def _mouth_fill(
                 & np.asarray(child_own, dtype=np.bool_)
             )
             keep = np.asarray(keep | strip, dtype=np.bool_)
+            # The fill takes the dome's local tone, not the whole-part
+            # median: the mouth must read as surrounding surface, not a
+            # flat patch. Falls back to the owner flat when the mouth has
+            # no dome neighbourhood (uniform parts are unaffected).
+            tone_own = np.asarray(
+                np.asarray(mask, dtype=np.bool_)
+                & ~line_arr
+                & ~np.asarray(under_mask_now, dtype=np.bool_)
+                & (np.asarray(rgb)[..., :3].min(axis=2) < 250),
+                dtype=np.bool_,
+            )
+            # The neighbourhood must reach past the outline (about a
+            # line width wide), or the ring holds ink/under only and
+            # the tone silently falls back to the whole-part median.
+            reach = max(1, int(round(line_width)))
+            tone_near = np.asarray(
+                cv2.dilate(np.asarray(mouth_arr, dtype=np.uint8), touch_k, iterations=reach),
+                dtype=np.bool_,
+            )
+            cover_tone = _local_flat(rgb, tone_own, tone_near, touch_k) or owner_flat
     tip_xy: list[float] | None = None
     if tip is not None and frame is not None:
         axis, _cross, centre, _half = frame
@@ -1403,13 +1426,17 @@ def _mouth_fill(
         return 0, "", tip_xy
     paint = np.asarray(canvas)
     if owner_flat is not None and bool(disc.any()):
-        paint[np.asarray(disc & keep, dtype=np.bool_)] = owner_flat
+        paint[np.asarray(disc & keep, dtype=np.bool_)] = cover_tone if cover_tone is not None else owner_flat
     shaft_keep = np.asarray(keep & ~disc, dtype=np.bool_)
-    shaft_colour = owner_flat if cover_close else (tube if pair and tube is not None else owner_flat)
+    shaft_colour = (
+        (cover_tone if cover_tone is not None else owner_flat)
+        if cover_close
+        else (tube if pair and tube is not None else owner_flat)
+    )
     if shaft_colour is not None and bool(shaft_keep.any()):
         paint[shaft_keep] = shaft_colour
     if bool(xfill.any()) and owner_flat is not None:
-        paint[np.asarray(xfill, dtype=np.bool_)] = owner_flat
+        paint[np.asarray(xfill, dtype=np.bool_)] = cover_tone if cover_tone is not None else owner_flat
     under_mask = np.asarray(out_masks[under_name], dtype=np.bool_)
     inner = np.asarray(cv2.dilate(np.asarray(keep, dtype=np.uint8), touch_k), dtype=np.uint8) > 0
     rim = np.asarray(
@@ -1421,6 +1448,11 @@ def _mouth_fill(
     paint[rim] = ink
     mask[rim] = True
     mask[keep] = True
+    if cover_tone is not None and under_canvas is not None and arc_jobs is not None and owner_name is not None:
+        # The spanning arc is drawn after the covered-run drop, on final
+        # canvases (occluder copies already cleared), so the fit sees
+        # only the dome's own ink.
+        arc_jobs.append((owner_name, under_name, np.asarray(mouth_arr, dtype=np.bool_)))
     label = "own"
     if pair and tube is not None and tube != owner_flat:
         label = "tube"
@@ -1575,6 +1607,7 @@ def complete_parts(
             verdict = _mirror_pair_verdict(own_of[left[0]], own_of[right[0]])
             strip_force[left[0]] = verdict
             strip_force[right[0]] = verdict
+    arc_jobs: list[tuple[str, str, NDArray[np.bool_]]] = []
     canvases: dict[str, NDArray[np.uint8]] = {}
     for name in order:
         rgba = np.zeros((height, width, 4), np.uint8)
@@ -1648,6 +1681,8 @@ def complete_parts(
                     line_width,
                     cover_close=cover_close,
                     under_canvas=canvases[under_name],
+                    owner_name=name,
+                    arc_jobs=arc_jobs,
                 )
                 if tip_xy is not None:
                     tips[under_name] = tip_xy
@@ -1680,6 +1715,8 @@ def complete_parts(
                         win_out=tie_won,
                         cover_close=cover_close,
                         under_canvas=canvases[under_name],
+                        owner_name=name,
+                        arc_jobs=arc_jobs,
                     )
                     if tip_xy is not None:
                         tips[under_name] = tip_xy
@@ -1792,6 +1829,8 @@ def complete_parts(
                 line_width,
                 cover_close=cover_close,
                 under_canvas=canvases[under_name],
+                owner_name=name,
+                arc_jobs=arc_jobs,
             )
             if tip_xy is not None:
                 tips[under_name] = tip_xy
@@ -1826,6 +1865,8 @@ def complete_parts(
                     win_out=tied_won,
                     cover_close=cover_close,
                     under_canvas=canvases[under_name],
+                    owner_name=name,
+                    arc_jobs=arc_jobs,
                 )
                 if tip_xy is not None:
                     tips[under_name] = tip_xy
@@ -1897,6 +1938,60 @@ def complete_parts(
     _drop_covered_runs(
         out_masks, canvases, methods, notes, dome_chord_list, dome_fronts, rgb, line, line_width, seam_wins
     )
+    for arc_owner, arc_under, arc_mouth in arc_jobs:
+        # Spanning arc (review note 4): the dome's own outline continues
+        # across its mouth on the owner's canvas, so rotation shows a
+        # closed dome. The fit runs on final canvases, after the
+        # covered-run drop cleared occluder ink copies, and only the
+        # owner's own ink inside its mask seeds the circle.
+        own_mask = np.asarray(out_masks[arc_owner], dtype=np.bool_)
+        own_img = np.asarray(canvases[arc_owner])
+        under_img = np.asarray(canvases[arc_under])
+        under_alpha = under_img[..., 3] > 127
+        under_dark = under_alpha & (under_img[..., :3].max(axis=-1) < 40)
+        arc_lines = np.asarray(arc_mouth & under_dark, dtype=np.bool_)
+        own_alpha = own_img[..., 3] > 127
+        own_dark = own_alpha & (own_img[..., :3].max(axis=-1) < 40)
+        seed = np.asarray(
+            own_dark & own_mask & ~cv2.dilate(arc_lines.astype(np.uint8), touch_k).astype(bool),
+            dtype=np.bool_,
+        )
+        ys, xs = np.nonzero(seed)
+        if len(xs) < 8:
+            continue
+        span = float(max(xs.max() - xs.min() + 1, ys.max() - ys.min() + 1))
+        mat = np.column_stack((2.0 * xs, 2.0 * ys, np.ones(len(xs))))
+        vec = xs.astype(float) ** 2 + ys.astype(float) ** 2
+        sol, *_ = np.linalg.lstsq(mat, vec, rcond=None)
+        cx, cy = float(sol[0]), float(sol[1])
+        rr = float(np.sqrt(max(cx * cx + cy * cy + sol[2], 1.0)))
+        resid = np.abs(np.sqrt((xs - cx) ** 2 + (ys - cy) ** 2) - rr)
+        rms = float(resid.mean())
+        if rr < 5.0 * line_width or rr > 4.0 * span or rms > max(1.5, 0.10 * rr):
+            continue
+        if not (0 <= int(round(cx)) < width and 0 <= int(round(cy)) < height):
+            continue
+        if not bool(own_mask[int(round(cy)), int(round(cx))]):
+            continue
+        yy, xx = np.mgrid[0:height, 0:width]
+        rim = np.abs(np.sqrt((xx - cx) ** 2 + (yy - cy) ** 2) - rr) <= line_width / 2.0 + 0.5
+        zone = cv2.dilate(arc_mouth.astype(np.uint8), touch_k, iterations=max(1, int(round(line_width)))).astype(bool)
+        draw = np.asarray(rim & zone, dtype=np.bool_)
+        if not bool(draw.any()):
+            continue
+        arc_ink = _line_colour(rgb, np.asarray(own_mask & line, dtype=np.bool_))
+        if arc_ink is None:
+            continue
+        own_img[draw, :3] = arc_ink
+        own_img[draw, 3] = 255
+        out_masks[arc_owner] = np.asarray(own_mask | draw, dtype=np.bool_)
+        conts[arc_owner] = np.asarray(np.asarray(conts[arc_owner], dtype=np.bool_) | draw, dtype=np.bool_)
+        prev_win = seam_wins.get(arc_under)
+        seam_wins[arc_under] = draw if prev_win is None else np.asarray(prev_win | draw, dtype=np.bool_)
+        if "geometric" not in methods[arc_owner]:
+            methods[arc_owner].append("geometric")
+        note = f"dome arc of {int(draw.sum())} px over {arc_under}"
+        notes[arc_owner] = f"{notes[arc_owner]}; {note}" if arc_owner in notes else note
     return CompletionResult(
         masks=out_masks,
         methods=methods,
