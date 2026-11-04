@@ -605,7 +605,7 @@ def cmd_puppet_inbetween(args: argparse.Namespace) -> int:
             Path(args.out_dir),
             kind=str(args.ease),
             follow_through=int(args.follow_through),
-            hold_from_puppet=bool(args.hold_from_puppet),
+            hold_from_puppet=not bool(args.hold_from_key),
             workers=args.workers,
         )
     except Exception as exc:
@@ -960,9 +960,11 @@ def build_parser() -> argparse.ArgumentParser:
     puppet_inbetween.add_argument("--frames", type=int, required=True, help="frame count including both ends")
     puppet_inbetween.add_argument("--ease", default="inout", help="easing kind (inout, linear, in, out)")
     puppet_inbetween.add_argument("--follow-through", type=int, default=0, help="child-joint lag in frames (K-2a)")
-    puppet_inbetween.add_argument(
-        "--hold-from-puppet", action="store_true", help="holds from the puppet, not the key drawings"
+    holds = puppet_inbetween.add_mutually_exclusive_group()
+    holds.add_argument(
+        "--hold-from-key", action="store_true", help="holds are the key drawings (default: the puppet renders)"
     )
+    holds.add_argument("--hold-from-puppet", action="store_true", help="holds from the puppet (the default)")
     puppet_inbetween.add_argument("--workers", type=int, default=None, help="render workers (default: up to 4)")
     puppet_p.set_defaults(func=cmd_puppet)
 

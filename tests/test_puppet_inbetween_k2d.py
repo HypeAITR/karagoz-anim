@@ -104,7 +104,7 @@ def test_key_holds_first_and_last_equal_key_drawings(tmp_path: Path) -> None:
     pose_x, pose_y = _pose({"arm": 10.0, "fore": 0.0}), _pose({"arm": 10.0, "fore": 30.0})
     tj = _write_transition(tmp_path, puppet, images, pose_x, pose_y)
     out = tmp_path / "out"
-    res = inbetween(set_dir, tj, 3, out)
+    res = inbetween(set_dir, tj, 3, out, hold_from_puppet=False)
     assert set(res.report) == set(REPORT_KEYS)
     assert all(set(row) == set(FRAME_KEYS) for row in res.report["frames"])
     assert len(res.frames) == 3 == res.report["n_frames"]
@@ -235,8 +235,25 @@ def test_cut_rows_measure_key_vs_puppet(tmp_path: Path) -> None:
         key = np.asarray(opened.convert("RGB")).copy()
     key[80:90, 80:90] = (0, 0, 0)  # extra ink inside the locked torso
     Image.fromarray(key).save(tj.parent / "X.png")
-    res = inbetween(set_dir, tj, 3, tmp_path / "out")
+    res = inbetween(set_dir, tj, 3, tmp_path / "out", hold_from_puppet=False)
     assert res.report["frames"][0]["locked_change_px"] > 0
+
+
+def test_default_holds_are_the_puppet_renders(tmp_path: Path) -> None:
+    """Holds default to the puppet: no key-vs-puppet jump at either cut (Kutay, 4 Nov)."""
+    puppet, images = build_synth_puppet()
+    set_dir = _write_synth_set(tmp_path, puppet, images)
+    tj = _write_transition(
+        tmp_path, puppet, images, _pose({"arm": 10.0, "fore": 0.0}), _pose({"arm": 10.0, "fore": 30.0})
+    )
+    with Image.open(tj.parent / "X.png") as opened:
+        key = np.asarray(opened.convert("RGB")).copy()
+    key[80:90, 80:90] = (0, 0, 0)  # the key drawing differs from the puppet
+    Image.fromarray(key).save(tj.parent / "X.png")
+    res = inbetween(set_dir, tj, 3, tmp_path / "out")
+    assert res.report["hold_from_puppet"] is True
+    assert not np.array_equal(_rgba(res.frames[0])[..., :3], key)  # frame 0 is the puppet, not X.png
+    assert [row["locked_change_px"] for row in res.report["frames"]] == [0, 0, 0]
 
 
 def test_z_pair_without_pixel_support_does_not_switch(tmp_path: Path) -> None:

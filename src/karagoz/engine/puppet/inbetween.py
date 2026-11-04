@@ -662,7 +662,7 @@ def inbetween(
     *,
     kind: str = "inout",
     follow_through: int = 0,
-    hold_from_puppet: bool = False,
+    hold_from_puppet: bool = True,
     workers: int | None = None,
 ) -> InbetweenResult:
     """Render one X->Y interval as numbered frames plus preview, sheet and report.
@@ -674,12 +674,13 @@ def inbetween(
     with :func:`render_frame` in a process pool (one ``prepare_parts`` per
     worker; ``workers`` caps the pool, None keeps min(4, n)), z order switches
     per pair on the first non-overlap frame (only with pixel support, named in
-    ``z_switches``), holds are the key drawings unless ``hold_from_puppet``
-    (puppet frames sit on the keys' paper tone), and per-frame measures plus
-    the two cuts land in ``report`` (also ``inbetween.json``). The f0 and last
-    rows measure the key-vs-puppet cuts; ``ok`` judges the inner pairs only
-    (locked 0, gap 0, no bbox flag) since a key hold always differs by the fit
-    residual.
+    ``z_switches``), holds are the puppet renders on the keys' paper tone (the
+    default: a key hold jumps by the fit residual at every cut) or, with
+    ``hold_from_puppet=False``, the key drawings themselves, and per-frame
+    measures plus the two cuts land in ``report`` (also ``inbetween.json``).
+    With key holds the f0 and last rows measure the key-vs-puppet cuts; ``ok``
+    judges the inner pairs only (locked 0, gap 0, no bbox flag) since a key
+    hold always differs by the fit residual.
     """
     set_path, json_path, out_path = Path(set_dir), Path(transition_json), Path(out_dir)
     if n_frames < 2:
