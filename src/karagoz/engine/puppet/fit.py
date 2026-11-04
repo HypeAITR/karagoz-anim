@@ -82,6 +82,10 @@ OFFSET_PRIOR = 0.0005
 # the engine must not produce an absurd pose).
 NEVER_FIT_REASON = "puppet does not fit this drawing"
 SECOND_PASS = True
+# From-scratch chain greedy reruns with its first free joint pinned to this
+# many candidates (K-0r: a joint decided against a T-pose limb parks at its
+# limit while the children compensate). 0 turns the beam off.
+GREEDY_BEAM = 3
 
 
 @dataclass
@@ -998,6 +1002,107 @@ def _greedy_from(
     )
 
 
+def _greedy_beam(
+    puppet: Puppet,
+    work: Pose,
+    chain: list[str],
+    from_angles: dict[str, float],
+    samples: dict[str, PartSamples],
+    feat: DrawingFeatures,
+    tau: float,
+    center: dict[str, float],
+    blocked: NDArray[np.bool_] | None,
+    pair_grid: bool,
+    frozen: dict[str, float],
+    explained: NDArray[np.bool_] | None,
+) -> tuple[dict[str, float], dict[str, list[float]], dict[str, float], dict[str, list[float]]]:
+    """From-scratch greedy with a beam on the chain's first free joint (K-0r).
+
+    The greedy decides each joint with its downstream at rest, so the first
+    joint (a cap with a narrow range, a hip) is chosen against a T-pose limb
+    and its children then compensate (cap at its limit, arm leaning) in a
+    basin no single-joint descent leaves. The beam reruns the whole greedy
+    with that joint pinned to each of its sweep candidates (at most
+    ``GREEDY_BEAM``) plus the unpinned run, and keeps the feasible candidate
+    with the highest joint objective among those whose plain part-score sum
+    is not below the unpinned run's. Only a narrow first joint (limit range
+    under ``PEAK_SEP_DEG``) takes the beam: a wide one ranks on its own
+    sweep. Never worse than the plain greedy: the unpinned run is one of the
+    candidates. Returns the winner's angles and offsets, then the unpinned
+    run's (the caller polishes both and keeps the better finished fit).
+    """
+    runs: list[tuple[dict[str, float], dict[str, list[float]]]] = []
+    plain, off_plain, _ = _greedy_from(
+        puppet,
+        work,
+        chain,
+        from_angles,
+        samples,
+        feat,
+        tau,
+        center,
+        None,
+        blocked,
+        pair_grid=pair_grid,
+        frozen=frozen,
+        explained=explained,
+    )
+    runs.append((plain, off_plain))
+    first = next((m for m in chain if m not in frozen), None)
+    lim = _limits_of(puppet, first) if first is not None else None
+    # Only a narrow joint (its range cannot host a second peak) is decided
+    # blind: its own pixels barely change across the range, so the T-pose
+    # downstream decides it. A wide first joint ranks on its own sweep.
+    narrow = lim is not None and 0.0 <= float(lim[1]) - float(lim[0]) < PEAK_SEP_DEG
+    if first is not None and GREEDY_BEAM > 0 and narrow:
+        cands = _sweep_cands(0.0, None, lim)[:GREEDY_BEAM]
+        for a in cands:
+            if abs(_ang_dist(float(a), float(plain.get(first, 0.0)))) < 1e-9:
+                continue
+            pinned, off_pin, _ = _greedy_from(
+                puppet,
+                work,
+                chain,
+                from_angles,
+                samples,
+                feat,
+                tau,
+                center,
+                None,
+                blocked,
+                pair_grid=pair_grid,
+                frozen={**frozen, first: float(a)},
+                explained=explained,
+            )
+            runs.append((pinned, off_pin))
+    best: tuple[dict[str, float], dict[str, list[float]]] = runs[0]
+    best_v = -math.inf
+    plain_floor = -math.inf
+    for k, (angles, offs) in enumerate(runs):
+        trial = work.model_copy(update={"angles": {**work.angles, **angles}, "offset": dict(offs)})
+        feas, _ = chain_feasible(puppet, trial, chain, samples, feat.line.shape)
+        value = _offset_value(puppet, trial, chain, samples, feat, tau, center, blocked, explained)
+        plain_sum = float(
+            sum(
+                score_samples(samples[m], np.asarray(part_matrix3(puppet, trial, m)[:2], dtype=np.float64), feat, tau)
+                for m in chain
+                if m in samples
+            )
+        )
+        if k == 0:
+            plain_floor = plain_sum
+        if not feas:
+            value = -math.inf
+        # A pinned run must dominate the unpinned one: more joint objective
+        # AND no lower own-part agreement (the pose total). Exclusivity alone
+        # must not buy a pose that matches its parts worse.
+        if k > 0 and plain_sum < plain_floor:
+            continue
+        if value > best_v:
+            best, best_v = (angles, offs), value
+    return best[0], best[1], runs[0][0], runs[0][1]
+
+
 def _offset_disc(slack: float, tau: float) -> list[tuple[float, float]]:
     """Coarse search points inside the slack disc: centre plus rim rings.
 
@@ -1221,6 +1326,118 @@ def _fit_offsets(
             work.offset[name] = [float(best_dx), float(best_dy)]
 
 
+def _polish_chain(
+    puppet: Puppet,
+    base: Pose,
+    chain: list[str],
+    samples: dict[str, PartSamples],
+    feat: DrawingFeatures,
+    tau: float,
+    center: dict[str, float],
+    blocked: NDArray[np.bool_] | None,
+    explained: NDArray[np.bool_] | None,
+    stay: dict[str, float],
+    best_total: float,
+    best_angles: dict[str, float],
+    best_offsets: dict[str, list[float]],
+) -> Pose:
+    """Refine one chain candidate: coordinate descent, then offsets (on a copy).
+
+    The descent maximizes plain part sums and is kept only when the joint
+    objective does not drop below ``best_total`` (the candidate's ranked
+    value); offsets then get the coarse grid and descent.
+    """
+    work = base.model_copy(deep=True)
+    best_angles = dict(best_angles)
+    # Restore the winner into work for the descent below.
+    for m in chain:
+        work.angles[m] = float(best_angles[m])
+    for m in chain:
+        if m in best_offsets:
+            work.offset[m] = list(best_offsets[m])
+        else:
+            work.offset.pop(m, None)
+    # Coordinate descent on the joint objective. Turning one joint only moves
+    # its downstream members, so candidates re-score just those (cached plain
+    # sums for the rest); only the turned joint's prior term changes.
+    part_score: dict[str, float] = {}
+    settled = work.model_copy(update={"angles": dict(best_angles)})
+    for member in chain:
+        mat = np.asarray(part_matrix3(puppet, settled, member)[:2], dtype=np.float64)
+        part_score[member] = score_samples(samples[member], mat, feat, tau, None)
+    best_plain = float(sum(part_score.values()))
+    best_prior = REST_PRIOR * sum(
+        abs(_ang_dist(float(best_angles.get(m, 0.0)), float(center.get(m, 0.0)))) for m in chain
+    )
+    pre_descent = dict(best_angles)
+    for step in (5.0, 2.0, 0.5, 0.25):
+        improved = True
+        sweeps = 0
+        while improved and sweeps < 4:
+            improved = False
+            sweeps += 1
+            for j, name in enumerate(chain):
+                if name in stay:
+                    continue
+                affected = chain[j:]
+                old_term = REST_PRIOR * abs(_ang_dist(float(best_angles[name]), float(center.get(name, 0.0))))
+                lim = _limits_of(puppet, name)
+                cands = _clip_cands([best_angles[name] - step, best_angles[name] + step], lim)
+                for cand in cands:
+                    trial = work.model_copy(update={"angles": {**best_angles, name: float(cand)}})
+                    new = 0.0
+                    fresh: dict[str, float] = {}
+                    for member in affected:
+                        mat = np.asarray(part_matrix3(puppet, trial, member)[:2], dtype=np.float64)
+                        fresh[member] = score_samples(samples[member], mat, feat, tau, None)
+                        new += fresh[member]
+                    old = sum(part_score[m] for m in affected)
+                    new_term = REST_PRIOR * abs(_ang_dist(float(cand), float(center.get(name, 0.0))))
+                    if best_plain - old + new - (best_prior - old_term + new_term) > best_plain - best_prior:
+                        best_plain = best_plain - old + new
+                        best_prior = best_prior - old_term + new_term
+                        best_angles[name] = float(cand)
+                        part_score.update(fresh)
+                        improved = True
+    # The descent maximizes plain part sums; keep it only when the exclusive
+    # joint objective agrees it did not wander back into a fold.
+    descended = work.model_copy(update={"angles": dict(best_angles)})
+    if chain_objective(puppet, descended, chain, samples, feat, tau, center, blocked, explained) < best_total:
+        best_angles = dict(pre_descent)
+    for name in chain:
+        work.angles[name] = float(best_angles[name])
+    _fit_offsets(puppet, work, chain, samples, feat, tau, center, blocked, explained, stay, coarse=True, refine=True)
+    return work
+
+
+def _dominates(
+    puppet: Puppet,
+    first: Pose,
+    second: Pose,
+    chain: list[str],
+    samples: dict[str, PartSamples],
+    feat: DrawingFeatures,
+    tau: float,
+    center: dict[str, float],
+    blocked: NDArray[np.bool_] | None,
+    explained: NDArray[np.bool_] | None,
+) -> bool:
+    """True when ``first`` beats ``second`` on the joint objective without a lower own-part sum."""
+    values = []
+    for pose in (first, second):
+        feas, _ = chain_feasible(puppet, pose, chain, samples, feat.line.shape)
+        value = _offset_value(puppet, pose, chain, samples, feat, tau, center, blocked, explained)
+        plain = float(
+            sum(
+                score_samples(samples[m], np.asarray(part_matrix3(puppet, pose, m)[:2], dtype=np.float64), feat, tau)
+                for m in chain
+                if m in samples
+            )
+        )
+        values.append((value if feas else -math.inf, plain))
+    return values[0][0] > values[1][0] and values[0][1] >= values[1][1]
+
+
 def fit_chain(
     puppet: Puppet,
     pose: Pose,
@@ -1232,6 +1449,7 @@ def fit_chain(
     anchor: dict[str, float] | None = None,
     local_deg: float | None = None,
     frozen: dict[str, float] | None = None,
+    beam: bool = True,
 ) -> Pose:
     """Fit a whole limb jointly (2-5 angles).
 
@@ -1256,7 +1474,9 @@ def fit_chain(
     its own chain (see :func:`chain_feasible`) loses to the best feasible
     candidate (the straight continuation always runs); a chain kept unfolded
     without a seating fit is flagged in ``pose.chain_notes`` with the
-    never-fit reason.
+    never-fit reason. ``beam`` runs the from-scratch greedy with the
+    narrow-first-joint beam (:func:`_greedy_beam`); the view fit uses it
+    only in its last pass, where the other chains' context is final.
     """
     feat = features if features is not None else drawing_features(np.asarray(drawing, dtype=np.uint8))
     if samples is None:
@@ -1366,21 +1586,38 @@ def fit_chain(
             work.offset[m] = list(offsets_a[m])
         else:
             work.offset.pop(m, None)
-    greedy_a, off_ga, _ = _greedy_from(
-        puppet,
-        work,
-        chain,
-        from_angles,
-        samples,
-        feat,
-        tau,
-        center,
-        local_deg,
-        blocked,
-        pair_grid=pair_grid,
-        frozen=stay,
-        explained=explained,
-    )
+    beam_plain: tuple[dict[str, float], dict[str, list[float]]] | None = None
+    if beam and anchor is None and local_deg is None:
+        greedy_a, off_ga, plain_a, off_pa = _greedy_beam(
+            puppet, work, chain, from_angles, samples, feat, tau, center, blocked, pair_grid, stay, explained
+        )
+        if any(abs(_ang_dist(float(greedy_a.get(m, 0.0)), float(plain_a.get(m, 0.0)))) > 1e-9 for m in chain):
+            beam_plain = (plain_a, off_pa)
+    else:
+        greedy_a, off_ga, _ = _greedy_from(
+            puppet,
+            work,
+            chain,
+            from_angles,
+            samples,
+            feat,
+            tau,
+            center,
+            local_deg,
+            blocked,
+            pair_grid=pair_grid,
+            frozen=stay,
+            explained=explained,
+        )
+    # The candidate set without the beam's pinned winner (today's path):
+    # polished alongside the beam's set below when the two differ.
+    alt_total, alt_angles, alt_offsets = best_total, dict(best_angles), dict(best_offsets)
+    if beam_plain is not None:
+        trial_pa = work.model_copy(update={"angles": {**work.angles, **beam_plain[0]}, "offset": dict(beam_plain[1])})
+        feas_pa, _ = chain_feasible(puppet, trial_pa, chain, samples, feat.line.shape)
+        value_pa = _offset_value(puppet, trial_pa, chain, samples, feat, tau, center, blocked, explained)
+        if feas_pa and value_pa > alt_total:
+            alt_total, alt_angles, alt_offsets = value_pa, dict(beam_plain[0]), dict(beam_plain[1])
     trial_ga = work.model_copy(update={"angles": {**work.angles, **greedy_a}, "offset": dict(off_ga)})
     feas_ga, _ = chain_feasible(puppet, trial_ga, chain, samples, feat.line.shape)
     value_ga = _offset_value(puppet, trial_ga, chain, samples, feat, tau, center, blocked, explained)
@@ -1424,64 +1661,45 @@ def fit_chain(
         value_gb = _offset_value(puppet, trial_gb, chain, samples, feat, tau, center, blocked, explained)
         if feas_gb and value_gb > best_total:
             best_total, best_angles, best_offsets = value_gb, dict(greedy_b), dict(off_gb)
-    # Restore the winner into work for the descent below.
-    for m in chain:
-        work.angles[m] = float(best_angles[m])
-    for m in chain:
-        if m in best_offsets:
-            work.offset[m] = list(best_offsets[m])
-        else:
-            work.offset.pop(m, None)
-    # Coordinate descent on the joint objective. Turning one joint only moves
-    # its downstream members, so candidates re-score just those (cached plain
-    # sums for the rest); only the turned joint's prior term changes.
-    part_score: dict[str, float] = {}
-    settled = work.model_copy(update={"angles": dict(best_angles)})
-    for member in chain:
-        mat = np.asarray(part_matrix3(puppet, settled, member)[:2], dtype=np.float64)
-        part_score[member] = score_samples(samples[member], mat, feat, tau, None)
-    best_plain = float(sum(part_score.values()))
-    best_prior = REST_PRIOR * sum(
-        abs(_ang_dist(float(best_angles.get(m, 0.0)), float(center.get(m, 0.0)))) for m in chain
+        if feas_gb and value_gb > alt_total:
+            alt_total, alt_angles, alt_offsets = value_gb, dict(greedy_b), dict(off_gb)
+    base_work = work.model_copy(deep=True)
+    work = _polish_chain(
+        puppet,
+        base_work,
+        chain,
+        samples,
+        feat,
+        tau,
+        center,
+        blocked,
+        explained,
+        stay,
+        best_total,
+        best_angles,
+        best_offsets,
     )
-    pre_descent = dict(best_angles)
-    for step in (5.0, 2.0, 0.5, 0.25):
-        improved = True
-        sweeps = 0
-        while improved and sweeps < 4:
-            improved = False
-            sweeps += 1
-            for j, name in enumerate(chain):
-                if name in stay:
-                    continue
-                affected = chain[j:]
-                old_term = REST_PRIOR * abs(_ang_dist(float(best_angles[name]), float(center.get(name, 0.0))))
-                lim = _limits_of(puppet, name)
-                cands = _clip_cands([best_angles[name] - step, best_angles[name] + step], lim)
-                for cand in cands:
-                    trial = work.model_copy(update={"angles": {**best_angles, name: float(cand)}})
-                    new = 0.0
-                    fresh: dict[str, float] = {}
-                    for member in affected:
-                        mat = np.asarray(part_matrix3(puppet, trial, member)[:2], dtype=np.float64)
-                        fresh[member] = score_samples(samples[member], mat, feat, tau, None)
-                        new += fresh[member]
-                    old = sum(part_score[m] for m in affected)
-                    new_term = REST_PRIOR * abs(_ang_dist(float(cand), float(center.get(name, 0.0))))
-                    if best_plain - old + new - (best_prior - old_term + new_term) > best_plain - best_prior:
-                        best_plain = best_plain - old + new
-                        best_prior = best_prior - old_term + new_term
-                        best_angles[name] = float(cand)
-                        part_score.update(fresh)
-                        improved = True
-    # The descent maximizes plain part sums; keep it only when the exclusive
-    # joint objective agrees it did not wander back into a fold.
-    descended = work.model_copy(update={"angles": dict(best_angles)})
-    if chain_objective(puppet, descended, chain, samples, feat, tau, center, blocked, explained) < best_total:
-        best_angles = dict(pre_descent)
-    for name in chain:
-        work.angles[name] = float(best_angles[name])
-    _fit_offsets(puppet, work, chain, samples, feat, tau, center, blocked, explained, stay, coarse=True, refine=True)
+    if beam_plain is not None and alt_angles != best_angles:
+        # The beam's pick is ranked before refinement; the plain path may
+        # refine past it. Keep the beam only when its finished fit wins on
+        # the joint objective without lowering the chain's own part scores.
+        other = _polish_chain(
+            puppet,
+            base_work,
+            chain,
+            samples,
+            feat,
+            tau,
+            center,
+            blocked,
+            explained,
+            stay,
+            alt_total,
+            alt_angles,
+            alt_offsets,
+        )
+        if not _dominates(puppet, work, other, chain, samples, feat, tau, center, blocked, explained):
+            work = other
     # Never fold: an infeasible winner (a member stacked on its own chain
     # past OVERLAP_MAX, seams excluded) loses to the best feasible
     # candidate. The straight continuation (rest, or X under a transition
@@ -1917,11 +2135,13 @@ def fit_view_pose(
     pose = Pose(view=loaded.name, canvas=[int(dw), int(dh)])
     pose = fit_root(loaded.puppet, pose, feat.rgb, own_samples, feat)
     order = chain_order(loaded.puppet)
+    # The narrow-joint beam runs once, in the last pass: there every other
+    # chain is placed, so the blocked/explained context it ranks in is final.
     for leaf in order:
-        pose = fit_chain(loaded.puppet, pose, leaf, feat.rgb, own_samples, feat)
+        pose = fit_chain(loaded.puppet, pose, leaf, feat.rgb, own_samples, feat, beam=not second_pass)
     if second_pass:
         for leaf in order:
-            pose = fit_chain(loaded.puppet, pose, leaf, feat.rgb, own_samples, feat)
+            pose = fit_chain(loaded.puppet, pose, leaf, feat.rgb, own_samples, feat, beam=True)
     pose = resolve_z(loaded.puppet, pose, own_samples, feat)
     tau = _tau_for(loaded.puppet, pose)
     for name in loaded.puppet.parts:

@@ -78,6 +78,57 @@ class PuppetFiles:
     out_dir: Path
 
 
+# A covering part hiding this much of a child's (or parent's) DRAWN interior
+# under its own completion means the reference shows the other part in front:
+# the preset z disagrees with the drawing at that overlap (K-0r). Tube ends
+# inside cuffs and caps hide the same pixel class but smaller (measured on
+# the robot: at most 3.5k px and 27 %, a front-drawn hip pad 5.3k px / 31 %).
+Z_CONFLICT_MIN_PX = 2000
+Z_CONFLICT_MIN_FRAC = 0.25
+
+
+def z_order_conflicts(
+    cfg: PuppetConfig,
+    drawn: dict[str, NDArray[np.bool_]],
+    finished: dict[str, NDArray[np.bool_]],
+    line: NDArray[np.bool_],
+) -> list[dict[str, Any]]:
+    """Parent/child overlaps where the reference's visible owner contradicts the preset z.
+
+    For every parent/child pair, the part lower in z owns drawn (split)
+    interior pixels that the higher part's finished mask covers although the
+    higher part never drew them there: at rest the higher part's completion
+    paints over art the reference shows on top. Counted on interior pixels
+    (shared outlines excluded); reported when the count reaches
+    ``Z_CONFLICT_MIN_PX`` and ``Z_CONFLICT_MIN_FRAC`` of the lower part's
+    drawn interior. Data for the reviewer: the build still runs.
+    """
+    line_arr = np.asarray(line, dtype=np.bool_)
+    out: list[dict[str, Any]] = []
+    for part in cfg.parts:
+        if part.parent is None or part.hidden or cfg.by_name[part.parent].hidden:
+            continue
+        a, b = part.name, part.parent
+        if a not in drawn or b not in drawn or cfg.by_name[a].z == cfg.by_name[b].z:
+            continue
+        upper, lower = (a, b) if cfg.by_name[a].z > cfg.by_name[b].z else (b, a)
+        lower_drawn = np.asarray(drawn[lower], dtype=np.bool_) & ~line_arr
+        hidden = lower_drawn & np.asarray(finished[upper], dtype=np.bool_) & ~np.asarray(drawn[upper], dtype=np.bool_)
+        px = int(hidden.sum())
+        total = max(int(lower_drawn.sum()), 1)
+        if px >= Z_CONFLICT_MIN_PX and px >= Z_CONFLICT_MIN_FRAC * total:
+            out.append(
+                {
+                    "upper": upper,
+                    "lower": lower,
+                    "hidden_drawn_px": px,
+                    "frac_of_lower": round(px / total, 3),
+                    "note": f"reference shows {lower} in front of {upper} here; preset z puts {upper} on top",
+                }
+            )
+    return out
+
+
 def estimate_line_width(line: NDArray[np.bool_]) -> float:
     """Median-thick black line: twice the 90th percentile of the ink distance."""
     if not bool(line.any()):
@@ -945,6 +996,7 @@ def build_puppet(
         "exposed_completion_px": exposed,
         "pair_ends": pair_ends,
         "pair_ends_ok": pair_ok,
+        "z_conflicts": z_order_conflicts(cfg, split_masks, finished_masks, np.asarray(split.line, dtype=np.bool_)),
         "swept_cut_px": swept,
         "seam_cover": {name: list(plates) for name, plates in full.seam_cover.items()},
         "seam_wins": seam_win_files,

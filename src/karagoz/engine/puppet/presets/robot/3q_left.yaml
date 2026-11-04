@@ -105,7 +105,9 @@ parts:
     parent: torso
     concepts: ["robot leg"]
     seed: [[1255, 1235], [1300, 1285], [1305, 1325], [1300, 1365]]
-    z: -1
+    # K-0r: the reference draws this hip pad in front of the torso (its whole
+    # oval outline shows); z above the torso, below the boot and the arms.
+    z: 1
   - name: boot_l
     parent: leg_l
     concepts: ["robot boot"]
